@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wellmodel"
+version = "0.1.0"
+description = "Oil-well modelling: VLP/IPR nodal analysis with automated test QC, multi-test matching, correlation selection, probabilistic runs and transient screening"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10", "pandas>=2.0", "matplotlib>=3.7"]
+
+[project.optional-dependencies]
+dev = ["pytest", "jupyter"]
+app = ["streamlit>=1.40"]
+
+[tool.setuptools]
+packages = ["wellmodel"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
