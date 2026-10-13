@@ -25,6 +25,7 @@ from wellmodel import eos as wm_eos
 from wellmodel import inflow as ipr
 from wellmodel import inflow_adv as ipr2
 from wellmodel import completion as wcomp
+from wellmodel import mpp as wmpp
 from wellmodel import options as wopt
 from wellmodel import plotting as wplt
 
@@ -317,6 +318,19 @@ def eos_calculate(text: str, name: str, t_f: float):
                   reverse=True)
     table = f.property_table(t_f, pres)
     return {"psat": ps, "sat_type": typ, "sep": sep, "table": table, "p_res": p_res}
+
+
+@st.cache_data(show_spinner=False)
+def eos_mpp_table(text: str, name: str, t_f: float, pr: float, rel: tuple, gas: bool, wgr: float):
+    """Multiphase pseudo-pressure integrand for the PRP fluid (cached: one flash per pressure)."""
+    f = wm_eos.EOSFluid(wm_eos.parse_prp(text, name))
+    res = eos_calculate(text, name, t_f)
+    scf = float(res["sep"]["stages"]["Gas (scf per lbmol feed)"].sum())
+    unit = scf / 1000 if gas else float(res["sep"]["stb_per_lbmol"])
+    if unit <= 0:
+        raise ValueError("The PRP fluid gives no " + ("separator gas." if gas else "stock-tank oil."))
+    w = wgr / 1e6 * scf if gas else 0.0
+    return wmpp.eos_table(f, t_f, wmpp.pressure_grid(pr, res["psat"], 40), wmpp.Corey(*rel), unit, w), res["psat"]
 
 
 @st.cache_data(show_spinner=False)
@@ -710,19 +724,19 @@ def gas_pvt_fn(opts_now, t_f):
 
 
 # ---------------------------------------------------------------- IPR helpers
-VERTICAL_SKIN_MODELS = {"Darcy", "Fetkovich", "Jones", "Transient", "Back pressure", "Dual Porosity"}
+VERTICAL_SKIN_MODELS = {"Darcy", "Fetkovich", "Jones", "Transient", "Back pressure", "Dual Porosity",
+                        "Multiphase Pseudo Pressure"}
 HORIZONTAL_MODELS = {"Horizontal Well - No Flow Boundaries", "Horizontal Well - Transverse Vertical Fractures",
                      "Horizontal Well - friction dP"}
 OIL_ADV = ["Hydraulically Fractured Well", "Horizontal Well - No Flow Boundaries",
            "Horizontal Well - Transverse Vertical Fractures", "Horizontal Well - friction dP",
-           "Dual Porosity", "Multi-layer", "Multi-layer with dP loss in wellbore"]
+           "Dual Porosity", "Multi-layer", "Multi-layer with dP loss in wellbore", "Multiphase Pseudo Pressure"]
 GAS_ADV = OIL_ADV + ["Modified Isochronal"]
 STILL_NOT = {
     "oil": ["Kuchuk & Goode horizontal and constant-pressure upper boundary (equations not public here - "
             "Babu & Odeh and Joshi are provided)", "SkinAide (ELF proprietary method)",
             "Thermally Induced Fracture (water injectors - injection IPRs come with injector support)"],
-    "gas": ["Petroleum Experts multiphase pseudo-pressure (proprietary relative-permeability correction)",
-            "Kuchuk & Goode horizontal (Babu & Odeh and Joshi are provided)", "SkinAide (ELF proprietary method)"],
+    "gas": ["Kuchuk & Goode horizontal (Babu & Odeh and Joshi are provided)", "SkinAide (ELF proprietary method)"],
 }
 
 
@@ -792,6 +806,86 @@ def profile_plot(curve):
 
 DIETZ_HELP = ("Dietz shape factor for the drainage area and well position. Typical values: "
               + "; ".join(f"{k} {v:g}" for k, v in ipr.DIETZ_SHAPES.items()) + ".")
+
+
+def blackoil_model(o):
+    """Matched (or default Standing / Beal) black-oil model from the PVT tab, or None."""
+    model = ss.get("pvt_model")
+    if model is None:
+        inp, _ = current_inputs()
+        if inp.check():
+            return None
+        model = bo.BlackOilModel(inp, "standing", "beal", {})
+    return model
+
+
+def mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr):
+    st.markdown("**Relative permeability (Corey, gas-oil at connate water)**")
+    c = st.columns(4)
+    swc = num(c[0], "Connate water saturation Swc", "mpp_swc", 0.2, 0.0, 0.9, 0.01)
+    sorg = num(c[1], "Residual oil saturation to gas Sorg", "mpp_sorg", 0.2, 0.0, 0.9, 0.01)
+    sgc = num(c[2], "Critical gas saturation Sgc", "mpp_sgc", 0.05, 0.0, 0.9, 0.01)
+    kro_e = num(c[3], "kro end point", "mpp_kro", 1.0, 0.01, 1.0, 0.05)
+    c = st.columns(4)
+    krg_e = num(c[0], "krg end point", "mpp_krg", 1.0, 0.01, 1.0, 0.05)
+    no = num(c[1], "Corey exponent oil", "mpp_no", 2.0, 0.5, 10.0, 0.1)
+    ng = num(c[2], "Corey exponent gas", "mpp_ng", 2.0, 0.5, 10.0, 0.1)
+    rel_t = (swc, sorg, sgc, kro_e, krg_e, no, ng)
+    rel = wmpp.Corey(*rel_t)
+    eos = o.method == "eos" and ss.get("prp_text")
+    notes = ["Steady-state (Fevang & Whitson) pseudo-pressure: the flowing mixture has the producing "
+             "composition at every pressure; relative permeabilities split the mobility between phases."]
+    d_nd, psat, params = 0.0, None, {}
+    if gas:
+        dm = sel(c[3], "Non-Darcy flow factor", ["None", "Calculated", "Entered"], "mpp_d_method")
+        if dm == "Calculated":
+            d_nd = ipr.non_darcy_d(r["k"], r["h"], r["hp"], r["rw"], gasp["mu_r"], gasp["sg"])
+        elif dm == "Entered":
+            d_nd = num(st.columns(4)[0], "D (1/(Mscf/d))", "mpp_d", 1e-5, 0.0, 1.0, None, "%.3e")
+    with st.spinner("Calculating the pseudo-pressure integral..."):
+        if eos:
+            table, psat = eos_mpp_table(ss["prp_text"], ss.get("prp_name", ""), float(t_f), float(pr), rel_t,
+                                        gas, float(wgr or 0.0))
+            notes.append("Phase split, densities and viscosities from flashing the PRP fluid at each pressure.")
+        elif gas:
+            table = wmpp.gas_correlation_table(gasp["mu_z"], wmpp.pressure_grid(pr), t_f, rel)
+            notes.append("Gas correlations cannot drop out liquid, so this is single-phase gas pseudo-pressure. "
+                         "Choose Equation of state in the Options summary to model the condensate bank.")
+        else:
+            model = blackoil_model(o)
+            psat = model.bubble_point(t_f)
+            rp = num(c[3], "Producing GOR (scf/STB)", "mpp_rp", float(model.inp.rsb), 0.0, 1e6, 10.0,
+                     help="Total producing GOR. Above the solution GOR, free gas also flows above the bubble point.")
+            params["Producing GOR (scf/STB)"] = rp
+            table = wmpp.blackoil_table(lambda p: model.table(t_f, p), wmpp.pressure_grid(pr, psat), rp,
+                                        wc / max(1 - wc, 1e-9), rel)
+    return wmpp.multiphase_pseudo_pressure("gas" if gas else "oil", pr, r["k"], r["h"], r["area"], r["ca"],
+                                           r["rw"], skin, table, d_nd=d_nd, psat=psat,
+                                           wor=0.0 if gas else wc / max(1 - wc, 1e-9), params=params, notes=notes)
+
+
+def mpp_plot(curve):
+    t = curve.mpp_table
+    p = t["Pressure (psia)"]
+    gas = curve.fluid == "gas"
+    fig, (a, b) = plt.subplots(1, 2, figsize=(11, 3.6))
+    a.plot(p, t["So"], color=wplt.SERIES[1], label="Condensate saturation" if gas else "Oil saturation")
+    a.plot(p, t["kro"], color=wplt.SERIES[2], ls="--", label="kro")
+    a.plot(p, t["krg"], color=wplt.SERIES[0], ls="--", label="krg")
+    a.set_ylim(0, 1.02); a.set_xlabel("Pressure (psia)"); a.set_ylabel("Saturation / relative permeability")
+    a.set_title("Flowing saturation and relative permeability", fontsize=10)
+    a.legend(fontsize=8)
+    b.plot(p, t["Integrand"], color=wplt.SERIES[0], label="two-phase")
+    b.plot(p, t["Integrand single-phase"], color=wplt.INK2, ls="--", label="single-phase")
+    b.set_xlabel("Pressure (psia)"); b.set_ylabel("dm/dp")
+    b.set_title("Pseudo-pressure integrand (area = deliverability)", fontsize=10)
+    b.legend(fontsize=8)
+    psat = curve.params.get("Saturation pressure (psia)")
+    for ax in (a, b):
+        if psat and psat < p.max():
+            ax.axvline(psat, color=wplt.INK2, lw=0.8, ls=":")
+    fig.tight_layout()
+    return fig
 
 
 def dietz_input(col):
@@ -1036,7 +1130,7 @@ with tabs[2]:
             mu_used = gasp.get("mu_r") if gas else (pvt["mu"] if pvt else None)
             try:
                 if model in VERTICAL_SKIN_MODELS:
-                    r = reservoir_props(nd=(model == "Jones"))
+                    r = reservoir_props(nd=(model == "Jones" or (gas and model == "Multiphase Pseudo Pressure")))
                     skin, skin_parts = skin_panel(o, r["k"], r["rw"], r["h"], fluid)
                     kh_for_skin = r["k"] * r["h"]
                 if not gas and model in ipr.OIL_MODELS:
@@ -1190,6 +1284,8 @@ with tabs[2]:
                     else:
                         curve = ipr2.dual_porosity("oil", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], phi, pvt["ct"],
                                                    tdays, omega, lam, pvt["mu"], skin, **oil_kw)
+                elif model == "Multiphase Pseudo Pressure":
+                    curve = mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr)
                 elif model in ("Multi-layer", "Multi-layer with dP loss in wellbore"):
                     with_dp = model.endswith("wellbore")
                     c = st.columns(4)
@@ -1279,14 +1375,18 @@ with tabs[2]:
                 for n_ in curve.notes:
                     st.info(n_)
                 items = [(k_, v) for k_, v in curve.params.items() if isinstance(v, (int, float, np.floating))]
-                m = st.columns(min(len(items) + 1, 5))
+                m = st.columns(min(len(items) + 1, 4))
                 m[0].metric("AOF", f"{curve.aof / 1e3:,.3f} MMscf/d" if gas else f"{curve.aof:,.0f} STB/d")
-                for col, (k_, v) in zip(m[1:], items[:4]):
+                for col, (k_, v) in zip(m[1:], items[:3]):
                     col.metric(k_, f"{v:.4g}" if abs(v) < 1e4 else f"{v:,.0f}")
-                if len(items) > 4:
-                    st.caption(" · ".join(f"{k_}: {v:.4g}" for k_, v in items[4:]))
+                if len(items) > 3:
+                    st.caption(" · ".join(f"{k_}: {v:.4g}" for k_, v in items[3:]))
                 st.pyplot(ipr_plot(curve, None if gas else pvt["pb"],
                                    raw_curve if sc.kind != "none" else None), clear_figure=True)
+                if hasattr(curve, "mpp_table"):
+                    st.pyplot(mpp_plot(curve), clear_figure=True)
+                    with st.expander("Pseudo-pressure table"):
+                        st.dataframe(curve.mpp_table.style.format(precision=5), hide_index=True, width="stretch")
                 if hasattr(curve, "profile"):
                     st.pyplot(profile_plot(curve), clear_figure=True)
                 table = curve.table(cgr=cgr, wgr=wgr) if gas else curve.table(wc=wc, gor=pvt.get("gor"))

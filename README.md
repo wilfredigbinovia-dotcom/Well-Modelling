@@ -26,7 +26,7 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 65 tests
+pytest -q                       # 70 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
@@ -49,11 +49,12 @@ The app is being rebuilt tab by tab. It currently has three tabs:
    - Oil: P.I. Entry, Vogel, Composite, Darcy, Fetkovich, Multi-rate Fetkovich, Jones, Multi-rate Jones, Transient, External entry.
    - Gas and condensate: Jones, Forchheimer, Back pressure, C and n, Multi-rate C and n, Multi-rate Jones, Forchheimer with pseudo-pressure, Multi-rate Forchheimer with pseudo-pressure, External entry.
    - Advanced (oil and gas): Hydraulically fractured well (Gringarten infinite-conductivity with Cinco-Ley finite-conductivity correction, transient to PSS), Horizontal well - no-flow boundaries (Babu & Odeh, Joshi), Horizontal well - transverse vertical fractures (Mukherjee-Economides), Horizontal well - friction dP (segmented toe-to-heel march), Dual porosity (Warren-Root), Multi-layer (with crossflow), Multi-layer with wellbore dP. Gas also has Modified Isochronal (correction factors and stabilised C).
+   - **Multiphase Pseudo Pressure** (oil and gas): total mass-mobility pseudo-pressure from the PROSPER definition, closed with Corey relative permeabilities and the Fevang & Whitson steady-state assumption. Black oil uses the producing GOR; equation of state flashes the PRP fluid at each pressure, so the condensate bank below the dew point (or free gas below the bubble point) shows as flowing saturation, kro/krg and a productivity loss against single-phase flow.
    - Properties (viscosity, FVF, Z, bubble point, compressibility) come from tab 2 and are not repeated here. Models that use a drainage area take the Dietz shape factor as an input (typical values in the field's help).
    - Multi-rate models calculate the reservoir pressure from the tests when the entered pressure is at or below the highest test FBHP.
    - **Skin:** entered by hand, Karakas & Tariq (perforation, damaged and crushed zones) or MacLeod for cased hole; Hawkins damaged zone for open hole. Optional Cinco-Ley deviation and Papatzacos partial penetration. Shows the skin breakdown and the dP across the skin.
    - **Sand control** (chosen in tab 1): cased gravel pack (linear flow through gravel-filled perforation tunnels, Darcy + non-Darcy), open-hole gravel pack and pre-packed screen (radial Darcy + Forchheimer), wire-wrapped screen and slotted liner (orifice flow through slots). Applied in series with the reservoir IPR; the plot shows the curve with and without sand control.
-   - Not available: Kuchuk & Goode (Babu & Odeh / Joshi are used instead), SkinAide, the Petroleum Experts models and thermally induced fractures (injectors).
+   - Not available: Kuchuk & Goode (Babu & Odeh / Joshi are used instead), SkinAide and thermally induced fractures (injectors).
 
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
@@ -98,6 +99,7 @@ wellmodel/
   eos.py            PRP import, PR/SRK equation of state, flash, envelope, separators
   inflow.py         IPR models (oil, gas/condensate), multi-rate fitting, pseudo-pressure
   inflow_adv.py     fractured, horizontal, dual-porosity, multilayer, friction, modified isochronal
+  mpp.py            multiphase pseudo-pressure (Corey, black oil / EOS integrands)
   completion.py     skin models (Karakas & Tariq, MacLeod, Hawkins, deviation, partial penetration), sand control
   synthetic.py      known-answer test data
   plotting.py       figures

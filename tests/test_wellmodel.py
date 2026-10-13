@@ -503,3 +503,67 @@ def test_modified_isochronal_stabilised_below_isochronal():
     assert r.params["C stabilised"] < r.params["C isochronal"]
     assert 0.5 <= r.params["n"] <= 1.0
     assert r.isochronal["Correction factor"].iloc[0] == 1.0
+
+
+# ------------------------------------------------ multiphase pseudo-pressure
+from wellmodel import mpp as wmpp
+
+
+def test_corey_ratio_inversion():
+    rel = wmpp.Corey(0.2, 0.2, 0.05, 0.9, 0.8, 2.5, 1.8)
+    for ratio in (1e-3, 0.1, 1.0, 30.0):
+        sg = rel.sg_from_ratio(ratio)
+        assert rel.krg(sg) / rel.kro(sg) == pytest.approx(ratio, rel=1e-6)
+    assert rel.sg_from_ratio(0) == 0
+
+
+def _bo_model():
+    from wellmodel import blackoil as bo
+    inp, _ = bo.example_data()
+    return bo.BlackOilModel(inp, "standing", "beal", {})
+
+
+def test_mpp_oil_matches_darcy_above_bubble_point():
+    m, T, pr, pw = _bo_model(), 205.0, 5000.0, 4000.0
+    tab = wmpp.blackoil_table(lambda p: m.table(T, p), wmpp.pressure_grid(pr, m.bubble_point(T)), m.inp.rsb, 0,
+                              wmpp.Corey())
+    c = wmpp.multiphase_pseudo_pressure("oil", pr, 50, 60, 160, 31.6, 0.354, 0, tab)
+    p = np.linspace(pw, pr, 400)
+    t = m.table(T, p)
+    expect = 50 * 60 / (141.2 * iflow.dietz_term(160, 31.6, 0.354)) * np.trapezoid(
+        1 / (t["Oil viscosity (cp)"] * t["Oil FVF (RB/STB)"]), p)
+    assert float(c.rate(pw)) == pytest.approx(expect, rel=2e-3)
+
+
+def test_mpp_oil_free_gas_reduces_deliverability():
+    m, T, pr = _bo_model(), 205.0, 3000.0
+    pb = m.bubble_point(T)
+    aofs = [wmpp.multiphase_pseudo_pressure(
+        "oil", pr, 50, 60, 160, 31.6, 0.354, 0,
+        wmpp.blackoil_table(lambda p: m.table(T, p), wmpp.pressure_grid(pr, pb), rp, 0, wmpp.Corey())).aof
+        for rp in (m.inp.rsb, 1500, 3000)]
+    assert aofs[0] > aofs[1] > aofs[2]
+
+
+def test_mpp_dry_gas_matches_pseudo_pressure():
+    mu_z = lambda p: (0.012 + 2e-6 * np.asarray(p), 0.9 + 0 * np.asarray(p))
+    pr, T = 4000.0, 200.0
+    tab = wmpp.gas_correlation_table(mu_z, wmpp.pressure_grid(pr, n=200), T, wmpp.Corey())
+    c = wmpp.multiphase_pseudo_pressure("gas", pr, 10, 50, 160, 31.6, 0.354, 2.0, tab)
+    psi = iflow.pseudo_pressure_fn(mu_z, pr, 2000)
+    expect = 10 * 50 * (psi(pr) - psi(2000.0)) / (1422 * (T + 459.67) * (iflow.dietz_term(160, 31.6, 0.354) + 2))
+    assert float(c.rate(2000.0)) == pytest.approx(expect, rel=5e-3)
+
+
+def test_mpp_condensate_bank_reduces_rate():
+    from wellmodel import eos
+    f = eos.EOSFluid(eos.parse_prp(eos.example_prp_text()))
+    T = 665.0                     # above the example oil's critical temperature: dew-point fluid
+    ps, typ = f.saturation_pressure(T)
+    assert typ == "dew"
+    scf = f.separator_train()["stages"]["Gas (scf per lbmol feed)"].sum()
+    pr = ps * 0.95
+    tab = wmpp.eos_table(f, T, wmpp.pressure_grid(pr, ps, 20), wmpp.Corey(), scf / 1000)
+    c = wmpp.multiphase_pseudo_pressure("gas", pr, 10, 50, 160, 31.6, 0.354, 0, tab)
+    assert 0 < c.params["Two-phase productivity loss (%)"] < 100
+    assert (tab.loc[tab["Pressure (psia)"] > 0.5 * ps, "So"] > 0).all()   # bank below the dew point

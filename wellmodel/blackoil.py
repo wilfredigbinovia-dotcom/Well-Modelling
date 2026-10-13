@@ -671,7 +671,7 @@ class BlackOilModel:
         return pd.DataFrame({
             "Pressure (psia)": p, "Solution GOR (scf/STB)": rs, "Oil FVF (RB/STB)": bo,
             "Oil viscosity (cp)": mu, "Oil density (lb/ft3)": rho_o, "Z factor": z,
-            "Gas FVF (ft3/scf)": bg, "Gas viscosity (cp)": mu_g, "Water FVF (RB/STB)": bw,
+            "Gas FVF (ft3/scf)": bg, "Gas viscosity (cp)": mu_g, "Gas density (lb/ft3)": rho_g, "Water FVF (RB/STB)": bw,
             "Water viscosity (cp)": mu_w, "Water density (lb/ft3)": rho_w,
         })
 
