@@ -30,6 +30,11 @@ from wellmodel import plotting as wplt
 
 st.set_page_config(page_title="wellmodel", page_icon="🛢️", layout="wide")
 ss = st.session_state
+# Number inputs are typed in directly: hide the - / + step buttons everywhere.
+st.markdown("""<style>
+[data-testid="stNumberInputStepDown"], [data-testid="stNumberInputStepUp"] {display: none !important;}
+[data-testid="stNumberInputContainer"] input {padding-right: 0.75rem;}
+</style>""", unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------- input state
@@ -503,9 +508,16 @@ with tabs[1]:
     if opts_now is not None and opts_now.method == "eos":
         render_eos(opts_now)
     elif opts_now is not None and opts_now.fluid_type != "oil":
-        st.info(f"Black-oil PVT input for {opts_now.label('fluid_type').lower()} has not been built yet. "
-                "Black-oil correlations here cover oil and water; choose **Equation of state** in the "
-                "Options summary to import a compositional PRP file for any fluid type.")
+        st.subheader("Input parameters")
+        st.caption(f"Gas correlations for {opts_now.label('fluid_type').lower()}: Sutton pseudo-criticals with "
+                   "Wichert-Aziz impurity correction, Dranchuk-Abou-Kassem Z and Lee-Gonzalez-Eakin viscosity. "
+                   "For condensate dropout, choose **Equation of state** in the Options summary and import a PRP file.")
+        c = st.columns(4)
+        num(c[0], "Gas Gravity (sp. gravity)", "pvt_gas_sg", 0.70, 0.55, 2.0, 0.01, "%.3f")
+        num(c[1], "Mole Percent H2S (percent)", "pvt_h2s", 0.0, 0.0, 100.0, 0.1)
+        num(c[2], "Mole Percent CO2 (percent)", "pvt_co2", 0.0, 0.0, 100.0, 0.1)
+        num(c[3], "Mole Percent N2 (percent)", "pvt_n2", 0.0, 0.0, 100.0, 0.1)
+        num(st.columns(4)[0], "Reservoir temperature (deg F)", "pvt_t", 200.0, 40.0, 500.0, 1.0)
     else:
         # ------------------------------------------------------- fluid inputs
         st.subheader("Input parameters")
@@ -688,7 +700,7 @@ def gas_pvt_fn(opts_now, t_f):
             out = [f.phase_props(f.z, float(x), t_f) for x in np.atleast_1d(p)]
             return np.array([o.viscosity for o in out]), np.array([o.z for o in out])
         return mu_z, float(f.z @ f.mw / 28.9625), f"Equation of state ({ss.get('prp_name', 'PRP file')}), reservoir fluid"
-    sg = float(val("ipr_gas_sg", 0.70))
+    sg = float(val("pvt_gas_sg", 0.70))
     inp = bo.PVTInputs(rsb=1, api=40, gas_sg=sg, h2s=float(val("pvt_h2s", 0.0)), co2=float(val("pvt_co2", 0.0)),
                        n2=float(val("pvt_n2", 0.0)))
 
@@ -780,13 +792,12 @@ def profile_plot(curve):
     return fig
 
 
-def dietz_inputs(c):
-    shapes = list(ipr.DIETZ_SHAPES) + ["Enter value"]
-    shape = sel(c[0], "Drainage shape (Dietz)", shapes, "ipr_shape")
-    if shape == "Enter value":
-        return num(c[1], "Dietz shape factor", "ipr_ca", 31.62, 0.01, 100.0, 0.1)
-    c[1].metric("Dietz shape factor", f"{ipr.DIETZ_SHAPES[shape]:g}")
-    return ipr.DIETZ_SHAPES[shape]
+DIETZ_HELP = ("Dietz shape factor for the drainage area and well position. Typical values: "
+              + "; ".join(f"{k} {v:g}" for k, v in ipr.DIETZ_SHAPES.items()) + ".")
+
+
+def dietz_input(col):
+    return num(col, "Dietz shape factor", "ipr_ca", 31.6, 0.001, 100.0, None, "%.4g", help=DIETZ_HELP)
 
 
 def reservoir_props(nd=False, skin=True):
@@ -797,9 +808,9 @@ def reservoir_props(nd=False, skin=True):
          "area": num(c[2], "Drainage area (acres)", "ipr_area", 160.0, 0.1, 1e6, 10.0),
          "rw": num(c[3], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.05, 5.0, 0.001, "%.3f")}
     c = st.columns(4)
-    r["ca"] = dietz_inputs(c)
+    r["ca"] = dietz_input(c[0])
     if nd:
-        r["hp"] = num(c[2], "Perforated interval (ft)", "ipr_hp", 60.0, 0.1, 1e4, 1.0)
+        r["hp"] = num(c[1], "Perforated interval (ft)", "ipr_hp", 60.0, 0.1, 1e4, 1.0)
     return r
 
 
@@ -1008,322 +1019,295 @@ with tabs[2]:
         if abs(t_f - t_pvt) > 0.5:
             st.caption(f"Note: the PVT tab uses {t_pvt:g} °F; PVT properties here are evaluated at {t_f:g} °F.")
 
-        # ------------------------------------------------------------- PVT
-        st.subheader("PVT used")
+        # ------------------------------------------- PVT (from the PVT tab)
         pvt, gasp = None, {}
         if gas:
-            if not (o.method == "eos" and ss.get("prp_text")):
-                num(st.columns(4)[0], "Gas gravity (sp. gravity)", "ipr_gas_sg", 0.70, 0.55, 2.0, 0.01, "%.3f")
-            mu_z, sg, src = gas_pvt_fn(o, t_f)
+            mu_z, sg, _ = gas_pvt_fn(o, t_f)
             mu_r, z_r = (float(v[0]) for v in mu_z(np.array([pr])))
             gasp = {"mu_z": mu_z, "sg": sg, "mu_r": mu_r, "z_r": z_r, "t_f": t_f}
-            st.caption(f"Source: {src}")
-            m = st.columns(4)
-            m[0].metric("Gas viscosity at Pr (cp)", f"{mu_r:.5f}")
-            m[1].metric("Z factor at Pr", f"{z_r:.4f}")
-            m[2].metric("Reservoir fluid gravity" if o.method == "eos" and ss.get("prp_text") else "Gas gravity",
-                        f"{sg:.3f}", help="Used in the non-Darcy coefficient D")
         else:
-            pvt, src = oil_pvt_at(o, pr, t_f)
-            manual = st.checkbox("Enter PVT values by hand", value=pvt is None, key="ipr_pvt_manual",
-                                 disabled=pvt is None)
+            pvt, why = oil_pvt_at(o, pr, t_f)
             if pvt is None:
-                st.info(src + " Enter values by hand below, or complete the PVT tab.")
-            if manual or pvt is None:
-                base = pvt or {"mu": 0.8, "bo": 1.25, "rho": 48.0, "ct": 1.5e-5, "pb": 2000.0, "gor": 500.0}
-                m = st.columns(5)
-                pvt = {"mu": num(m[0], "Oil viscosity (cp)", "ipr_mu", round(base["mu"], 4), 0.01, 1e4, 0.01, "%.4f"),
-                       "bo": num(m[1], "Oil FVF (RB/STB)", "ipr_bo", round(base["bo"], 4), 1.0, 5.0, 0.01, "%.4f"),
-                       "rho": num(m[2], "Oil density (lb/ft3)", "ipr_rho", round(base["rho"], 2), 20.0, 70.0, 0.5),
-                       "ct": num(m[3], "Compressibility (1/psi)", "ipr_ct", base["ct"], 1e-7, 1e-3, None, "%.2e"),
-                       "pb": num(m[4], "Bubble point (psia)", "ipr_pb", round(base["pb"], 1), 14.7, 2e4, 10.0),
-                       "gor": base["gor"]}
-                src = "Entered by hand"
-            st.caption(f"Source: {src}")
-            m = st.columns(5)
-            m[0].metric("Bubble point (psia)", f"{pvt['pb']:,.0f}")
-            m[1].metric("Oil viscosity at Pr (cp)", f"{pvt['mu']:.4f}")
-            m[2].metric("Oil FVF at Pr (RB/STB)", f"{pvt['bo']:.4f}")
-            m[3].metric("Oil density (lb/ft3)", f"{pvt['rho']:.2f}")
-            m[4].metric("Compressibility (1/psi)", f"{pvt['ct']:.2e}")
-
+                st.info(why + " Complete the PVT Input Data tab to calculate the IPR.")
         # ------------------------------------------------------- model data
-        st.subheader(f"Model data - {model}")
-        curve, err, skin_parts, kh_for_skin = None, None, {}, None
-        oil_kw = {} if gas else {"pb": pvt["pb"], "bo": pvt["bo"]}
-        gas_kw = {"t_f": t_f, "z": gasp.get("z_r"), "sg": gasp.get("sg")} if gas else {}
-        mu_used = gasp.get("mu_r") if gas else (pvt["mu"] if pvt else None)
-        try:
-            if model in VERTICAL_SKIN_MODELS:
-                r = reservoir_props(nd=(model == "Jones"))
-                skin, skin_parts = skin_panel(o, r["k"], r["rw"], r["h"], fluid)
-                kh_for_skin = r["k"] * r["h"]
-            if not gas and model in ipr.OIL_MODELS:
-                pb = pvt["pb"]
-                if model == "P.I. Entry":
-                    j = num(st.columns(4)[0], "Productivity index (STB/d/psi)", "ipr_j", 2.0, 0.001, 1e4, 0.1)
-                    curve = ipr.pi_entry(pr, pb, j)
-                elif model in ("Vogel", "Composite"):
-                    c = st.columns(4)
-                    qt = num(c[0], "Test rate (STB/d, liquid)", "ipr_qt", 1500.0, 0.1, 1e6, 10.0)
-                    pt = num(c[1], "Test FBHP (psia)", "ipr_pt", 1500.0, 0.0, 3e4, 10.0)
-                    curve = ipr.vogel(pr, pb, qt, pt) if model == "Vogel" else ipr.composite(pr, pb, qt, pt, wc)
-                elif model == "Darcy":
-                    curve = ipr.darcy(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"], pvt["bo"])
-                elif model == "Fetkovich":
-                    kro = num(st.columns(4)[0], "Relative permeability of oil", "ipr_kro", 1.0, 0.001, 1.0, 0.05)
-                    curve = ipr.fetkovich(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin,
-                                          pvt["mu"], pvt["bo"], kro)
-                elif model == "Jones":
-                    curve = ipr.jones_oil(pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"],
-                                          pvt["bo"], pvt["rho"], r["hp"])
-                elif model == "Transient":
-                    c = st.columns(4)
-                    phi = num(c[0], "Porosity (fraction)", "ipr_phi", 0.2, 0.01, 0.5, 0.01)
-                    tdays = num(c[1], "Time (days)", "ipr_tdays", 30.0, 0.5, 1e5, 1.0)
-                    curve = ipr.transient_oil(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin,
-                                              pvt["mu"], pvt["bo"], phi, pvt["ct"], tdays)
-                elif model in ("Multi-rate Fetkovich", "Multi-rate Jones"):
-                    st.caption("Up to 10 tests. If the reservoir pressure is at or below the highest test FBHP, "
-                               "it is calculated from the tests.")
-                    t = ipr_test_table("ipr_tests_oil", "Liquid rate (STB/d)")
-                    curve = (ipr.multirate_fetkovich if model == "Multi-rate Fetkovich"
-                             else ipr.multirate_jones_oil)(pr, t)
-                elif model == "External entry":
-                    st.caption("Rate against flowing pressure; the highest pressure should have zero rate.")
-                    curve = ipr.external(ipr_test_table("ipr_ext_oil", "Liquid rate (STB/d)", 15), "oil")
-            elif gas and model in ipr.GAS_MODELS:
-                if model in ("Jones", "Back pressure"):
-                    if model == "Jones":
-                        c = st.columns(4)
-                        dm = sel(c[0], "Non-Darcy flow factor", ["Calculated", "Entered"], "ipr_d_method")
-                        d = num(c[1], "D (1/(Mscf/d))", "ipr_d", 1e-4, 0.0, 1.0, None, "%.3e") if dm == "Entered" else None
-                        curve = ipr.jones_gas(pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, t_f,
-                                              gasp["mu_r"], gasp["z_r"], gasp["sg"], r["hp"], d)
-                    else:
-                        n = num(st.columns(4)[0], "Exponent n", "ipr_n_bp", 0.85, 0.5, 1.0, 0.01)
-                        curve = ipr.back_pressure(pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, t_f,
-                                                  gasp["mu_r"], gasp["z_r"], n)
-                elif model == "Forchheimer":
-                    c = st.columns(4)
-                    a = num(c[0], "a - turbulent (psi²/(Mscf/d)²)", "ipr_fa", 0.003, 0.0, 1e6, None, "%.4e")
-                    b = num(c[1], "b - laminar (psi²/(Mscf/d))", "ipr_fb", 250.0, 1e-9, 1e9, None, "%.4e")
-                    curve = ipr.forchheimer(pr, a, b)
-                elif model == "C and n":
-                    c = st.columns(4)
-                    curve = ipr.c_and_n(pr, num(c[0], "C (Mscf/d/psi^2n)", "ipr_c", 0.01, 1e-12, 1e6, None, "%.4e"),
-                                        num(c[1], "n", "ipr_n", 0.85, 0.5, 1.0, 0.01))
-                elif model in ("Multi-rate C and n", "Multi-rate Jones"):
-                    st.caption("Up to 10 tests, rate in Mscf/d. If the reservoir pressure is at or below the "
-                               "highest test FBHP, it is calculated from the tests (3+ points needed).")
-                    t = ipr_test_table("ipr_tests_gas", "Gas rate (Mscf/d)")
-                    curve = (ipr.multirate_c_and_n if model == "Multi-rate C and n" else ipr.multirate_jones_gas)(pr, t)
-                elif model in ("Forchheimer with pseudo-pressure", "Multi-rate Forchheimer with pseudo-pressure"):
-                    psi = ipr.pseudo_pressure_fn(gasp["mu_z"], pr, n=120 if o.method == "eos" else 300)
-                    if model == "Forchheimer with pseudo-pressure":
-                        c = st.columns(4)
-                        curve = ipr.forchheimer_pseudo(
-                            pr, num(c[0], "a - laminar (psi²/cp/(Mscf/d))", "ipr_pa", 1e5, 1e-9, 1e12, None, "%.4e"),
-                            num(c[1], "b - turbulent (psi²/cp/(Mscf/d)²)", "ipr_pb2", 1.0, 0.0, 1e12, None, "%.4e"), psi)
-                    else:
-                        st.caption("Up to 10 tests, rate in Mscf/d. Reservoir pressure must exceed every test FBHP.")
-                        curve = ipr.multirate_forchheimer_pseudo(pr, ipr_test_table("ipr_tests_gas_ps", "Gas rate (Mscf/d)"), psi)
-                elif model == "External entry":
-                    st.caption("Gas rate (Mscf/d) against flowing pressure; highest pressure should have zero rate.")
-                    curve = ipr.external(ipr_test_table("ipr_ext_gas", "Gas rate (Mscf/d)", 15), "gas")
-                elif model == "Dual Porosity":
-                    pass
-            # ------------------------------------------------ advanced models
-            if model == "Hydraulically Fractured Well":
-                r = reservoir_props()
-                c = st.columns(4)
-                tdays = num(c[0], "Time since production started (days)", "ipr_tdays", 30.0, 0.5, 1e5, 1.0)
-                xf = num(c[1], "Fracture half length (ft)", "ipr_xf", 200.0, 1.0, 5000.0, 10.0)
-                fcd = num(c[2], "Dimensionless fracture conductivity", "ipr_fcd", 10.0, 0.1, 1e4, 1.0,
-                          help="FCD = kf bf / (k xf)")
-                face = num(c[3], "Fracture face skin", "ipr_fface", 0.0, 0.0, 50.0, 0.1)
-                c = st.columns(4)
-                phi = num(c[0], "Porosity (fraction)", "ipr_phi", 0.15, 0.01, 0.5, 0.01)
-                if gas:
-                    hf = num(c[1], "Fracture height (ft)", "ipr_hf", r["h"], 1.0, 1e4, 1.0)
-                    ct = num(c[2], "Total compressibility (1/psi)", "ipr_ctg", 1 / pr, 1e-7, 1e-1, None, "%.2e",
-                             help="Defaults to 1/Pr for gas")
-                    curve = ipr2.fractured_well("gas", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], xf, fcd, tdays,
-                                                phi, ct, gasp["mu_r"], face, hf=hf, **gas_kw)
-                else:
-                    curve = ipr2.fractured_well("oil", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], xf, fcd, tdays,
-                                                phi, pvt["ct"], pvt["mu"], face, **oil_kw)
-            elif model in ("Horizontal Well - No Flow Boundaries", "Horizontal Well - Transverse Vertical Fractures"):
-                g, spare = horizontal_inputs()
-                hz_skin = num(spare, "Skin (along the well)", "ipr_hz_skin", 0.0, -5.0, 200.0, 0.5)
-                if model == "Horizontal Well - No Flow Boundaries":
-                    meth = radio(st, "Horizontal well model", ["Babu & Odeh", "Joshi"], "ipr_hz_method",
-                                 horizontal=True, captions=["Closed box, pseudo-steady state",
-                                                               "Steady state, constant pressure at drainage radius"])
-                    curve = ipr2.horizontal_well(fluid, meth, pr, g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"],
-                                                 g["L"], g["lx"], g["ly"], g["xw"], g["yw"], g["zw"], mu_used,
-                                                 hz_skin, **(gas_kw if gas else oil_kw))
-                else:
-                    c = st.columns(4)
-                    xf = num(c[0], "Fracture half length (ft)", "ipr_xf", 200.0, 1.0, 5000.0, 10.0)
-                    fcd = num(c[1], "Dimensionless fracture conductivity", "ipr_fcd", 10.0, 0.1, 1e4, 1.0)
-                    nfr = num(c[2], "Number of fractures", "ipr_nfr", 4.0, 1.0, 100.0, 1.0)
-                    curve = ipr2.transverse_fractures(fluid, pr, g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"],
-                                                      g["L"], g["lx"], g["ly"], g["xw"], g["yw"], g["zw"], mu_used,
-                                                      xf, fcd, nfr, 31.62, hz_skin, **(gas_kw if gas else oil_kw))
-            elif model == "Horizontal Well - friction dP":
-                g, spare = horizontal_inputs()
-                st.caption("Overall productivity from Babu & Odeh; zones split it by permeability x length and "
-                           "zone skin. Zone lengths should add up to the well length.")
-                z = zones_table().dropna(subset=["Type", "Length (ft)"])
-                zones = [{"type": row["Type"], "length": float(row["Length (ft)"]),
-                          "k": float(row["Permeability (md)"]) if pd.notna(row["Permeability (md)"]) else g["k"],
-                          "skin": float(row["Skin"]) if pd.notna(row["Skin"]) else 0.0,
-                          "id_in": float(row["Flowing ID (in)"]), "rough_in": float(row["Roughness (in)"])}
-                         for _, row in z.iterrows()]
-                total_len = sum(zz["length"] for zz in zones)
-                if abs(total_len - g["L"]) > 1:
-                    st.warning(f"Zone lengths add up to {total_len:,.0f} ft but the well length is {g['L']:,.0f} ft.")
-                kh_eq, D0, _ = ipr2.babu_odeh(g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"], g["L"], g["lx"],
-                                              g["ly"], g["xw"], g["yw"], g["zw"], 0.0)
-                ph = num(spare, "Heel pressure for profile plot (psia)", "ipr_heelp", round(pr * 0.5), 14.7, 3e4, 10.0)
-                props = (dict(mu=pvt["mu"], bo=pvt["bo"], rho=pvt["rho"], wc=wc) if not gas
-                         else dict(mu_z=gasp["mu_z"], sg=gasp["sg"], t_f=t_f, mu_r=gasp["mu_r"], z_r=gasp["z_r"]))
-                curve = ipr2.horizontal_friction(fluid, pr, zones, kh_eq, D0, g["k"], props,
-                                                 pvt["pb"] if not gas else None, profile_at=ph)
-            elif model == "Dual Porosity":
-                if not gas:
-                    pass  # reservoir_props + skin_panel already rendered above
-                c = st.columns(4)
-                phi = num(c[0], "Porosity (fraction)", "ipr_phi", 0.1, 0.001, 0.5, 0.01)
-                tdays = num(c[1], "Time since production started (days)", "ipr_tdays", 30.0, 0.01, 1e5, 1.0)
-                omega = num(c[2], "Storativity ratio (omega)", "ipr_omega", 0.1, 1e-4, 0.9999, 0.01, "%.4f")
-                lam = num(c[3], "Interporosity coefficient (lambda)", "ipr_lambda", 1e-6, 1e-12, 1.0, None, "%.2e")
-                if gas:
-                    c = st.columns(4)
-                    swc = num(c[0], "Connate water saturation", "ipr_swc", 0.2, 0.0, 0.9, 0.01)
-                    ct = (1 - swc) / pr
-                    curve = ipr2.dual_porosity("gas", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], phi, ct, tdays,
-                                               omega, lam, gasp["mu_r"], skin, **gas_kw)
-                else:
-                    curve = ipr2.dual_porosity("oil", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], phi, pvt["ct"],
-                                               tdays, omega, lam, pvt["mu"], skin, **oil_kw)
-            elif model in ("Multi-layer", "Multi-layer with dP loss in wellbore"):
-                with_dp = model.endswith("wellbore")
-                c = st.columns(4)
-                area = num(c[0], "Drainage area (acres)", "ipr_area", 160.0, 0.1, 1e6, 10.0)
-                rw = num(c[1], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.05, 5.0, 0.001, "%.3f")
-                ca = dietz_inputs([c[2], c[3]])
-                if with_dp:
-                    c = st.columns(4)
-                    top_md = num(c[0], "TOP node MD (ft)", "ipr_top_md", 9275.0, 0.0, 4e4, 10.0)
-                    top_tvd = num(c[1], "TOP node TVD (ft)", "ipr_top_tvd", 9275.0, 0.0, 4e4, 10.0)
-                    if not gas:
-                        wc = num(c[2], "Water cut (%)", "ipr_wc", 0.0, 0.0, 100.0, 1.0) / 100
-                st.caption("Layer data. Darcy/Jones layers use permeability, thickness and skin; PI / C and n "
-                           "layers use their own coefficients. Blank layers carry no inflow."
-                           + (" Depths are those of each layer's inflow point; ID and roughness describe the "
-                              "pipe above the layer." if with_dp else ""))
-                tab_ = multilayer_table(fluid, with_dp)
-                layers = []
-                for _, row in tab_.iterrows():
-                    if row.get("Type") != "Perforated" or pd.isna(row.get("Layer pressure (psia)")):
-                        continue
-                    L = {"pr": float(row["Layer pressure (psia)"]), "model": row.get("IPR model")}
-                    if not gas:
-                        if L["model"] == "Darcy":
-                            L["j"] = ipr.darcy_pi(float(row["Permeability (md)"]), float(row["Thickness (ft)"]),
-                                                  pvt["mu"], pvt["bo"], area, ca, rw, float(row["Skin"] or 0))
-                        else:
-                            L["j"] = float(row["PI (STB/d/psi)"])
-                    else:
-                        if L["model"] == "Jones":
-                            a_, b_, _ = ipr.jones_gas_coeffs(float(row["Permeability (md)"]), float(row["Thickness (ft)"]),
-                                                             area, ca, rw, float(row["Skin"] or 0), t_f, gasp["mu_r"],
-                                                             gasp["z_r"], gasp["sg"], float(row["Thickness (ft)"]))
-                            L.update(a=a_, b=b_)
-                        else:
-                            L.update(c=float(row["C (Mscf/d/psi^2n)"]), n=float(row["n"]))
-                    if with_dp:
-                        L.update(md=float(row["MD (ft)"]), tvd=float(row["TVD (ft)"]),
-                                 id_in=float(row["Flowing ID (in)"]), rough_in=float(row["Roughness (in)"]))
-                    layers.append(L)
-                if with_dp:
-                    props = (dict(mu=pvt["mu"], bo=pvt["bo"], rho=pvt["rho"], wc=wc) if not gas
-                             else dict(mu_z=gasp["mu_z"], sg=gasp["sg"], t_f=t_f))
-                    curve = ipr2.multilayer_dp(fluid, layers, top_md, top_tvd, props,
-                                               pvt["pb"] if not gas else None, n=25 if gas else 40)
-                else:
-                    curve = ipr2.multilayer(fluid, layers, pvt["pb"] if not gas else None)
-            elif model == "Modified Isochronal":
-                c = st.columns(4)
-                k = num(c[0], "Gas permeability (md)", "ipr_k", 50.0, 0.001, 1e5, 1.0)
-                phi = num(c[1], "Porosity (fraction)", "ipr_phi", 0.15, 0.01, 0.5, 0.01)
-                swc = num(c[2], "Connate water saturation", "ipr_swc", 0.2, 0.0, 0.9, 0.01)
-                rw = num(c[3], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.05, 5.0, 0.001, "%.3f")
-                c = st.columns(4)
-                area = num(c[0], "Drainage area (acres)", "ipr_area", 160.0, 0.1, 1e6, 10.0)
-                tfl = num(c[1], "Flow period duration (hours)", "ipr_tfl", 12.0, 0.1, 1e4, 1.0)
-                tsh = num(c[2], "Shut-in period duration (hours)", "ipr_tsh", 12.0, 0.0, 1e4, 1.0)
-                st.caption("Flow periods in test order: rate (Mscf/d) and FBHP at the end of each period. "
-                           "The reservoir pressure above is the initial (stabilised) shut-in pressure.")
-                t = ipr_test_table("ipr_tests_iso", "Gas rate (Mscf/d)", 6)
-                curve = ipr2.modified_isochronal(pr, t, tfl, tsh, k, phi, swc, gasp["mu_r"], rw,
-                                                 np.sqrt(area * 43560 / np.pi))
-        except (ValueError, KeyError, TypeError) as e:
-            err = str(e) or e.__class__.__name__
-
-        # ----------------------------------------------------- sand control
-        raw_curve = curve
-        sc = sand_control_panel(o, fluid, float(val("ipr_h", 60.0)))
-        if curve is not None and err is None and sc.kind != "none":
+        if gas or pvt is not None:
+            st.subheader(f"Model data - {model}")
+            curve, err, skin_parts, kh_for_skin = None, None, {}, None
+            oil_kw = {} if gas else {"pb": pvt["pb"], "bo": pvt["bo"]}
+            gas_kw = {"t_f": t_f, "z": gasp.get("z_r"), "sg": gasp.get("sg")} if gas else {}
+            mu_used = gasp.get("mu_r") if gas else (pvt["mu"] if pvt else None)
             try:
-                dp_fn = wcomp.sand_control_dp(sc, fluid, sc_props(fluid, pvt, gasp, pr, t_f))
-                curve = wcomp.apply_sand_control(curve, dp_fn)
-                for attr in ("layer_rates", "profile", "profile_heel_pressure", "isochronal", "c_iso"):
-                    if hasattr(raw_curve, attr):
-                        setattr(curve, attr, getattr(raw_curve, attr))
-            except (ValueError, KeyError) as e:
-                err = f"Sand control: {e}"
+                if model in VERTICAL_SKIN_MODELS:
+                    r = reservoir_props(nd=(model == "Jones"))
+                    skin, skin_parts = skin_panel(o, r["k"], r["rw"], r["h"], fluid)
+                    kh_for_skin = r["k"] * r["h"]
+                if not gas and model in ipr.OIL_MODELS:
+                    pb = pvt["pb"]
+                    if model == "P.I. Entry":
+                        j = num(st.columns(4)[0], "Productivity index (STB/d/psi)", "ipr_j", 2.0, 0.001, 1e4, 0.1)
+                        curve = ipr.pi_entry(pr, pb, j)
+                    elif model in ("Vogel", "Composite"):
+                        c = st.columns(4)
+                        qt = num(c[0], "Test rate (STB/d, liquid)", "ipr_qt", 1500.0, 0.1, 1e6, 10.0)
+                        pt = num(c[1], "Test FBHP (psia)", "ipr_pt", 1500.0, 0.0, 3e4, 10.0)
+                        curve = ipr.vogel(pr, pb, qt, pt) if model == "Vogel" else ipr.composite(pr, pb, qt, pt, wc)
+                    elif model == "Darcy":
+                        curve = ipr.darcy(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"], pvt["bo"])
+                    elif model == "Fetkovich":
+                        kro = num(st.columns(4)[0], "Relative permeability of oil", "ipr_kro", 1.0, 0.001, 1.0, 0.05)
+                        curve = ipr.fetkovich(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin,
+                                              pvt["mu"], pvt["bo"], kro)
+                    elif model == "Jones":
+                        curve = ipr.jones_oil(pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"],
+                                              pvt["bo"], pvt["rho"], r["hp"])
+                    elif model == "Transient":
+                        c = st.columns(4)
+                        phi = num(c[0], "Porosity (fraction)", "ipr_phi", 0.2, 0.01, 0.5, 0.01)
+                        tdays = num(c[1], "Time (days)", "ipr_tdays", 30.0, 0.5, 1e5, 1.0)
+                        curve = ipr.transient_oil(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin,
+                                                  pvt["mu"], pvt["bo"], phi, pvt["ct"], tdays)
+                    elif model in ("Multi-rate Fetkovich", "Multi-rate Jones"):
+                        st.caption("Up to 10 tests. If the reservoir pressure is at or below the highest test FBHP, "
+                                   "it is calculated from the tests.")
+                        t = ipr_test_table("ipr_tests_oil", "Liquid rate (STB/d)")
+                        curve = (ipr.multirate_fetkovich if model == "Multi-rate Fetkovich"
+                                 else ipr.multirate_jones_oil)(pr, t)
+                    elif model == "External entry":
+                        st.caption("Rate against flowing pressure; the highest pressure should have zero rate.")
+                        curve = ipr.external(ipr_test_table("ipr_ext_oil", "Liquid rate (STB/d)", 15), "oil")
+                elif gas and model in ipr.GAS_MODELS:
+                    if model in ("Jones", "Back pressure"):
+                        if model == "Jones":
+                            c = st.columns(4)
+                            dm = sel(c[0], "Non-Darcy flow factor", ["Calculated", "Entered"], "ipr_d_method")
+                            d = num(c[1], "D (1/(Mscf/d))", "ipr_d", 1e-4, 0.0, 1.0, None, "%.3e") if dm == "Entered" else None
+                            curve = ipr.jones_gas(pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, t_f,
+                                                  gasp["mu_r"], gasp["z_r"], gasp["sg"], r["hp"], d)
+                        else:
+                            n = num(st.columns(4)[0], "Exponent n", "ipr_n_bp", 0.85, 0.5, 1.0, 0.01)
+                            curve = ipr.back_pressure(pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, t_f,
+                                                      gasp["mu_r"], gasp["z_r"], n)
+                    elif model == "Forchheimer":
+                        c = st.columns(4)
+                        a = num(c[0], "a - turbulent (psi²/(Mscf/d)²)", "ipr_fa", 0.003, 0.0, 1e6, None, "%.4e")
+                        b = num(c[1], "b - laminar (psi²/(Mscf/d))", "ipr_fb", 250.0, 1e-9, 1e9, None, "%.4e")
+                        curve = ipr.forchheimer(pr, a, b)
+                    elif model == "C and n":
+                        c = st.columns(4)
+                        curve = ipr.c_and_n(pr, num(c[0], "C (Mscf/d/psi^2n)", "ipr_c", 0.01, 1e-12, 1e6, None, "%.4e"),
+                                            num(c[1], "n", "ipr_n", 0.85, 0.5, 1.0, 0.01))
+                    elif model in ("Multi-rate C and n", "Multi-rate Jones"):
+                        st.caption("Up to 10 tests, rate in Mscf/d. If the reservoir pressure is at or below the "
+                                   "highest test FBHP, it is calculated from the tests (3+ points needed).")
+                        t = ipr_test_table("ipr_tests_gas", "Gas rate (Mscf/d)")
+                        curve = (ipr.multirate_c_and_n if model == "Multi-rate C and n" else ipr.multirate_jones_gas)(pr, t)
+                    elif model in ("Forchheimer with pseudo-pressure", "Multi-rate Forchheimer with pseudo-pressure"):
+                        psi = ipr.pseudo_pressure_fn(gasp["mu_z"], pr, n=120 if o.method == "eos" else 300)
+                        if model == "Forchheimer with pseudo-pressure":
+                            c = st.columns(4)
+                            curve = ipr.forchheimer_pseudo(
+                                pr, num(c[0], "a - laminar (psi²/cp/(Mscf/d))", "ipr_pa", 1e5, 1e-9, 1e12, None, "%.4e"),
+                                num(c[1], "b - turbulent (psi²/cp/(Mscf/d)²)", "ipr_pb2", 1.0, 0.0, 1e12, None, "%.4e"), psi)
+                        else:
+                            st.caption("Up to 10 tests, rate in Mscf/d. Reservoir pressure must exceed every test FBHP.")
+                            curve = ipr.multirate_forchheimer_pseudo(pr, ipr_test_table("ipr_tests_gas_ps", "Gas rate (Mscf/d)"), psi)
+                    elif model == "External entry":
+                        st.caption("Gas rate (Mscf/d) against flowing pressure; highest pressure should have zero rate.")
+                        curve = ipr.external(ipr_test_table("ipr_ext_gas", "Gas rate (Mscf/d)", 15), "gas")
+                    elif model == "Dual Porosity":
+                        pass
+                # ------------------------------------------------ advanced models
+                if model == "Hydraulically Fractured Well":
+                    r = reservoir_props()
+                    c = st.columns(4)
+                    tdays = num(c[0], "Time since production started (days)", "ipr_tdays", 30.0, 0.5, 1e5, 1.0)
+                    xf = num(c[1], "Fracture half length (ft)", "ipr_xf", 200.0, 1.0, 5000.0, 10.0)
+                    fcd = num(c[2], "Dimensionless fracture conductivity", "ipr_fcd", 10.0, 0.1, 1e4, 1.0,
+                              help="FCD = kf bf / (k xf)")
+                    face = num(c[3], "Fracture face skin", "ipr_fface", 0.0, 0.0, 50.0, 0.1)
+                    c = st.columns(4)
+                    phi = num(c[0], "Porosity (fraction)", "ipr_phi", 0.15, 0.01, 0.5, 0.01)
+                    if gas:
+                        hf = num(c[1], "Fracture height (ft)", "ipr_hf", r["h"], 1.0, 1e4, 1.0)
+                        ct = num(c[2], "Total compressibility (1/psi)", "ipr_ctg", 1 / pr, 1e-7, 1e-1, None, "%.2e",
+                                 help="Defaults to 1/Pr for gas")
+                        curve = ipr2.fractured_well("gas", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], xf, fcd, tdays,
+                                                    phi, ct, gasp["mu_r"], face, hf=hf, **gas_kw)
+                    else:
+                        curve = ipr2.fractured_well("oil", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], xf, fcd, tdays,
+                                                    phi, pvt["ct"], pvt["mu"], face, **oil_kw)
+                elif model in ("Horizontal Well - No Flow Boundaries", "Horizontal Well - Transverse Vertical Fractures"):
+                    g, spare = horizontal_inputs()
+                    hz_skin = num(spare, "Skin (along the well)", "ipr_hz_skin", 0.0, -5.0, 200.0, 0.5)
+                    if model == "Horizontal Well - No Flow Boundaries":
+                        meth = radio(st, "Horizontal well model", ["Babu & Odeh", "Joshi"], "ipr_hz_method",
+                                     horizontal=True, captions=["Closed box, pseudo-steady state",
+                                                                   "Steady state, constant pressure at drainage radius"])
+                        curve = ipr2.horizontal_well(fluid, meth, pr, g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"],
+                                                     g["L"], g["lx"], g["ly"], g["xw"], g["yw"], g["zw"], mu_used,
+                                                     hz_skin, **(gas_kw if gas else oil_kw))
+                    else:
+                        c = st.columns(4)
+                        xf = num(c[0], "Fracture half length (ft)", "ipr_xf", 200.0, 1.0, 5000.0, 10.0)
+                        fcd = num(c[1], "Dimensionless fracture conductivity", "ipr_fcd", 10.0, 0.1, 1e4, 1.0)
+                        nfr = num(c[2], "Number of fractures", "ipr_nfr", 4.0, 1.0, 100.0, 1.0)
+                        ca_f = dietz_input(c[3])
+                        curve = ipr2.transverse_fractures(fluid, pr, g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"],
+                                                          g["L"], g["lx"], g["ly"], g["xw"], g["yw"], g["zw"], mu_used,
+                                                          xf, fcd, nfr, ca_f, hz_skin, **(gas_kw if gas else oil_kw))
+                elif model == "Horizontal Well - friction dP":
+                    g, spare = horizontal_inputs()
+                    st.caption("Overall productivity from Babu & Odeh; zones split it by permeability x length and "
+                               "zone skin. Zone lengths should add up to the well length.")
+                    z = zones_table().dropna(subset=["Type", "Length (ft)"])
+                    zones = [{"type": row["Type"], "length": float(row["Length (ft)"]),
+                              "k": float(row["Permeability (md)"]) if pd.notna(row["Permeability (md)"]) else g["k"],
+                              "skin": float(row["Skin"]) if pd.notna(row["Skin"]) else 0.0,
+                              "id_in": float(row["Flowing ID (in)"]), "rough_in": float(row["Roughness (in)"])}
+                             for _, row in z.iterrows()]
+                    total_len = sum(zz["length"] for zz in zones)
+                    if abs(total_len - g["L"]) > 1:
+                        st.warning(f"Zone lengths add up to {total_len:,.0f} ft but the well length is {g['L']:,.0f} ft.")
+                    kh_eq, D0, _ = ipr2.babu_odeh(g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"], g["L"], g["lx"],
+                                                  g["ly"], g["xw"], g["yw"], g["zw"], 0.0)
+                    ph = num(spare, "Heel pressure for profile plot (psia)", "ipr_heelp", round(pr * 0.5), 14.7, 3e4, 10.0)
+                    props = (dict(mu=pvt["mu"], bo=pvt["bo"], rho=pvt["rho"], wc=wc) if not gas
+                             else dict(mu_z=gasp["mu_z"], sg=gasp["sg"], t_f=t_f, mu_r=gasp["mu_r"], z_r=gasp["z_r"]))
+                    curve = ipr2.horizontal_friction(fluid, pr, zones, kh_eq, D0, g["k"], props,
+                                                     pvt["pb"] if not gas else None, profile_at=ph)
+                elif model == "Dual Porosity":
+                    if not gas:
+                        pass  # reservoir_props + skin_panel already rendered above
+                    c = st.columns(4)
+                    phi = num(c[0], "Porosity (fraction)", "ipr_phi", 0.1, 0.001, 0.5, 0.01)
+                    tdays = num(c[1], "Time since production started (days)", "ipr_tdays", 30.0, 0.01, 1e5, 1.0)
+                    omega = num(c[2], "Storativity ratio (omega)", "ipr_omega", 0.1, 1e-4, 0.9999, 0.01, "%.4f")
+                    lam = num(c[3], "Interporosity coefficient (lambda)", "ipr_lambda", 1e-6, 1e-12, 1.0, None, "%.2e")
+                    if gas:
+                        c = st.columns(4)
+                        swc = num(c[0], "Connate water saturation", "ipr_swc", 0.2, 0.0, 0.9, 0.01)
+                        ct = (1 - swc) / pr
+                        curve = ipr2.dual_porosity("gas", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], phi, ct, tdays,
+                                                   omega, lam, gasp["mu_r"], skin, **gas_kw)
+                    else:
+                        curve = ipr2.dual_porosity("oil", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], phi, pvt["ct"],
+                                                   tdays, omega, lam, pvt["mu"], skin, **oil_kw)
+                elif model in ("Multi-layer", "Multi-layer with dP loss in wellbore"):
+                    with_dp = model.endswith("wellbore")
+                    c = st.columns(4)
+                    area = num(c[0], "Drainage area (acres)", "ipr_area", 160.0, 0.1, 1e6, 10.0)
+                    rw = num(c[1], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.05, 5.0, 0.001, "%.3f")
+                    ca = dietz_input(c[2])
+                    if with_dp:
+                        c = st.columns(4)
+                        top_md = num(c[0], "TOP node MD (ft)", "ipr_top_md", 9275.0, 0.0, 4e4, 10.0)
+                        top_tvd = num(c[1], "TOP node TVD (ft)", "ipr_top_tvd", 9275.0, 0.0, 4e4, 10.0)
+                        if not gas:
+                            wc = num(c[2], "Water cut (%)", "ipr_wc", 0.0, 0.0, 100.0, 1.0) / 100
+                    st.caption("Layer data. Darcy/Jones layers use permeability, thickness and skin; PI / C and n "
+                               "layers use their own coefficients. Blank layers carry no inflow."
+                               + (" Depths are those of each layer's inflow point; ID and roughness describe the "
+                                  "pipe above the layer." if with_dp else ""))
+                    tab_ = multilayer_table(fluid, with_dp)
+                    layers = []
+                    for _, row in tab_.iterrows():
+                        if row.get("Type") != "Perforated" or pd.isna(row.get("Layer pressure (psia)")):
+                            continue
+                        L = {"pr": float(row["Layer pressure (psia)"]), "model": row.get("IPR model")}
+                        if not gas:
+                            if L["model"] == "Darcy":
+                                L["j"] = ipr.darcy_pi(float(row["Permeability (md)"]), float(row["Thickness (ft)"]),
+                                                      pvt["mu"], pvt["bo"], area, ca, rw, float(row["Skin"] or 0))
+                            else:
+                                L["j"] = float(row["PI (STB/d/psi)"])
+                        else:
+                            if L["model"] == "Jones":
+                                a_, b_, _ = ipr.jones_gas_coeffs(float(row["Permeability (md)"]), float(row["Thickness (ft)"]),
+                                                                 area, ca, rw, float(row["Skin"] or 0), t_f, gasp["mu_r"],
+                                                                 gasp["z_r"], gasp["sg"], float(row["Thickness (ft)"]))
+                                L.update(a=a_, b=b_)
+                            else:
+                                L.update(c=float(row["C (Mscf/d/psi^2n)"]), n=float(row["n"]))
+                        if with_dp:
+                            L.update(md=float(row["MD (ft)"]), tvd=float(row["TVD (ft)"]),
+                                     id_in=float(row["Flowing ID (in)"]), rough_in=float(row["Roughness (in)"]))
+                        layers.append(L)
+                    if with_dp:
+                        props = (dict(mu=pvt["mu"], bo=pvt["bo"], rho=pvt["rho"], wc=wc) if not gas
+                                 else dict(mu_z=gasp["mu_z"], sg=gasp["sg"], t_f=t_f))
+                        curve = ipr2.multilayer_dp(fluid, layers, top_md, top_tvd, props,
+                                                   pvt["pb"] if not gas else None, n=25 if gas else 40)
+                    else:
+                        curve = ipr2.multilayer(fluid, layers, pvt["pb"] if not gas else None)
+                elif model == "Modified Isochronal":
+                    c = st.columns(4)
+                    k = num(c[0], "Gas permeability (md)", "ipr_k", 50.0, 0.001, 1e5, 1.0)
+                    phi = num(c[1], "Porosity (fraction)", "ipr_phi", 0.15, 0.01, 0.5, 0.01)
+                    swc = num(c[2], "Connate water saturation", "ipr_swc", 0.2, 0.0, 0.9, 0.01)
+                    rw = num(c[3], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.05, 5.0, 0.001, "%.3f")
+                    c = st.columns(4)
+                    area = num(c[0], "Drainage area (acres)", "ipr_area", 160.0, 0.1, 1e6, 10.0)
+                    tfl = num(c[1], "Flow period duration (hours)", "ipr_tfl", 12.0, 0.1, 1e4, 1.0)
+                    tsh = num(c[2], "Shut-in period duration (hours)", "ipr_tsh", 12.0, 0.0, 1e4, 1.0)
+                    st.caption("Flow periods in test order: rate (Mscf/d) and FBHP at the end of each period. "
+                               "The reservoir pressure above is the initial (stabilised) shut-in pressure.")
+                    t = ipr_test_table("ipr_tests_iso", "Gas rate (Mscf/d)", 6)
+                    curve = ipr2.modified_isochronal(pr, t, tfl, tsh, k, phi, swc, gasp["mu_r"], rw,
+                                                     np.sqrt(area * 43560 / np.pi))
+            except (ValueError, KeyError, TypeError) as e:
+                err = str(e) or e.__class__.__name__
 
-        # ----------------------------------------------------------- results
-        st.subheader("Results")
-        if err:
-            st.warning(err)
-        elif curve is None:
-            st.info("Enter the model data above.")
-        else:
-            ss["ipr_curve"] = curve
-            for n_ in curve.notes:
-                st.info(n_)
-            items = [(k_, v) for k_, v in curve.params.items() if isinstance(v, (int, float, np.floating))]
-            m = st.columns(min(len(items) + 1, 5))
-            m[0].metric("AOF", f"{curve.aof / 1e3:,.3f} MMscf/d" if gas else f"{curve.aof:,.0f} STB/d")
-            for col, (k_, v) in zip(m[1:], items[:4]):
-                col.metric(k_, f"{v:.4g}" if abs(v) < 1e4 else f"{v:,.0f}")
-            if len(items) > 4:
-                st.caption(" · ".join(f"{k_}: {v:.4g}" for k_, v in items[4:]))
-            st.pyplot(ipr_plot(curve, None if gas else pvt["pb"],
-                               raw_curve if sc.kind != "none" else None), clear_figure=True)
-            if hasattr(curve, "profile"):
-                st.pyplot(profile_plot(curve), clear_figure=True)
-            table = curve.table(cgr=cgr, wgr=wgr) if gas else curve.table(wc=wc, gor=pvt.get("gor"))
-            if kh_for_skin and skin_parts:
-                s_tot = sum(skin_parts.values())
-                if gas:
-                    coef = 1422 * (t_f + 459.67) * gasp["mu_r"] * gasp["z_r"] * s_tot / kh_for_skin
-                    table["dP skin (psi)"] = np.sqrt(table["Pwf (psia)"] ** 2 + coef * curve.q) - table["Pwf (psia)"]
-                else:
-                    table["dP skin (psi)"] = 141.2 * pvt["mu"] * pvt["bo"] * s_tot / kh_for_skin * curve.q
-            if hasattr(curve, "dp_sand_control"):
-                table["dP sand control (psi)"] = curve.dp_sand_control
-            lr = getattr(curve, "layer_rates", None)
-            if lr is not None:
-                for col in lr.columns:
-                    table[f"{col} rate"] = lr[col].to_numpy() / (1e3 if gas else 1)
-            with st.expander("IPR table", expanded=False):
-                st.dataframe(table.style.format(precision=2), hide_index=True, width="stretch")
-            if hasattr(curve, "isochronal"):
-                with st.expander("Modified isochronal corrections", expanded=True):
-                    st.dataframe(curve.isochronal.style.format(precision=4), hide_index=True, width="stretch")
-            st.download_button("Download IPR (CSV)", table.to_csv(index=False).encode(), "ipr.csv")
+            # ----------------------------------------------------- sand control
+            raw_curve = curve
+            sc = sand_control_panel(o, fluid, float(val("ipr_h", 60.0)))
+            if curve is not None and err is None and sc.kind != "none":
+                try:
+                    dp_fn = wcomp.sand_control_dp(sc, fluid, sc_props(fluid, pvt, gasp, pr, t_f))
+                    curve = wcomp.apply_sand_control(curve, dp_fn)
+                    for attr in ("layer_rates", "profile", "profile_heel_pressure", "isochronal", "c_iso"):
+                        if hasattr(raw_curve, attr):
+                            setattr(curve, attr, getattr(raw_curve, attr))
+                except (ValueError, KeyError) as e:
+                    err = f"Sand control: {e}"
+
+            # ----------------------------------------------------------- results
+            st.subheader("Results")
+            if err:
+                st.warning(err)
+            elif curve is None:
+                st.info("Enter the model data above.")
+            else:
+                ss["ipr_curve"] = curve
+                for n_ in curve.notes:
+                    st.info(n_)
+                items = [(k_, v) for k_, v in curve.params.items() if isinstance(v, (int, float, np.floating))]
+                m = st.columns(min(len(items) + 1, 5))
+                m[0].metric("AOF", f"{curve.aof / 1e3:,.3f} MMscf/d" if gas else f"{curve.aof:,.0f} STB/d")
+                for col, (k_, v) in zip(m[1:], items[:4]):
+                    col.metric(k_, f"{v:.4g}" if abs(v) < 1e4 else f"{v:,.0f}")
+                if len(items) > 4:
+                    st.caption(" · ".join(f"{k_}: {v:.4g}" for k_, v in items[4:]))
+                st.pyplot(ipr_plot(curve, None if gas else pvt["pb"],
+                                   raw_curve if sc.kind != "none" else None), clear_figure=True)
+                if hasattr(curve, "profile"):
+                    st.pyplot(profile_plot(curve), clear_figure=True)
+                table = curve.table(cgr=cgr, wgr=wgr) if gas else curve.table(wc=wc, gor=pvt.get("gor"))
+                if kh_for_skin and skin_parts:
+                    s_tot = sum(skin_parts.values())
+                    if gas:
+                        coef = 1422 * (t_f + 459.67) * gasp["mu_r"] * gasp["z_r"] * s_tot / kh_for_skin
+                        table["dP skin (psi)"] = np.sqrt(table["Pwf (psia)"] ** 2 + coef * curve.q) - table["Pwf (psia)"]
+                    else:
+                        table["dP skin (psi)"] = 141.2 * pvt["mu"] * pvt["bo"] * s_tot / kh_for_skin * curve.q
+                if hasattr(curve, "dp_sand_control"):
+                    table["dP sand control (psi)"] = curve.dp_sand_control
+                lr = getattr(curve, "layer_rates", None)
+                if lr is not None:
+                    for col in lr.columns:
+                        table[f"{col} rate"] = lr[col].to_numpy() / (1e3 if gas else 1)
+                with st.expander("IPR table", expanded=False):
+                    st.dataframe(table.style.format(precision=2), hide_index=True, width="stretch")
+                if hasattr(curve, "isochronal"):
+                    with st.expander("Modified isochronal corrections", expanded=True):
+                        st.dataframe(curve.isochronal.style.format(precision=4), hide_index=True, width="stretch")
+                st.download_button("Download IPR (CSV)", table.to_csv(index=False).encode(), "ipr.csv")

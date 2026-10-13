@@ -35,7 +35,7 @@ jupyter notebook notebooks/demo.ipynb
 The app is being rebuilt tab by tab. It currently has three tabs:
 
 1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
-2. **PVT Input Data** - shows black-oil or compositional input depending on the Method chosen in tab 1.
+2. **PVT Input Data** - shows black-oil or compositional input depending on the Method chosen in tab 1. For dry/wet gas with black oil it takes gas gravity, impurities and temperature.
 
    **Equation of state:** import a Petroleum Experts PRP export (.prp). The tool reads the EOS (Peng-Robinson or SRK), components, binary interaction coefficients, volume shifts, separator train and reference temperature, then calculates the saturation pressure (bubble or dew), separator-train GOR/CGR, stock-tank API and gas gravity, Bo or Bg, phase properties versus pressure (LBC viscosity, parachor IFT, liquid dropout) and the phase envelope. It warns when the fluid's behaviour contradicts the fluid type chosen in tab 1.
 
@@ -49,6 +49,7 @@ The app is being rebuilt tab by tab. It currently has three tabs:
    - Oil: P.I. Entry, Vogel, Composite, Darcy, Fetkovich, Multi-rate Fetkovich, Jones, Multi-rate Jones, Transient, External entry.
    - Gas and condensate: Jones, Forchheimer, Back pressure, C and n, Multi-rate C and n, Multi-rate Jones, Forchheimer with pseudo-pressure, Multi-rate Forchheimer with pseudo-pressure, External entry.
    - Advanced (oil and gas): Hydraulically fractured well (Gringarten infinite-conductivity with Cinco-Ley finite-conductivity correction, transient to PSS), Horizontal well - no-flow boundaries (Babu & Odeh, Joshi), Horizontal well - transverse vertical fractures (Mukherjee-Economides), Horizontal well - friction dP (segmented toe-to-heel march), Dual porosity (Warren-Root), Multi-layer (with crossflow), Multi-layer with wellbore dP. Gas also has Modified Isochronal (correction factors and stabilised C).
+   - Properties (viscosity, FVF, Z, bubble point, compressibility) come from tab 2 and are not repeated here. Models that use a drainage area take the Dietz shape factor as an input (typical values in the field's help).
    - Multi-rate models calculate the reservoir pressure from the tests when the entered pressure is at or below the highest test FBHP.
    - **Skin:** entered by hand, Karakas & Tariq (perforation, damaged and crushed zones) or MacLeod for cased hole; Hawkins damaged zone for open hole. Optional Cinco-Ley deviation and Papatzacos partial penetration. Shows the skin breakdown and the dP across the skin.
    - **Sand control** (chosen in tab 1): cased gravel pack (linear flow through gravel-filled perforation tunnels, Darcy + non-Darcy), open-hole gravel pack and pre-packed screen (radial Darcy + Forchheimer), wire-wrapped screen and slotted liner (orifice flow through slots). Applied in series with the reservoir IPR; the plot shows the curve with and without sand control.
