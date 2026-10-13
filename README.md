@@ -26,13 +26,13 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 70 tests
+pytest -q                       # 74 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
 ### The Streamlit app (`app.py`)
 
-The app is being rebuilt tab by tab. It currently has three tabs:
+The app is being rebuilt tab by tab. It currently has four tabs:
 
 1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
 2. **PVT Input Data** - shows black-oil or compositional input depending on the Method chosen in tab 1. For dry/wet gas with black oil it takes gas gravity, impurities and temperature.
@@ -55,6 +55,14 @@ The app is being rebuilt tab by tab. It currently has three tabs:
    - **Skin:** entered by hand, Karakas & Tariq (perforation, damaged and crushed zones) or MacLeod for cased hole; Hawkins damaged zone for open hole. Optional Cinco-Ley deviation and Papatzacos partial penetration. Shows the skin breakdown and the dP across the skin.
    - **Sand control** (chosen in tab 1): cased gravel pack (linear flow through gravel-filled perforation tunnels, Darcy + non-Darcy), open-hole gravel pack and pre-packed screen (radial Darcy + Forchheimer), wire-wrapped screen and slotted liner (orifice flow through slots). Applied in series with the reservoir IPR; the plot shows the curve with and without sand control.
    - Not available: Kuchuk & Goode (Babu & Odeh / Joshi are used instead), SkinAide and thermally induced fractures (injectors).
+
+4. **Equipment Data** - five sub-tabs, with a status table showing which sections are complete:
+
+   - **Deviation survey:** up to 20 MD/TVD points, with calculated angle and cumulative displacement and a well-path plot. **Filter a longer survey** accepts any number of points (paste, or upload CSV/TXT/Excel) and keeps the 20 that best reproduce the TVD profile, reporting the largest and RMS TVD error.
+   - **Surface equipment:** manifold, line pipe, choke and fittings (equivalent length from L/D values), surrounding temperature and overall heat transfer coefficient.
+   - **Downhole equipment:** Xmas tree, tubing, SSSV, restriction, gas lift mandrel, SSD and casing, PROSPER-style. Checks depths, diameters and roughness, requires tubing OD and casing ID when annular flow is selected, and checks the string against the survey. Shows flow sections, components and a schematic.
+   - **Geothermal gradient:** formation temperature against MD (TVD from the survey), gradient per interval and the overall heat transfer coefficient.
+   - **Average heat capacities:** oil 0.53, gas 0.51, water 1.0 BTU/lb/F by default.
 
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
@@ -99,6 +107,7 @@ wellmodel/
   eos.py            PRP import, PR/SRK equation of state, flash, envelope, separators
   inflow.py         IPR models (oil, gas/condensate), multi-rate fitting, pseudo-pressure
   inflow_adv.py     fractured, horizontal, dual-porosity, multilayer, friction, modified isochronal
+  equipment.py      deviation survey and filter, surface/downhole equipment, geothermal gradient
   mpp.py            multiphase pseudo-pressure (Corey, black oil / EOS integrands)
   completion.py     skin models (Karakas & Tariq, MacLeod, Hawkins, deviation, partial penetration), sand control
   synthetic.py      known-answer test data

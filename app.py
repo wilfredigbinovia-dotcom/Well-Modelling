@@ -26,6 +26,7 @@ from wellmodel import inflow as ipr
 from wellmodel import inflow_adv as ipr2
 from wellmodel import completion as wcomp
 from wellmodel import mpp as wmpp
+from wellmodel import equipment as weq
 from wellmodel import options as wopt
 from wellmodel import plotting as wplt
 
@@ -112,7 +113,7 @@ def radio(col, label, options, key, default=None, **kw):
 
 st.title("🛢️ wellmodel")
 
-TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data"]
+TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data"]
 tabs = st.tabs(TAB_NAMES)
 
 CAPTIONS = {
@@ -1409,3 +1410,359 @@ with tabs[2]:
                     with st.expander("Modified isochronal corrections", expanded=True):
                         st.dataframe(curve.isochronal.style.format(precision=4), hide_index=True, width="stretch")
                 st.download_button("Download IPR (CSV)", table.to_csv(index=False).encode(), "ipr.csv")
+
+
+
+# ========================================================= tab 4: equipment
+EQ_ROWS = {"survey": weq.MAX_SURVEY_POINTS, "surface": 10, "downhole": 18, "geo": 20}
+
+
+def blank_grid(cols, n, text_cols=()):
+    df = pd.DataFrame({c: pd.Series([None] * n, dtype=object) if c in text_cols
+                       else pd.Series([np.nan] * n, dtype=float) for c in cols})
+    df.index = pd.RangeIndex(1, n + 1, name="Point")
+    return df
+
+
+def fill_grid(rows: pd.DataFrame, cols, n, text_cols=()):
+    df = blank_grid(cols, n, text_cols)
+    for i, (_, r) in enumerate(rows.iterrows()):
+        if i >= n:
+            break
+        for c in cols:
+            if c in r and pd.notna(r[c]):
+                df.iat[i, df.columns.get_loc(c)] = r[c]
+    return df
+
+
+def set_grid(name, df):
+    ss["eq_" + name] = df
+    ss["_ver_eq_" + name] = ss.get("_ver_eq_" + name, 0) + 1
+
+
+def grid(name, column_config, height="auto"):
+    ed_key = f"eq_{name}_ed_{ss.get('_ver_eq_' + name, 0)}"
+    return st.data_editor(ss["eq_" + name], key=ed_key, num_rows="fixed", width="stretch",
+                          column_config=column_config, height=height)
+
+
+SURF_TEXT = ("Label", "Type", "Fitting")
+DH_TEXT = ("Label", "Type")
+ss.setdefault("eq_survey", blank_grid(weq.SURVEY_COLUMNS, EQ_ROWS["survey"]))
+ss.setdefault("eq_surface", blank_grid(weq.SURFACE_COLUMNS, EQ_ROWS["surface"], SURF_TEXT))
+ss.setdefault("eq_downhole", blank_grid(weq.DOWNHOLE_COLUMNS, EQ_ROWS["downhole"], DH_TEXT))
+ss.setdefault("eq_geo", blank_grid(weq.GEO_COLUMNS, EQ_ROWS["geo"]))
+ss.setdefault("eq_long", pd.DataFrame({c: pd.Series(dtype=float) for c in weq.SURVEY_COLUMNS}))
+
+
+def load_equipment_example():
+    long_ = weq.example_long_survey()
+    md, tvd = weq.survey_arrays(long_)
+    idx, _, _ = weq.filter_survey(md, tvd)
+    set_grid("survey", fill_grid(long_.iloc[idx], weq.SURVEY_COLUMNS, EQ_ROWS["survey"]))
+    set_grid("long", long_)
+    set_grid("surface", fill_grid(pd.DataFrame([
+        {"Label": "Manifold", "Type": "Manifold", "TVD of End Point (ft)": 0.0},
+        {"Label": "Flowline", "Type": "Line Pipe", "Pipe Length (ft)": 3000.0, "TVD of End Point (ft)": 0.0,
+         "Pipe Inside Diameter (in)": 4.026, "Pipe Inside Roughness (in)": 0.0018, "Rate Multiplier": 1.0},
+        {"Label": "Elbow", "Type": "Fitting", "Fitting": "90° elbow (standard)", "Pipe Inside Diameter (in)": 4.026},
+        {"Label": "Wing valve", "Type": "Fitting", "Fitting": "Gate valve (open)", "Pipe Inside Diameter (in)": 4.026},
+        {"Label": "Production choke", "Type": "Choke", "Pipe Inside Diameter (in)": 0.75},
+        {"Label": "Spool", "Type": "Line Pipe", "Pipe Length (ft)": 30.0, "TVD of End Point (ft)": 0.0,
+         "Pipe Inside Diameter (in)": 2.992, "Pipe Inside Roughness (in)": 0.0006, "Rate Multiplier": 1.0},
+    ]), weq.SURFACE_COLUMNS, EQ_ROWS["surface"], SURF_TEXT))
+    set_grid("downhole", fill_grid(pd.DataFrame([
+        {"Type": "Xmas Tree", "Measured Depth (ft)": 35.5},
+        {"Type": "Tubing", "Measured Depth (ft)": 136.54, "Tubing Inside Diameter (in)": 2.992,
+         "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 3.5,
+         "Tubing Outside Roughness (in)": 0.0006, "Rate Multiplier": 1.0},
+        {"Label": "WRSCSSSV", "Type": "SSSV", "Tubing Inside Diameter (in)": 1.5, "Rate Multiplier": 1.0},
+        {"Type": "Tubing", "Measured Depth (ft)": 10962.0, "Tubing Inside Diameter (in)": 2.992,
+         "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 3.5,
+         "Tubing Outside Roughness (in)": 0.0006, "Rate Multiplier": 1.0},
+        {"Label": "Casing", "Type": "Casing", "Measured Depth (ft)": 10963.0, "Casing Inside Diameter (in)": 8.681,
+         "Casing Inside Roughness (in)": 0.0006, "Rate Multiplier": 1.0},
+    ]), weq.DOWNHOLE_COLUMNS, EQ_ROWS["downhole"], DH_TEXT))
+    set_grid("geo", fill_grid(pd.DataFrame({weq.GEO_COLUMNS[0]: [35.5, 10963.0], weq.GEO_COLUMNS[1]: [60.0, 182.19]}),
+                              weq.GEO_COLUMNS, EQ_ROWS["geo"]))
+    put("eq_u", 4.17361)
+
+
+def clear_equipment():
+    set_grid("survey", blank_grid(weq.SURVEY_COLUMNS, EQ_ROWS["survey"]))
+    set_grid("surface", blank_grid(weq.SURFACE_COLUMNS, EQ_ROWS["surface"], SURF_TEXT))
+    set_grid("downhole", blank_grid(weq.DOWNHOLE_COLUMNS, EQ_ROWS["downhole"], DH_TEXT))
+    set_grid("geo", blank_grid(weq.GEO_COLUMNS, EQ_ROWS["geo"]))
+    set_grid("long", pd.DataFrame({c: pd.Series(dtype=float) for c in weq.SURVEY_COLUMNS}))
+
+
+def read_survey_file(f):
+    name = f.name.lower()
+    if name.endswith((".xlsx", ".xls")):
+        raw = pd.read_excel(f)
+    else:
+        raw = pd.read_csv(f, sep=None, engine="python")
+    num_ = raw.apply(pd.to_numeric, errors="coerce")
+    cols = [c for c in raw.columns if num_[c].notna().mean() > 0.8]
+    lower = {c: str(c).lower() for c in cols}
+    md_c = next((c for c in cols if "md" in lower[c] or "measured" in lower[c]), None)
+    tvd_c = next((c for c in cols if "tvd" in lower[c] or "vertical" in lower[c]), None)
+    if md_c is None or tvd_c is None:
+        if len(cols) < 2:
+            raise ValueError("Could not find two numeric columns (MD and TVD) in the file.")
+        md_c, tvd_c = cols[0], cols[1]
+    out = pd.DataFrame({weq.SURVEY_COLUMNS[0]: num_[md_c], weq.SURVEY_COLUMNS[1]: num_[tvd_c]}).dropna()
+    return out.reset_index(drop=True)
+
+
+def transfer_filtered(md, tvd, idx):
+    set_grid("survey", fill_grid(pd.DataFrame({weq.SURVEY_COLUMNS[0]: md[idx], weq.SURVEY_COLUMNS[1]: tvd[idx]}),
+                                 weq.SURVEY_COLUMNS, EQ_ROWS["survey"]))
+
+
+def show_issues(issues):
+    for lvl, msg in issues:
+        {"error": st.error, "warning": st.warning, "info": st.info}[lvl](msg)
+
+
+def status_of(issues):
+    lv = {l for l, _ in issues}
+    return "❌ Needs fixing" if "error" in lv else ("⚠️ Check warnings" if "warning" in lv else "✅ OK")
+
+
+def survey_plot(md, tvd, long_md=None, long_tvd=None):
+    t = weq.survey_table(md, tvd)
+    fig, (a, b) = plt.subplots(1, 2, figsize=(11, 4.2))
+    if long_md is not None:
+        lt = weq.survey_table(long_md, long_tvd)
+        a.plot(lt["Cumulative Displacement (ft)"], lt["True Vertical Depth (ft)"], color=wplt.INK2, lw=1,
+               label=f"full survey ({len(long_md)} points)")
+    a.plot(t["Cumulative Displacement (ft)"], t["True Vertical Depth (ft)"], "-o", ms=3.5, color=wplt.SERIES[0],
+           label=f"used ({len(md)} points)")
+    a.invert_yaxis(); a.set_xlabel("Cumulative displacement (ft)"); a.set_ylabel("TVD (ft)")
+    a.set_title("Well path", fontsize=10); a.legend(fontsize=8)
+    b.step(t["Measured Depth (ft)"], t["Angle from vertical (deg)"], where="post", color=wplt.SERIES[0])
+    b.set_xlabel("Measured depth (ft)"); b.set_ylabel("Angle from vertical (deg)")
+    b.set_title("Deviation angle", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def schematic_plot(top, secs, points):
+    fig, ax = plt.subplots(figsize=(4.2, 6.2))
+    if len(secs):
+        for _, r in secs.iterrows():
+            y = [r["MD top (ft)"], r["MD bottom (ft)"]]
+            if r["Type"] == "Tubing":
+                for sgn in (-1, 1):
+                    ax.plot([sgn * r["Flow ID (in)"] / 2] * 2, y, color=wplt.SERIES[0], lw=1.6)
+                    if pd.notna(r["Tubing OD (in)"]):
+                        ax.plot([sgn * r["Tubing OD (in)"] / 2] * 2, y, color=wplt.SERIES[0], lw=0.8)
+                    if pd.notna(r["Casing ID (in)"]):
+                        ax.plot([sgn * r["Casing ID (in)"] / 2] * 2, y, color=wplt.INK, lw=1.6)
+        prev_shoe = top if top is not None else 0.0
+        for _, r in secs[secs["Type"] == "Casing"].iterrows():
+            # first casing runs from surface; later casing rows hang from the previous shoe (liners)
+            y = [prev_shoe, r["MD bottom (ft)"]]
+            for sgn in (-1, 1):
+                ax.plot([sgn * r["Flow ID (in)"] / 2] * 2, y, color=wplt.INK, lw=1.6)
+            ax.annotate(f'{r["Label"]} {r["Flow ID (in)"]:g}" ID', (-r["Flow ID (in)"] / 2, r["MD bottom (ft)"]),
+                        xytext=(-4, -2), textcoords="offset points", ha="right", va="top", fontsize=7.5)
+            prev_shoe = r["MD bottom (ft)"]
+        for _, p_ in points.iterrows():
+            w = (p_["ID (in)"] if pd.notna(p_["ID (in)"]) else 1.0) / 2
+            ax.plot([-w, w], [p_["MD (ft)"]] * 2, color=wplt.SERIES[1], lw=3)
+            ax.annotate(p_["Label"], (w, p_["MD (ft)"]), xytext=(6, 0), textcoords="offset points",
+                        fontsize=7.5, va="center", color=wplt.SERIES[1])
+        width = np.nanmax([secs["Flow ID (in)"].max(), secs["Casing ID (in)"].max()]) / 2
+        ax.set_xlim(-width * 1.6, width * 1.9)
+    if top is not None and np.isfinite(top):
+        ax.axhline(top, color=wplt.INK2, lw=0.8, ls=":")
+        ax.annotate("Xmas tree", (ax.get_xlim()[0], top), xytext=(3, 3), textcoords="offset points", ha="left",
+                    fontsize=7.5)
+    ax.invert_yaxis(); ax.set_ylabel("Measured depth (ft)"); ax.set_xlabel("Radius (in) - not to scale")
+    ax.set_title("Downhole schematic", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def geo_plot(gt, secs_bottom=None):
+    fig, ax = plt.subplots(figsize=(5, 4.2))
+    ax.plot(gt["Formation Temperature (deg F)"], gt["Formation TVD (ft)"], "-o", ms=4, color=wplt.SERIES[1])
+    ax.invert_yaxis(); ax.set_xlabel("Formation temperature (°F)"); ax.set_ylabel("TVD (ft)")
+    ax.set_title("Geothermal gradient", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+with tabs[3]:
+    st.header("Equipment Data")
+    o = ss.get("options")
+    st.caption("Well path, surface and downhole equipment, temperature profile and heat capacities for the "
+               "tubing (VLP) calculations. Depths are measured from the depth reference used for the "
+               "deviation survey (normally RKB).")
+    c = st.columns([1, 1, 4])
+    c[0].button("Load example", on_click=load_equipment_example, width="stretch",
+                help="Synthetic J-shaped well with the downhole and temperature data from the PROSPER screenshots.")
+    c[1].button("Clear all", on_click=clear_equipment, width="stretch")
+    status_box = st.container()
+    sub = st.tabs(["Deviation survey", "Surface equipment", "Downhole equipment", "Geothermal gradient",
+                   "Average heat capacities"])
+    status = {}
+
+    # ------------------------------------------------------ deviation survey
+    with sub[0]:
+        st.caption(f"Measured depth and true vertical depth, top down. Up to {weq.MAX_SURVEY_POINTS} points are "
+                   "used; turn on the filter to enter a longer survey and pick the "
+                   f"{weq.MAX_SURVEY_POINTS} points that best keep its shape.")
+        cc = st.columns([1, 1.6])
+        with cc[0]:
+            ed = grid("survey", {c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.SURVEY_COLUMNS},
+                      height=36 * (EQ_ROWS["survey"] + 1) + 3)
+        md_s, tvd_s = weq.survey_arrays(ed)
+        iss = weq.check_survey(md_s, tvd_s)
+        status["Deviation survey"] = iss
+        long_md = long_tvd = None
+        with cc[1]:
+            if not any(l == "error" for l, _ in iss):
+                st.dataframe(weq.survey_table(md_s, tvd_s).style.format(precision=1), hide_index=True,
+                             width="stretch")
+            show_issues(iss)
+
+        if st.toggle("Filter a longer survey", key="eq_filter_on",
+                     help=f"Enter or upload any number of survey points; the tool keeps the {weq.MAX_SURVEY_POINTS} "
+                          "that reproduce the well path best."):
+            fc = st.columns([1.2, 1, 1])
+            up = fc[0].file_uploader("Upload survey (CSV, TXT or Excel with MD and TVD columns)",
+                                     type=["csv", "txt", "xlsx", "xls"], key="eq_survey_file")
+            if up is not None and ss.get("_eq_file_seen") != (up.name, up.size):
+                try:
+                    set_grid("long", read_survey_file(up))
+                    ss["_eq_file_seen"] = (up.name, up.size)
+                except (ValueError, pd.errors.ParserError) as e:
+                    st.error(f"Could not read the file: {e}")
+            fc[1].button("Example long survey", on_click=lambda: set_grid("long", weq.example_long_survey()),
+                         help="150 noisy survey stations for a J-shaped well.")
+            fc[2].button("Clear long survey", on_click=lambda: set_grid(
+                "long", pd.DataFrame({c_: pd.Series(dtype=float) for c_ in weq.SURVEY_COLUMNS})))
+            st.caption("Or paste rows into this table (any number of rows).")
+            long_ed = st.data_editor(ss["eq_long"], key=f"eq_long_ed_{ss.get('_ver_eq_long', 0)}",
+                                     num_rows="dynamic", width="stretch", height=260,
+                                     column_config={c_: st.column_config.NumberColumn(c_, format="%g")
+                                                    for c_ in weq.SURVEY_COLUMNS})
+            lmd, ltvd = weq.survey_arrays(long_ed)
+            if len(lmd) >= 2:
+                liss = weq.check_survey(lmd, ltvd, max_points=10 ** 9)
+                if any(l == "error" for l, _ in liss):
+                    show_issues(liss)
+                else:
+                    idx, mx, rms = weq.filter_survey(lmd, ltvd)
+                    st.info(f"{len(lmd)} points entered → {len(idx)} kept. Largest TVD error from filtering "
+                            f"{mx:.2f} ft (RMS {rms:.2f} ft).")
+                    st.button(f"Use the {len(idx)} filtered points", type="primary",
+                              on_click=transfer_filtered, args=(lmd, ltvd, idx))
+                    long_md, long_tvd = lmd, ltvd
+        if len(md_s) >= 2 and not any(l == "error" for l, _ in iss):
+            st.pyplot(survey_plot(md_s, tvd_s, long_md, long_tvd), clear_figure=True)
+    survey_ok = len(md_s) >= 2 and not any(l == "error" for l, _ in status["Deviation survey"])
+    survey_max = float(md_s.max()) if survey_ok else None
+
+    # ------------------------------------------------------ surface equipment
+    with sub[1]:
+        st.caption("Flowline, choke and pipe fittings between the wellhead and the manifold. Enter the "
+                   "Manifold first, then the equipment back towards the wellhead. Fittings are converted to an "
+                   "equivalent pipe length (L/D method).")
+        c = st.columns(4)
+        t_sur = num(c[0], "Surrounding temperature (deg F)", "eq_tsur", 60.0, -60.0, 200.0)
+        u_sur = num(c[1], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_usur", 8.0, 0.0, 1000.0,
+                    help="Flowline to surroundings: roughly 1-2 buried, 5-10 bare pipe in air, higher in water.")
+        ed_s = grid("surface", {
+            "Type": st.column_config.SelectboxColumn(options=weq.SURFACE_TYPES),
+            "Fitting": st.column_config.SelectboxColumn(options=list(weq.FITTINGS), width="medium"),
+            **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.SURFACE_COLUMNS[3:]}})
+        iss = weq.check_surface(ed_s, t_sur, u_sur)
+        status["Surface equipment"] = iss
+        show_issues(iss)
+        summ = weq.surface_summary(ed_s)
+        if len(summ) and not any(l == "error" for l, _ in iss):
+            st.markdown("**Summary** (manifold to wellhead)")
+            st.dataframe(summ.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+            st.caption(f"Total equivalent length {summ['Equivalent length (ft)'].sum():,.0f} ft.")
+
+    # ----------------------------------------------------- downhole equipment
+    with sub[2]:
+        ft = o.flow_type if o else "tubing"
+        st.caption("Tubing string and its components from the Xmas tree down, then casing to the deepest "
+                   "flowing depth. Point components (SSSV, restriction) sit at the previous depth unless an MD "
+                   "is entered." + (" Annular flow is selected: tubing OD and casing ID/roughness are needed on "
+                                    "every tubing row." if ft != "tubing" else ""))
+        with st.expander("Equipment types"):
+            st.markdown("\n".join(f"- **{k}** - {v}" for k, v in weq.TYPE_HELP.items()))
+        ed_d = grid("downhole", {
+            "Type": st.column_config.SelectboxColumn(options=weq.DOWNHOLE_TYPES),
+            **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.DOWNHOLE_COLUMNS[2:]}})
+        iss = weq.check_downhole(ed_d, ft, survey_max)
+        status["Downhole equipment"] = iss
+        show_issues(iss)
+        top_md, secs, pts = None, pd.DataFrame(), pd.DataFrame()
+        if not any(l == "error" for l, _ in iss):
+            top_md, secs, pts = weq.downhole_sections(ed_d, md_s if survey_ok else None,
+                                                      tvd_s if survey_ok else None)
+            cc = st.columns([1.7, 1])
+            with cc[0]:
+                st.markdown("**Flow sections**")
+                st.dataframe(secs.style.format(precision=4, na_rep="—"), hide_index=True, width="stretch")
+                if len(pts):
+                    st.markdown("**Components**")
+                    st.dataframe(pts.style.format(precision=3, na_rep="—"), hide_index=True, width="stretch")
+            with cc[1]:
+                st.pyplot(schematic_plot(top_md, secs, pts), clear_figure=True)
+    bottom_md = float(secs["MD bottom (ft)"].max()) if len(secs) else None
+
+    # ----------------------------------------------------- geothermal gradient
+    with sub[3]:
+        st.caption("Formation temperature against measured depth, from the wellhead to the deepest equipment. "
+                   "TVD is calculated from the deviation survey. The overall heat transfer coefficient sets the "
+                   "heat loss between the flowing fluid and the formation.")
+        u_geo = num(st.columns(4)[0], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_u", 8.0, 0.0, 1000.0,
+                    None, "%.5g")
+        cc = st.columns([1, 1.3])
+        with cc[0]:
+            ed_g = grid("geo", {c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.GEO_COLUMNS},
+                        height=36 * 12)
+        gmd, gtemp = weq.geo_arrays(ed_g)
+        iss = weq.check_geothermal(gmd, gtemp, u_geo, top_md, bottom_md, survey_max)
+        status["Geothermal gradient"] = iss
+        with cc[1]:
+            if survey_ok and len(gmd) >= 2 and not np.isnan(gmd).any() and not np.isnan(gtemp).any() \
+                    and np.all(np.diff(gmd) > 0):
+                gt = weq.geothermal_table(gmd, gtemp, md_s, tvd_s)
+                st.dataframe(gt.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+                st.pyplot(geo_plot(gt), clear_figure=True)
+            elif not survey_ok:
+                st.info("Enter a valid deviation survey to calculate formation TVD.")
+        show_issues(iss)
+
+    # --------------------------------------------------- average heat capacities
+    with sub[4]:
+        st.caption("Average heat capacities used in the temperature calculation.")
+        c = st.columns(4)
+        hc = weq.HeatCapacities(num(c[0], "Cp Oil (BTU/lb/F)", "eq_cpo", 0.53, 0.01, 5.0, None, "%.3f"),
+                                num(c[1], "Cp Gas (BTU/lb/F)", "eq_cpg", 0.51, 0.01, 5.0, None, "%.3f"),
+                                num(c[2], "Cp Water (BTU/lb/F)", "eq_cpw", 1.0, 0.01, 5.0, None, "%.3f"))
+        if c[3].button("Reset to defaults"):
+            for k_ in ("eq_cpo", "eq_cpg", "eq_cpw"):
+                reset(k_)
+            st.rerun()
+        iss = hc.check()
+        status["Average heat capacities"] = iss
+        show_issues(iss)
+
+    with status_box:
+        st.dataframe(pd.DataFrame({"Section": list(status), "Status": [status_of(v) for v in status.values()],
+                                   "Messages": [len(v) for v in status.values()]}),
+                     hide_index=True, width="stretch")
+    ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": ed_s, "t_surround": t_sur,
+                       "u_surface": u_sur, "downhole": (top_md, secs, pts), "geothermal": (gmd, gtemp),
+                       "u_geo": u_geo, "heat_capacities": hc,
+                       "valid": all(not any(l == "error" for l, _ in v) for v in status.values())}

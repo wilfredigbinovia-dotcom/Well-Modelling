@@ -567,3 +567,66 @@ def test_mpp_condensate_bank_reduces_rate():
     c = wmpp.multiphase_pseudo_pressure("gas", pr, 10, 50, 160, 31.6, 0.354, 0, tab)
     assert 0 < c.params["Two-phase productivity loss (%)"] < 100
     assert (tab.loc[tab["Pressure (psia)"] > 0.5 * ps, "So"] > 0).all()   # bank below the dew point
+
+
+# ------------------------------------------------------------- equipment
+from wellmodel import equipment as weq
+
+
+def test_survey_filter_keeps_20_points_and_shape():
+    long_ = weq.example_long_survey()
+    md, tvd = weq.survey_arrays(long_)
+    idx, mx, rms = weq.filter_survey(md, tvd)
+    assert len(idx) == 20 and idx[0] == 0 and idx[-1] == len(md) - 1
+    assert mx < 2.0 and rms <= mx
+    assert weq.check_survey(md[idx], tvd[idx]) == []
+
+
+def test_survey_checks():
+    assert any(l == "error" for l, _ in weq.check_survey(np.array([0, 100, 90.]), np.array([0, 100, 90.])))
+    assert any(l == "error" for l, _ in weq.check_survey(np.array([0, 100.]), np.array([0, 150.])))
+    t = weq.survey_table(np.array([0, 1000, 2000.]), np.array([0, 1000, 1000 + 1000 * np.cos(np.radians(30))]))
+    assert t["Angle from vertical (deg)"].iloc[-1] == pytest.approx(30, abs=1e-6)
+    assert t["Cumulative Displacement (ft)"].iloc[-1] == pytest.approx(500, rel=1e-6)
+
+
+def _downhole(rows):
+    df = pd.DataFrame(rows)
+    for c in weq.DOWNHOLE_COLUMNS:
+        if c not in df:
+            df[c] = np.nan
+    return df[weq.DOWNHOLE_COLUMNS]
+
+
+def test_downhole_sections_and_checks():
+    df = _downhole([{"Type": "Xmas Tree", "Measured Depth (ft)": 35.5},
+                    {"Type": "Tubing", "Measured Depth (ft)": 136.54, "Tubing Inside Diameter (in)": 2.992,
+                     "Tubing Inside Roughness (in)": 0.0006},
+                    {"Type": "SSSV", "Label": "SSSV", "Tubing Inside Diameter (in)": 1.5},
+                    {"Type": "Tubing", "Measured Depth (ft)": 10962, "Tubing Inside Diameter (in)": 2.992,
+                     "Tubing Inside Roughness (in)": 0.0006},
+                    {"Type": "Casing", "Measured Depth (ft)": 10963, "Casing Inside Diameter (in)": 8.681,
+                     "Casing Inside Roughness (in)": 0.0006}])
+    assert weq.check_downhole(df, "tubing", 11000) == []
+    assert any("deviation survey" in m for _, m in weq.check_downhole(df, "tubing", 10000))
+    assert any("annular" in m for _, m in weq.check_downhole(df, "annular", 11000))
+    top, secs, pts = weq.downhole_sections(df)
+    assert top == 35.5 and list(secs["Type"]) == ["Tubing", "Tubing", "Casing"]
+    assert secs["Length (ft)"].sum() == pytest.approx(10963 - 35.5)
+    assert pts.iloc[0]["MD (ft)"] == 136.54
+
+
+def test_surface_fittings_and_geothermal():
+    df = pd.DataFrame([{"Type": "Manifold", "TVD of End Point (ft)": 0},
+                       {"Type": "Line Pipe", "Pipe Length (ft)": 1000, "TVD of End Point (ft)": 0,
+                        "Pipe Inside Diameter (in)": 4.0, "Pipe Inside Roughness (in)": 0.0018},
+                       {"Type": "Fitting", "Fitting": "90° elbow (standard)", "Pipe Inside Diameter (in)": 4.0}])
+    for c in weq.SURFACE_COLUMNS:
+        if c not in df:
+            df[c] = np.nan
+    assert not any(l == "error" for l, _ in weq.check_surface(df, 60, 8))
+    assert weq.surface_summary(df)["Equivalent length (ft)"].sum() == pytest.approx(1000 + 30 * 4 / 12)
+    md, t = np.array([35.5, 10963.]), np.array([60, 182.19])
+    assert weq.check_geothermal(md, t, 4.17, 35.5, 10963, 11000) == []
+    assert any(l == "error" for l, _ in weq.check_geothermal(md, t, 4.17, 35.5, 12000, 13000))
+    assert weq.temperature_at(md, t, 5499.25) == pytest.approx((60 + 182.19) / 2)
