@@ -26,15 +26,20 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 26 tests
+pytest -q                       # 38 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
 ### The Streamlit app (`app.py`)
 
-The app is being rebuilt tab by tab. It currently has one tab:
+The app is being rebuilt tab by tab. It currently has two tabs:
 
 1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
+2. **PVT Input Data** - solution GOR, oil and gas gravity, water salinity and H2S/CO2/N2, plus a lab-data table (pressure, GOR, oil FVF, oil viscosity) with temperature and bubble point. **Match** fits Parameter 1 (multiplier) and Parameter 2 (shift) for every correlation, reports the standard deviation, and suggests the Pb/Rs/Bo family and viscosity correlation needing the smallest correction. Shows match plots and a calculated PVT table.
+
+   - Bubble point / GOR / FVF: Glaso, Standing, Lasater, Vasquez-Beggs, Petrosky et al, Al-Marhoun.
+   - Viscosity: Beal et al, Beggs et al, Petrosky et al, Egbogah et al.
+   - De Ghetto et al, Bergman-Sutton and De Ghetto Mod are listed but not calculated: their coefficients could not be verified against a published source (De Ghetto Mod is PROSPER's own unpublished variant).
 
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
@@ -75,6 +80,7 @@ wellmodel/
   probabilistic.py  Monte Carlo / LHS, tornado
   transient.py      pressure transient, build-up fit, forecast
   options.py        options summary: choices, validation, engine status
+  blackoil.py       black-oil correlation families, lab-data matching, suggestion
   synthetic.py      known-answer test data
   plotting.py       figures
 app.py                Streamlit app

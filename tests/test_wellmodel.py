@@ -206,3 +206,78 @@ def test_cased_hole_slotted_liner_warns():
 def test_invalid_choice_rejected():
     with pytest.raises(ValueError):
         WellOptions(fluid_type="steam")
+
+
+# ------------------------------------------------------ black-oil PVT tab
+import pandas as pd
+from wellmodel import blackoil as bo
+
+
+@pytest.mark.parametrize("fam", ["standing", "vazquez_beggs", "petrosky", "al_marhoun"])
+def test_pb_rs_exact_inverses(fam):
+    inp = bo.PVTInputs(rsb=600, api=33, gas_sg=0.78)
+    pb = bo.pb_raw(fam, inp, 600, 200)
+    # published exponents are reciprocal to ~5 significant figures
+    assert bo.rs_raw(fam, inp, pb, 200) == pytest.approx(600, rel=1e-4)
+
+
+@pytest.mark.parametrize("fam", ["lasater", "glaso"])
+def test_pb_rs_published_inverses_close(fam):
+    inp = bo.PVTInputs(rsb=600, api=33, gas_sg=0.78)
+    pb = bo.pb_raw(fam, inp, 600, 200)
+    assert bo.rs_raw(fam, inp, pb, 200) == pytest.approx(600, rel=0.01)
+
+
+def test_single_point_match_splits_correction_equally():
+    # one point, correlation 3263 psia vs measured 3440: same pattern as PROSPER
+    m = bo.fit_linear([3263.0], [3440.0])
+    assert m.p1 == pytest.approx(1.02712, abs=1e-4)
+    assert m.p2 == pytest.approx(88.5, abs=0.1)
+    assert np.isnan(m.std)
+
+
+def test_example_match_recovers_generating_correlations():
+    inp, data = bo.example_data()
+    r = bo.match_all(inp, data)
+    assert r.suggestion == {"pb_family": "standing", "visc_family": "beal"}
+    rs = r.matches[("rs", "standing")]
+    assert rs.p1 == pytest.approx(1.04, abs=0.02) and rs.p2 == pytest.approx(-12, abs=8)
+    assert r.matches[("visc", "beal")].p1 == pytest.approx(1.06, abs=0.02)
+    assert r.matches[("bo", "vazquez_beggs")].p1 == pytest.approx(0.99, abs=0.01)
+
+
+def test_matched_model_honours_measured_bubble_point():
+    inp, data = bo.example_data()
+    r = bo.match_all(inp, data)
+    m = bo.BlackOilModel(inp, "glaso", "petrosky",
+                         {p: r.matches[(p, "glaso")] for p in ("pb", "rs", "bo")})
+    assert m.bubble_point(data.temperature) == pytest.approx(3010, abs=0.01)
+    tab = m.table(data.temperature, [3010.0, 4000.0])
+    assert (tab["Solution GOR (scf/STB)"] == inp.rsb).all()
+
+
+def test_unverified_correlations_not_calculated():
+    inp, data = bo.example_data()
+    r = bo.match_all(inp, data)
+    assert ("pb", "de_ghetto") not in r.matches
+    assert ("visc", "bergman_sutton") not in r.matches
+    assert r.table("visc")["De Ghetto Mod"].isna().all()
+
+
+def test_lab_data_checks():
+    inp = bo.PVTInputs(rsb=500, api=35, gas_sg=0.75)
+    tbl = pd.DataFrame({"Pressure": [4000, 2000, 1000], "Gas Oil Ratio": [450, 300, 350],
+                        "Oil FVF": [1.30, 1.25, 1.20], "Oil Viscosity": [0.6, 0.8, 1.0]})
+    w = bo.MatchData(200, 2500, tbl).check(inp)
+    assert any("Above the bubble point the GOR" in x for x in w)
+    assert any("GOR should rise" in x for x in w)
+
+
+def test_gas_and_water_properties_sane():
+    inp = bo.PVTInputs(rsb=500, api=35, gas_sg=0.7, salinity_ppm=0)
+    z, bg, _, mu = bo.gas_props(inp, 14.7, 60)
+    assert z == pytest.approx(1.0, abs=0.01)
+    _, rho_w, mu_w = bo.water_props(inp, 14.7, 200)
+    assert mu_w == pytest.approx(0.30, abs=0.03)
+    sour = bo.PVTInputs(rsb=500, api=35, gas_sg=0.7, co2=10, h2s=5)
+    assert bo.gas_pseudocritical(sour)[0] < bo.gas_pseudocritical(inp)[0]
