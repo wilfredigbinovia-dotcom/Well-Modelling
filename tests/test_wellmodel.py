@@ -348,3 +348,158 @@ def test_lbc_viscosity_reasonable(example_fluid):
     r = example_fluid.flash(1200, 210)
     assert 0.1 < r.liquid.viscosity < 2.0
     assert 0.01 < r.vapour.viscosity < 0.03
+
+
+# ------------------------------------------------------------------ IPR tab
+from wellmodel import inflow as iflow
+
+
+def test_dietz_circle_equals_radial():
+    re = np.sqrt(40 * 43560 / np.pi)
+    assert iflow.dietz_term(40, 31.62, 0.354) == pytest.approx(np.log(re / 0.354) - 0.75, abs=1e-3)
+
+
+def test_vogel_honours_test_point_and_continuity():
+    c = iflow.vogel(3000, 2000, 1500, 1500)
+    assert c.rate(1500) == pytest.approx(1500)
+    assert c.rate(2000 + 1e-6) == pytest.approx(c.rate(2000 - 1e-6), rel=1e-6)
+
+
+def test_composite_limits():
+    v = iflow.vogel(3000, 2000, 1500, 1500)
+    c0 = iflow.composite(3000, 2000, 1500, 1500, 0.0)
+    assert c0.rate(1000) == pytest.approx(v.rate(1000), rel=1e-3)
+    c1 = iflow.composite(3000, 2000, 1500, 1500, 1.0)
+    assert c1.aof == pytest.approx(3000, rel=1e-3)            # straight line, J = 1
+    assert iflow.composite(3000, 2000, 1500, 1500, 0.5).rate(1500) == pytest.approx(1500, rel=1e-4)
+
+
+def test_jones_oil_b_equals_inverse_darcy_pi():
+    a, b = iflow.jones_oil_coeffs(50, 60, 40, 31.62, 0.354, 2, 0.8, 1.3, 45, 60)
+    assert b == pytest.approx(1 / iflow.darcy_pi(50, 60, 0.8, 1.3, 40, 31.62, 0.354, 2))
+    assert a > 0
+
+
+@pytest.mark.parametrize("fit_pr", [False, True])
+def test_multirate_fits_recover_parameters(fit_pr):
+    pw = np.array([3500, 3000, 2500, 2000.0])
+    q = 1e-3 * (4000 ** 2 - pw ** 2) ** 0.8
+    t = pd.DataFrame({"Rate": q, "Pwf": pw})
+    r = iflow.multirate_c_and_n(3000 if fit_pr else 4000, t)
+    assert r.pr == pytest.approx(4000, rel=1e-6) and r.params["n"] == pytest.approx(0.8, abs=1e-6)
+    qo = np.array([500, 1000, 1500, 2000.0])
+    to = pd.DataFrame({"Rate": qo, "Pwf": 3000 - (2e-5 * qo ** 2 + 0.4 * qo)})
+    r = iflow.multirate_jones_oil(1000 if fit_pr else 3000, to)
+    assert r.params["b (psi/(STB/d))"] == pytest.approx(0.4, rel=1e-6) and r.pr == pytest.approx(3000)
+
+
+def test_gas_back_pressure_n1_equals_darcy_jones():
+    a, b, _ = iflow.jones_gas_coeffs(10, 50, 160, 31.62, 0.354, 0, 200, 0.02, 0.9, 0.7, 50)
+    bp = iflow.back_pressure(4000, 10, 50, 160, 31.62, 0.354, 0, 200, 0.02, 0.9, 1.0)
+    assert bp.aof == pytest.approx(4000 ** 2 / b, rel=1e-9)
+    assert iflow.back_pressure(4000, 10, 50, 160, 31.62, 0.354, 0, 200, 0.02, 0.9, 0.7).aof == pytest.approx(bp.aof)
+
+
+def test_pseudo_pressure_ideal_limit():
+    psi = iflow.pseudo_pressure_fn(lambda p: (np.full_like(p, 0.02), np.full_like(p, 0.9)), 5000)
+    assert psi(4000) == pytest.approx(4000 ** 2 / 0.018, rel=1e-4)
+
+
+def test_transient_reverts_to_pss_at_late_time():
+    args = (3000, 2000, 1.0, 60, 160, 31.62, 0.354, 0, 0.8, 1.3, 0.15, 1.5e-5)
+    early = iflow.transient_oil(*args, 1.0)
+    late = iflow.transient_oil(*args, 5000.0)
+    assert early.params["PI (STB/d/psi)"] > late.params["PI (STB/d/psi)"]
+    assert late.params["PI (STB/d/psi)"] == pytest.approx(late.params["Pseudo-steady-state PI"])
+
+
+# ------------------------------------------------- skin and sand control
+from wellmodel import completion as wcomp, inflow_adv as iadv
+
+
+def test_hawkins_skin_hand_calc():
+    assert wcomp.hawkins(100, 0.354, 1.0, 20) == pytest.approx(4 * np.log(1.354 / 0.354))
+
+
+def test_karakas_tariq_trends():
+    base = wcomp.kt_perforation_skin(0.406, 8 / 12, 0.25 / 12, 2, 90)["perforation"]
+    assert wcomp.kt_perforation_skin(0.406, 8 / 12, 0.25 / 12, 2, 0)["perforation"] > base   # 0 deg worst
+    assert wcomp.kt_perforation_skin(0.406, 8 / 12, 0.25 / 12, 4, 90)["perforation"] < base   # more shots
+    assert wcomp.kt_perforation_skin(0.406, 1.0, 0.25 / 12, 2, 90)["perforation"] < base      # longer perfs
+    assert wcomp.kt_perforation_skin(0.406, 8 / 12, 0.25 / 12, 2, 90, 0.1)["perforation"] > base  # low kv
+
+
+def test_deviation_and_partial_penetration_skins():
+    assert wcomp.deviation_skin(0, 100, 0.354) == 0
+    assert wcomp.deviation_skin(60, 100, 0.354) < wcomp.deviation_skin(30, 100, 0.354) < 0
+    assert wcomp.partial_penetration_skin(100, 100, 0, 0.354) == 0
+    assert wcomp.partial_penetration_skin(100, 20, 0, 0.354) > wcomp.partial_penetration_skin(100, 50, 0, 0.354) > 0
+
+
+def test_sand_control_reduces_rate_consistently():
+    c = iflow.darcy(3000, 2000, 100, 60, 160, 31.62, 0.354, 0, 0.8, 1.3)
+    sc = wcomp.SandControl("gravel_pack_cased", dict(spf=12, interval=60, perf_efficiency=0.8,
+                                                     perf_diameter_in=0.75, pack_length_in=4, gravel_perm=120000))
+    dp = wcomp.sand_control_dp(sc, "oil", {"mu": 0.8, "bo": 1.3, "rho": 45})
+    c2 = wcomp.apply_sand_control(c, dp)
+    assert c2.aof < c.aof
+    i = 30                                   # sand-face pressure reproduces the original IPR
+    assert c.rate(c2.pwf[i] + c2.dp_sand_control[i]) == pytest.approx(c2.q[i], rel=1e-4)
+
+
+# ------------------------------------------------------- advanced inflow
+def test_gringarten_limits():
+    assert iadv.pd_infinite_conductivity(1e-4) == pytest.approx(np.sqrt(np.pi * 1e-4), rel=0.01)
+    assert iadv.pd_infinite_conductivity(1e5) == pytest.approx(0.5 * (np.log(1e5) + 0.80907) + np.log(2), abs=0.02)
+    assert iadv.cinco_f(1000) == pytest.approx(np.log(2), abs=0.02)
+
+
+def test_fractured_well_beats_unfractured_and_reaches_pss():
+    args = dict(pr=3000, k=1.0, h=60, area=160, ca=31.62, rw=0.354, xf=300, fcd=10, phi=0.12, ct=1.5e-5,
+                mu=0.8, pb=2000, bo=1.3)
+    early = iadv.fractured_well("oil", t_days=1, **args).params["PI (STB/d/psi)"]
+    late = iadv.fractured_well("oil", t_days=5000, **args).params["PI (STB/d/psi)"]
+    assert early > late > iflow.darcy_pi(1.0, 60, 0.8, 1.3, 160, 31.62, 0.354, 0)
+
+
+def test_babu_odeh_full_length_and_joshi_agreement():
+    geo = dict(k=10, h=50, rw=0.3, aniso_h=1, aniso_v=0.1, lx=4000, ly=2000, xw=2000, yw=1000, zw=25)
+    assert iadv.babu_odeh(L=4000, **geo)[2] == 0.0
+    kh_b, d_b, _ = iadv.babu_odeh(L=500, **geo)
+    kh_j, d_j = iadv.joshi(10, 50, 0.3, 1, 0.1, 500, 4000, 2000)
+    assert kh_b / d_b == pytest.approx(kh_j / d_j, rel=0.1)
+    pis = [np.divide(*iadv.babu_odeh(L=L, **geo)[:2]) for L in (500, 1000, 2000, 4000)]
+    assert all(np.diff(pis) > 0)
+
+
+def test_dual_porosity_homogeneous_limit():
+    a = iadv.dual_porosity("oil", 3000, 50, 60, 640, 31.62, 0.354, 0.1, 1e-5, 0.2, 0.9999, 1e-3, 0.8, 0,
+                           pb=2000, bo=1.3)
+    td = a.params["tD"]
+    j_line = 50 * 60 / (141.2 * 0.8 * 1.3 * 0.5 * (np.log(td) + 0.80907))
+    assert a.params["PI (STB/d/psi)"] == pytest.approx(j_line, rel=0.01)
+
+
+def test_multilayer_sum_and_crossflow():
+    m = iadv.multilayer("oil", [dict(pr=3000, j=1.0), dict(pr=3000, j=1.0)], pb=1000)
+    assert m.aof == pytest.approx(2 * iflow.pi_entry(3000, 1000, 1.0).aof)
+    m = iadv.multilayer("oil", [dict(pr=3000, j=1.0), dict(pr=2000, j=2.0)], pb=500)
+    assert m.pr == pytest.approx((3000 + 2 * 2000) / 3)
+
+
+def test_horizontal_friction_reduces_rate():
+    geo = dict(k=10, h=50, rw=0.3, aniso_h=1, aniso_v=0.1, lx=4000, ly=2000, xw=2000, yw=1000, zw=25)
+    kh, D, _ = iadv.babu_odeh(L=2000, **geo)
+    props = dict(rho=45, mu=0.8, bo=1.3)
+    zones = lambda d: [dict(type="Perforated", length=200, k=10, skin=0, id_in=d, rough_in=0.0006)] * 10
+    big = iadv.horizontal_friction("oil", 3000, zones(6.0), kh, D, 10, props, pb=1000)
+    small = iadv.horizontal_friction("oil", 3000, zones(1.5), kh, D, 10, props, pb=1000)
+    assert small.aof < big.aof <= big.params["AOF without friction"] + 1e-6
+
+
+def test_modified_isochronal_stabilised_below_isochronal():
+    t = pd.DataFrame({"Rate": [2000, 4000, 6000, 8000.0], "Pwf": [3900, 3780, 3640, 3480.0]})
+    r = iadv.modified_isochronal(4000, t, 12, 12, 5, 0.15, 0.25, 0.02, 0.354, 1489)
+    assert r.params["C stabilised"] < r.params["C isochronal"]
+    assert 0.5 <= r.params["n"] <= 1.0
+    assert r.isochronal["Correction factor"].iloc[0] == 1.0

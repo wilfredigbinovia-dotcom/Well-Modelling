@@ -163,7 +163,7 @@ class WellOptions:
         st = {}
         for f in FIELDS:
             if f in LUMPED:
-                st[f] = MODELLED_NOW if getattr(self, f) in ("none",) else LUMPED_IN_PI
+                st[f] = MODELLED_NOW        # skin and sand-control models in the IPR tab
             else:
                 st[f] = MODELLED_NOW if getattr(self, f) in MODELLED[f] else NOT_YET
         if self.method == "eos":

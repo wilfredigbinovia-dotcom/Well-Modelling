@@ -26,13 +26,13 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 45 tests
+pytest -q                       # 65 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
 ### The Streamlit app (`app.py`)
 
-The app is being rebuilt tab by tab. It currently has two tabs:
+The app is being rebuilt tab by tab. It currently has three tabs:
 
 1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
 2. **PVT Input Data** - shows black-oil or compositional input depending on the Method chosen in tab 1.
@@ -44,6 +44,15 @@ The app is being rebuilt tab by tab. It currently has two tabs:
    - Bubble point / GOR / FVF: Glaso, Standing, Lasater, Vasquez-Beggs, Petrosky et al, Al-Marhoun.
    - Viscosity: Beal et al, Beggs et al, Petrosky et al, Egbogah et al.
    - De Ghetto et al, Bergman-Sutton and De Ghetto Mod are listed but not calculated: their coefficients could not be verified against a published source (De Ghetto Mod is PROSPER's own unpublished variant).
+3. **IPR Data** - producer inflow models chosen by the fluid type in tab 1, using viscosity, FVF, Z and bubble point from tab 2 (black oil or equation of state) or values entered by hand.
+
+   - Oil: P.I. Entry, Vogel, Composite, Darcy, Fetkovich, Multi-rate Fetkovich, Jones, Multi-rate Jones, Transient, External entry.
+   - Gas and condensate: Jones, Forchheimer, Back pressure, C and n, Multi-rate C and n, Multi-rate Jones, Forchheimer with pseudo-pressure, Multi-rate Forchheimer with pseudo-pressure, External entry.
+   - Advanced (oil and gas): Hydraulically fractured well (Gringarten infinite-conductivity with Cinco-Ley finite-conductivity correction, transient to PSS), Horizontal well - no-flow boundaries (Babu & Odeh, Joshi), Horizontal well - transverse vertical fractures (Mukherjee-Economides), Horizontal well - friction dP (segmented toe-to-heel march), Dual porosity (Warren-Root), Multi-layer (with crossflow), Multi-layer with wellbore dP. Gas also has Modified Isochronal (correction factors and stabilised C).
+   - Multi-rate models calculate the reservoir pressure from the tests when the entered pressure is at or below the highest test FBHP.
+   - **Skin:** entered by hand, Karakas & Tariq (perforation, damaged and crushed zones) or MacLeod for cased hole; Hawkins damaged zone for open hole. Optional Cinco-Ley deviation and Papatzacos partial penetration. Shows the skin breakdown and the dP across the skin.
+   - **Sand control** (chosen in tab 1): cased gravel pack (linear flow through gravel-filled perforation tunnels, Darcy + non-Darcy), open-hole gravel pack and pre-packed screen (radial Darcy + Forchheimer), wire-wrapped screen and slotted liner (orifice flow through slots). Applied in series with the reservoir IPR; the plot shows the curve with and without sand control.
+   - Not available: Kuchuk & Goode (Babu & Odeh / Joshi are used instead), SkinAide, the Petroleum Experts models and thermally induced fractures (injectors).
 
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
@@ -86,6 +95,9 @@ wellmodel/
   options.py        options summary: choices, validation, engine status
   blackoil.py       black-oil correlation families, lab-data matching, suggestion
   eos.py            PRP import, PR/SRK equation of state, flash, envelope, separators
+  inflow.py         IPR models (oil, gas/condensate), multi-rate fitting, pseudo-pressure
+  inflow_adv.py     fractured, horizontal, dual-porosity, multilayer, friction, modified isochronal
+  completion.py     skin models (Karakas & Tariq, MacLeod, Hawkins, deviation, partial penetration), sand control
   synthetic.py      known-answer test data
   plotting.py       figures
 app.py                Streamlit app
@@ -105,7 +117,7 @@ On synthetic data with a known answer (truth: Hagedorn & Brown, gravity 1.04, fr
 
 ## Limitations (screening level)
 
-- Black-oil correlations only; no compositional PVT, no gas/condensate wells yet.
+- Multilayer-with-dP and horizontal friction models treat wellbore flow as single phase. Fractured wells assume infinite-conductivity geometry with a Cinco-Ley correction; bilinear flow is not modelled.
 - Steady-state VLP at each forecast step - no slugging or start-up dynamics.
 - Single-layer homogeneous reservoir; forecast water cut and GOR follow trend functions, not relative permeability.
 - No artificial lift design yet (gas-lift and ESP are natural next modules).

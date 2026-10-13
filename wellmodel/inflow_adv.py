@@ -1,0 +1,464 @@
+"""Advanced inflow models: fractured, horizontal, dual porosity, multilayer,
+horizontal with friction, and modified isochronal gas tests.
+
+All models reduce to an "equivalent radial" resistance where possible:
+    oil  J = kh_eq / (141.2 mu Bo D)                         (Vogel below Pb)
+    gas  Pr^2 - Pwf^2 = 1422 T mu Z / kh_eq * (D q + D_nd q^2)
+with D the dimensionless resistance (drainage + skin terms).
+
+Methods and sources
+-------------------
+Hydraulically fractured well
+    early/transient: Gringarten, Ramey & Raghavan (1974) infinite-conductivity
+    solution  pD = 0.5 sqrt(pi tD)[erf(0.134/sqrt tD) + erf(0.866/sqrt tD)]
+                   - 0.067 Ei(-0.018/tD) - 0.433 Ei(-0.75/tD)   (tD on xf)
+    finite conductivity: Cinco-Ley & Samaniego (1981) equivalent skin,
+    s_f = ln(rw/xf) + f(FcD), f(u = ln FcD) = (1.65 - 0.328u + 0.116u^2)/
+          (1 + 0.180u + 0.064u^2 + 0.005u^3)
+    The transient term adds f(FcD) - ln 2; bilinear flow is not modelled.
+Horizontal well (no-flow boundaries): Babu & Odeh (1989) pseudo-steady state,
+    with their partial-penetration skin; Joshi (1988) steady state also offered.
+Horizontal well with transverse fractures: Mukherjee & Economides (1991):
+    n fractures each draining A/n, skin ln(rw/xf) + f(FcD) + choke skin
+    s_c = (h / (FcD xf)) [ln(h / 2rw) - pi/2].
+Dual porosity: Warren & Root (1963) line source with skin.
+Multilayer: commingled layers with crossflow (linear injectivity above the
+    layer pressure); optional wellbore pressure losses between layers
+    (hydrostatic + Darcy-Weisbach friction, single-phase screening).
+Horizontal well with friction dP: lateral split into zones, inflow allocated
+    by k x length and zone skin, friction marched from toe to heel.
+Modified isochronal: correction factors, n regression, stabilisation as in
+    the PROSPER guide.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import brentq
+from scipy.special import erf, exp1
+
+from .correlations import friction_factor
+from .inflow import IPRCurve, _curve_from_rate, _jones_rate, _pi_vogel_rate, dietz_term, non_darcy_d
+
+RANKINE = 459.67
+LN2 = np.log(2.0)
+
+
+# ================================================================ helpers
+def _oil_curve(model, pr, pb, kh_eq, mu, bo, D, params, notes=None):
+    j = kh_eq / (141.2 * mu * bo * D)
+    c = _curve_from_rate(model, "oil", pr, _pi_vogel_rate(pr, pb, j),
+                         {"PI (STB/d/psi)": j, **params}, notes)
+    return c
+
+
+def _gas_curve(model, pr, t_f, mu, z, kh_eq, D, d_nd, params, notes=None):
+    base = 1422 * (t_f + RANKINE) * mu * z / kh_eq
+    a, b = base * d_nd, base * D
+    return _curve_from_rate(model, "gas", pr, _jones_rate(pr, a, b, True),
+                            {"a (psi^2/(Mscf/d)^2)": a, "b (psi^2/(Mscf/d))": b, **params}, notes)
+
+
+def cinco_f(fcd):
+    u = np.log(fcd)
+    return (1.65 - 0.328 * u + 0.116 * u * u) / (1 + 0.180 * u + 0.064 * u * u + 0.005 * u ** 3)
+
+
+def pd_infinite_conductivity(td):
+    """Gringarten et al. infinite-conductivity vertical fracture, wellbore pD (xf-based)."""
+    td = np.asarray(td, float)
+    st = np.sqrt(td)
+    return (0.5 * np.sqrt(np.pi * td) * (erf(0.134 / st) + erf(0.866 / st))
+            + 0.067 * exp1(0.018 / td) + 0.433 * exp1(0.75 / td))
+
+
+# ======================================================= fractured well
+def fractured_well(fluid, pr, k, h, area, ca, rw, xf, fcd, t_days, phi, ct, mu,
+                   face_skin=0.0, pb=None, bo=None, t_f=None, z=None, sg=None, hf=None):
+    if xf <= rw:
+        raise ValueError("Fracture half-length must exceed the wellbore radius.")
+    f = float(cinco_f(fcd))
+    if not 0.1 <= fcd <= 1000:
+        f = float(cinco_f(np.clip(fcd, 0.1, 1000)))
+    td = 0.0002637 * k * t_days * 24 / (phi * mu * ct * xf ** 2)
+    d_tr = float(pd_infinite_conductivity(td)) + (f - LN2) + face_skin
+    d_pss = dietz_term(area, ca, rw) + np.log(rw / xf) + f + face_skin
+    D = min(d_tr, d_pss)
+    state = "transient" if d_tr < d_pss else "pseudo-steady state"
+    params = {"Equivalent skin": float(np.log(rw / xf) + f + face_skin), "tD (xf)": td}
+    notes = [f"At {t_days:g} days the fractured well is in {state} flow.",
+             "Early bilinear flow (low FcD) is not modelled."]
+    if 2 * xf > np.sqrt(area * 43560):
+        notes.append("Fracture length is comparable to the drainage dimension - the radial "
+                     "equivalent-skin approach is approximate.")
+    if fluid == "oil":
+        return _oil_curve("Hydraulically Fractured Well", pr, pb, k * h, mu, bo, D, params, notes)
+    d_nd = non_darcy_d(k, h, hf or h, rw, mu, sg)
+    params["D (1/(Mscf/d))"] = d_nd
+    return _gas_curve("Hydraulically Fractured Well", pr, t_f, mu, z, k * h, D, d_nd, params, notes)
+
+
+# ======================================================= horizontal well
+def _F(x):
+    x = np.asarray(x, float)
+    x2 = 2 - x
+    small = -x * (0.145 + np.log(np.maximum(x, 1e-12)) - 0.137 * x * x)
+    large = x2 * (0.145 + np.log(np.maximum(x2, 1e-12)) - 0.137 * x2 * x2)
+    return np.where(x <= 1, small, large)
+
+
+def babu_odeh(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin=0.0):
+    """Babu & Odeh PSS resistance. PROSPER geometry: k = permeability perpendicular to
+    the well (Ky); aniso_h = Ky/Kx (Kx along the well); aniso_v = Kz/Ky; Lx along the
+    well, Ly across it; Xw, Yw, Zw position of the well centre.
+    Returns (kh_eq, D, s_R)."""
+    kx = k                 # Babu x: horizontal, perpendicular to the well
+    ky = k / aniso_h       # Babu y: along the well
+    kz = k * aniso_v
+    a, b = ly, lx
+    x0, ymid, z0 = yw, xw, zw
+    if not (0 < z0 < h and 0 < x0 < a and L <= b + 1e-9):
+        raise ValueError("Well must lie inside the drainage box and be no longer than its length.")
+    if ymid - L / 2 < -1e-6 or ymid + L / 2 > b + 1e-6:
+        raise ValueError("Well extends beyond the drainage box along its length.")
+    sin_term = np.sin(np.pi * z0 / h)
+    ln_ch = (6.28 * a / h * np.sqrt(kz / kx) * (1 / 3 - x0 / a + (x0 / a) ** 2)
+             - np.log(sin_term) - 0.5 * np.log(a / h * np.sqrt(kz / kx)) - 1.088)
+    s_r = 0.0
+    if L < b - 1e-6:
+        pxyz = (b / L - 1) * (np.log(h / rw) + 0.25 * np.log(kx / kz) - np.log(sin_term) - 1.84)
+        if a / np.sqrt(kx) >= 0.75 * b / np.sqrt(ky):            # case 1
+            pxy_p = (2 * b * b / (L * h)) * np.sqrt(kz / ky) * (
+                _F(L / (2 * b)) + 0.5 * (_F((4 * ymid + L) / (2 * b)) - _F((4 * ymid - L) / (2 * b))))
+            s_r = pxyz + float(pxy_p)
+        else:                                                      # case 2
+            py = (6.28 * b * b / (a * h)) * np.sqrt(kx * kz) / ky * (
+                (1 / 3 - ymid / b + (ymid / b) ** 2) + L / (24 * b) * (L / b - 3))
+            pxy = (b / L - 1) * (6.28 * a / h) * np.sqrt(kz / kx) * (1 / 3 - x0 / a + (x0 / a) ** 2)
+            s_r = pxyz + py + pxy
+    kh_eq = b * np.sqrt(kx * kz)
+    D = np.log(np.sqrt(a * h) / rw) + ln_ch - 0.75 + s_r + skin
+    return kh_eq, float(D), float(s_r)
+
+
+def joshi(k, h, rw, aniso_h, aniso_v, L, lx, ly, skin=0.0):
+    """Joshi steady state (Economides anisotropy form). Returns (kh_eq, D)."""
+    kh = k / np.sqrt(aniso_h)                     # geometric mean of horizontal perms
+    kv = k * aniso_v
+    beta = np.sqrt(kh / kv)
+    reh = np.sqrt(lx * ly / np.pi)
+    if L / 2 >= 0.9 * reh:
+        raise ValueError("Joshi requires the well to be shorter than the drainage radius.")
+    aj = L / 2 * np.sqrt(0.5 + np.sqrt(0.25 + (2 * reh / L) ** 4))
+    D = (np.log((aj + np.sqrt(aj ** 2 - (L / 2) ** 2)) / (L / 2))
+         + beta * h / L * (np.log(beta * h / ((beta + 1) * rw)) + skin))
+    return kh * h, float(D)
+
+
+def horizontal_well(fluid, method, pr, k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, mu,
+                    skin=0.0, pb=None, bo=None, t_f=None, z=None, sg=None):
+    if method == "Babu & Odeh":
+        kh_eq, D, s_r = babu_odeh(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin)
+        params = {"Partial penetration skin s_R": s_r}
+    else:
+        kh_eq, D = joshi(k, h, rw, aniso_h, aniso_v, L, lx, ly, skin)
+        params = {}
+    name = f"Horizontal Well ({method})"
+    if fluid == "oil":
+        return _oil_curve(name, pr, pb, kh_eq, mu, bo, D, params)
+    d_nd = 0.0                                   # non-Darcy negligible along a long lateral
+    return _gas_curve(name, pr, t_f, mu, z, kh_eq, D, d_nd, params,
+                      ["Non-Darcy flow neglected along the lateral."])
+
+
+def transverse_fractures(fluid, pr, k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, mu,
+                         xf, fcd, n_frac, ca=31.62, skin=0.0, pb=None, bo=None, t_f=None, z=None, sg=None):
+    n_frac = int(n_frac)
+    if n_frac < 1:
+        raise ValueError("At least one fracture is needed.")
+    area_each = lx * ly / n_frac / 43560
+    s_choke = h / (fcd * xf) * (np.log(h / (2 * rw)) - np.pi / 2)
+    s_frac = np.log(rw / xf) + float(cinco_f(np.clip(fcd, 0.1, 1000))) + s_choke + skin
+    D_f = dietz_term(area_each, ca, rw) + s_frac
+    kh_f = n_frac * k * h
+    kh_h, D_h, _ = babu_odeh(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin)
+    frac_better = kh_f / D_f >= kh_h / D_h
+    kh_eq, D = (kh_f, D_f) if frac_better else (kh_h, D_h)
+    notes = [f"{n_frac} fractures: {'fractures dominate' if frac_better else 'unfractured lateral dominates'}."]
+    if L / n_frac < 2 * xf * 0.25:
+        notes.append("Fractures are closely spaced relative to their length - interference makes this optimistic.")
+    if 2 * xf > ly:
+        notes.append("Fracture tip-to-tip length exceeds the reservoir width.")
+    params = {"Choke skin": float(s_choke), "Skin per fracture": float(s_frac),
+              "Fracture / lateral PI ratio": float((kh_f / D_f) / (kh_h / D_h))}
+    name = "Horizontal Well - Transverse Vertical Fractures"
+    if fluid == "oil":
+        return _oil_curve(name, pr, pb, kh_eq, mu, bo, D, params, notes)
+    return _gas_curve(name, pr, t_f, mu, z, kh_eq, D, 0.0, params, notes)
+
+
+# ========================================================= dual porosity
+def dual_porosity(fluid, pr, kf, h, area, ca, rw, phi, ct, t_days, omega, lam, mu, skin=0.0,
+                  pb=None, bo=None, t_f=None, z=None, sg=None, d_nd=None):
+    if not 0 < omega < 1:
+        raise ValueError("Storativity ratio must be between 0 and 1.")
+    td = 0.0002637 * kf * t_days * 24 / (phi * ct * mu * rw ** 2)
+    pd_tr = 0.5 * (np.log(td) + 0.80907 - exp1(lam * td / (omega * (1 - omega))) + exp1(lam * td / (1 - omega)))
+    d_tr = float(pd_tr) + skin
+    d_pss = dietz_term(area, ca, rw) + skin
+    D = min(d_tr, d_pss)
+    state = "transient" if d_tr < d_pss else "pseudo-steady state"
+    params = {"tD": td}
+    notes = [f"At {t_days:g} days the well is in {state} flow (Warren & Root)."]
+    if fluid == "oil":
+        return _oil_curve("Dual Porosity", pr, pb, kf * h, mu, bo, D, params, notes)
+    d_nd = non_darcy_d(kf, h, h, rw, mu, sg) if d_nd is None else d_nd
+    params["D (1/(Mscf/d))"] = d_nd
+    return _gas_curve("Dual Porosity", pr, t_f, mu, z, kf * h, D, d_nd, params, notes)
+
+
+# ============================================================ multilayer
+def layer_rate_fn(fluid, layer, pb=None):
+    """q(p) for one layer, negative (crossflow into the layer) above its pressure.
+    layer: {"pr", "model": "PI"|"Darcy"|"C and n"|"Jones", params...}"""
+    pr = layer["pr"]
+    if fluid == "oil":
+        j = layer["j"]
+        prod = _pi_vogel_rate(pr, pb if pb is not None else 0.0, j)
+        return lambda p: np.where(np.asarray(p, float) <= pr, prod(np.minimum(p, pr)),
+                                  -j * (np.asarray(p, float) - pr))
+    if layer["model"] == "C and n":
+        c, n = layer["c"], layer["n"]
+        return lambda p: np.sign(pr ** 2 - np.asarray(p, float) ** 2) * c * np.abs(pr ** 2 - np.asarray(p, float) ** 2) ** n
+    a, b = layer["a"], layer["b"]
+
+    def f(p):
+        dp2 = pr ** 2 - np.asarray(p, float) ** 2
+        mag = (-b + np.sqrt(b * b + 4 * a * np.abs(dp2))) / (2 * a) if a > 0 else np.abs(dp2) / b
+        return np.sign(dp2) * mag
+    return f
+
+
+def multilayer(fluid, layers: list, pb=None, n=60):
+    if not layers:
+        raise ValueError("Enter at least one producing layer.")
+    fns = [layer_rate_fn(fluid, L, pb) for L in layers]
+    pmax = max(L["pr"] for L in layers)
+    total = lambda p: sum(f(p) for f in fns)
+    pw = np.linspace(pmax, 0.0, n)
+    q = np.asarray(total(pw), float)
+    per = pd.DataFrame({f"Layer {i + 1}": np.asarray(f(pw), float) for i, f in enumerate(fns)})
+    # IPR starts where the commingled well stops flowing (total rate = 0)
+    p0 = brentq(lambda p: float(total(np.array([p]))[0]), 0.0, pmax) if q[0] < 0 else pmax
+    curve = _curve_from_rate("Multi-layer", fluid, p0, lambda p: np.maximum(total(p), 0.0), {
+        "Layers": len(layers), "Commingled shut-in pressure (psia)": p0}, n=n)
+    curve.layer_rates = pd.DataFrame({f"Layer {i + 1}": np.asarray(f(curve.pwf), float)
+                                      for i, f in enumerate(fns)})
+    if any(np.asarray(f(np.array([p0])), float)[0] < 0 for f in fns):
+        curve.notes.append("At low drawdown some layers take crossflow (negative layer rate).")
+    return curve
+
+
+def _wellbore_props(fluid, props):
+    """Return functions rho(p) lb/ft3, mu(p) cp, vol(q, p) ft3/s for the wellbore fluid."""
+    if fluid == "oil":
+        wc = props.get("wc", 0.0)
+        rho = (1 - wc) * props["rho"] + wc * 62.4 * props.get("water_sg", 1.05)
+        mu = (1 - wc) * props["mu"] + wc * 0.5
+        bo = props["bo"]
+        return (lambda p: rho, lambda p: mu,
+                lambda q, p: q * ((1 - wc) * bo + wc) * 5.6146 / 86400)
+    mu_z, sg, t_f = props["mu_z"], props["sg"], props["t_f"]
+    tr = t_f + RANKINE
+
+    def rho(p):
+        _, z = mu_z(np.array([max(p, 14.7)]))
+        return 28.9625 * sg * max(p, 14.7) / (float(z[0]) * 10.7316 * tr)
+
+    def mu(p):
+        m, _ = mu_z(np.array([max(p, 14.7)]))
+        return float(m[0])
+
+    def vol(q, p):
+        _, z = mu_z(np.array([max(p, 14.7)]))
+        return q * 1000 * 0.02827 * float(z[0]) * tr / max(p, 14.7) / 86400
+    return rho, mu, vol
+
+
+def _segment_dp(q, p, length, dtvd, d_in, rough_in, rho_fn, mu_fn, vol_fn):
+    """Pressure lost moving up/along a segment carrying rate q (signed)."""
+    d = d_in / 12
+    area = np.pi * d * d / 4
+    rho, mu = rho_fn(p), mu_fn(p)
+    v = vol_fn(q, p) / area
+    re = rho * abs(v) * d / (mu * 6.7197e-4)
+    f = float(friction_factor(max(re, 1.0), rough_in / 12 / d)) if rough_in > 0 else 0.0
+    fric = np.sign(v) * f * rho * v * v * length / (2 * 32.174 * d) / 144
+    return rho * dtvd / 144 + fric
+
+
+def multilayer_dp(fluid, layers: list, top_md, top_tvd, props, pb=None, n=40):
+    """Layers with depths (md, tvd of the layer inflow point), flowing ID (in) and roughness
+    (in) of the pipe above each layer. Returns IPR at the TOP node."""
+    lay = sorted(layers, key=lambda L: L["md"])
+    if lay[0]["md"] < top_md:
+        raise ValueError("TOP depth must be at or above the shallowest layer.")
+    fns = [layer_rate_fn(fluid, L, pb) for L in lay]
+    rho_fn, mu_fn, vol_fn = _wellbore_props(fluid, props)
+    nodes_md = [top_md] + [L["md"] for L in lay]
+    nodes_tvd = [top_tvd] + [L["tvd"] for L in lay]
+
+    def march(p_bottom):
+        p = p_bottom
+        rates = [0.0] * len(lay)
+        qcum = 0.0
+        for i in range(len(lay) - 1, -1, -1):
+            rates[i] = float(np.asarray(fns[i](np.array([p])))[0])
+            qcum += rates[i]
+            L = lay[i]
+            dmd = nodes_md[i + 1] - nodes_md[i]
+            dtvd = nodes_tvd[i + 1] - nodes_tvd[i]
+            if dmd > 0:
+                p = p - _segment_dp(qcum, p, dmd, dtvd, L["id_in"], L["rough_in"], rho_fn, mu_fn, vol_fn)
+        return p, rates
+
+    pmax = max(L["pr"] for L in lay) + 0.433 * 1.2 * (nodes_tvd[-1] - top_tvd) + 50
+
+    def solve(p_top):
+        g = lambda pb_: march(pb_)[0] - p_top
+        lo, hi = max(p_top, 14.7), pmax * 1.5
+        if g(lo) > 0:
+            lo = 14.7
+        return brentq(g, lo, hi, xtol=0.01)
+
+    # shut-in TOP pressure: total rate zero
+    def q_at(p_top):
+        return sum(march(solve(p_top))[1])
+    p_hi = max(L["pr"] for L in lay)
+    p0 = brentq(q_at, 14.7, p_hi, xtol=0.1) if q_at(p_hi) < 0 else p_hi
+    pw = np.linspace(p0, 14.7, n)
+    qs, per = [], []
+    for p in pw:
+        r = march(solve(p))[1]
+        qs.append(max(sum(r), 0.0)); per.append(r)
+    qs = np.array(qs)
+    order = np.argsort(pw)
+    f = lambda x: np.interp(x, pw[order], qs[order])
+    curve = IPRCurve("Multi-layer with dP loss in wellbore", fluid, p0, pw, qs,
+                     {"Layers": len(lay), "Shut-in TOP pressure (psia)": p0}, [], None, f)
+    curve.layer_rates = pd.DataFrame(np.array(per), columns=[f"Layer {i + 1}" for i in range(len(lay))])
+    curve.notes.append("Wellbore losses between layers use single-phase properties (screening).")
+    return curve
+
+
+# ================================================ horizontal with friction
+def horizontal_friction(fluid, pr, zones: list, overall_kh_eq, overall_D, k_ref, props, pb=None, n=40,
+                        profile_at=None):
+    """zones (heel -> toe): {"type": "Perforated"|"Open Hole"|"Blank", "length", "k", "skin",
+    "id_in", "rough_in"}. overall_kh_eq / overall_D: horizontal-well resistance without skin."""
+    if not zones:
+        raise ValueError("Enter at least one zone.")
+    open_z = [z for z in zones if z["type"] != "Blank"]
+    if not open_z:
+        raise ValueError("At least one zone must be open to flow.")
+    sum_kl = sum(z["k"] * z["length"] for z in open_z)
+    rho_fn, mu_fn, vol_fn = _wellbore_props(fluid, props)
+    tr = (props.get("t_f", 200) + RANKINE)
+    fns = []
+    for z in zones:
+        if z["type"] == "Blank":
+            fns.append(lambda p: 0.0)
+            continue
+        w = z["k"] * z["length"] / sum_kl * overall_D / (overall_D + z["skin"])
+        if fluid == "oil":
+            j = overall_kh_eq / (141.2 * props["mu"] * props["bo"] * overall_D) * w
+            fns.append(lambda p, j=j: float(_pi_vogel_rate(pr, pb or 0.0, j)(np.array([p]))[0]))
+        else:
+            mu_r, z_r = props["mu_r"], props["z_r"]
+            b = 1422 * tr * mu_r * z_r * overall_D / overall_kh_eq / w
+            fns.append(lambda p, b=b: max(pr ** 2 - p ** 2, 0.0) / b)
+    centres = np.cumsum([z["length"] for z in zones]) - np.array([z["length"] for z in zones]) / 2
+
+    def march(p_toe):
+        p = p_toe
+        qcum = 0.0
+        prof = []
+        for i in range(len(zones) - 1, -1, -1):
+            q_i = fns[i](p)
+            qcum += q_i
+            prof.append((centres[i], p, q_i / max(zones[i]["length"], 1e-9)))
+            nxt = centres[i - 1] if i > 0 else 0.0
+            p = p - _segment_dp(qcum, p, centres[i] - nxt, 0.0, zones[i]["id_in"], zones[i]["rough_in"],
+                                rho_fn, mu_fn, vol_fn)
+        return p, qcum, prof[::-1]
+
+    def solve(p_heel):
+        return brentq(lambda pt: march(pt)[0] - p_heel, p_heel, pr, xtol=0.01) if p_heel < pr else pr
+
+    pw = np.linspace(pr, 0.0, n)
+    qs = np.array([march(solve(p))[1] for p in pw])
+    order = np.argsort(pw)
+    f = lambda x: np.interp(x, pw[order], qs[order])
+    # no-friction reference
+    q_nf = sum(fn(0.0) for fn in fns)
+    curve = IPRCurve("Horizontal Well - friction dP", fluid, pr, pw, qs,
+                     {"AOF without friction": q_nf, "Open zones": len(open_z)}, [], None, f)
+    ph = profile_at if profile_at is not None else 0.5 * pr
+    _, qh, prof = march(solve(ph))
+    curve.profile = pd.DataFrame(prof, columns=["Distance from heel (ft)", "Pressure (psia)", "Rate per ft"])
+    curve.profile_heel_pressure = ph
+    curve.notes.append("Wellbore friction uses single-phase properties; non-Darcy flow neglected.")
+    return curve
+
+
+# ===================================================== modified isochronal
+def modified_isochronal(pres, tests: pd.DataFrame, t_flow_hr, t_shut_hr, k, phi, swc, mu, rw, re):
+    """PROSPER-guide modified isochronal analysis. tests: Rate (Mscf/d), Pwf (psia) in test order."""
+    t = tests.dropna()
+    t = t[(t["Rate"] > 0)].reset_index(drop=True)
+    if len(t) < 2:
+        raise ValueError("Need at least 2 flow periods.")
+    q, pw = t["Rate"].to_numpy(float), t["Pwf"].to_numpy(float)
+    if np.any(pw >= pres):
+        raise ValueError("All flowing pressures must be below the initial reservoir pressure.")
+    nper = len(t)
+    starts = np.arange(nper) * (t_flow_hr + t_shut_hr)
+    ends = starts + t_flow_hr
+
+    def p_t(dt_hr):
+        td = 0.00633 * (dt_hr / 24) * pres * k / (phi * (1 - swc) * mu * rw ** 2)
+        return 1.1513 * np.log10(td) + 0.40453, td
+
+    cf = np.ones(nper)
+    tds = np.zeros(nper)
+    for j in range(nper):
+        pt1, tds[j] = p_t(ends[j] - starts[0])
+        if j == 0:
+            continue
+        denom = q[0] * pt1
+        for i in range(1, j + 1):
+            denom += (q[i] - q[i - 1]) * p_t(ends[j] - starts[i])[0]
+        cf[j] = q[j] * pt1 / denom
+    dp2 = pres ** 2 - pw ** 2
+    dp2_iso = cf * dp2
+    n, lc = np.polyfit(np.log(dp2_iso), np.log(q), 1) if nper >= 2 else (1.0, 0.0)
+    notes = []
+    if not 0.5 <= n <= 1:
+        nc = float(np.clip(n, 0.5, 1))
+        notes.append(f"Isochronal n = {n:.3f} constrained to {nc:.2f}.")
+        n = nc
+        lc = float(np.mean(np.log(q) - n * np.log(dp2_iso)))
+    c_iso = float(np.exp(lc))
+    ratio = (2 * np.log10(0.60 * re / rw) / np.log10(2.25 * tds)) ** (1 / n)
+    dp2_stab = ratio * dp2_iso
+    c_stab = float(np.exp(np.mean(np.log(q) - n * np.log(dp2_stab))))
+    t_stab_days = 0.1 * np.pi * re ** 2 * phi * (1 - swc) * mu / (0.00633 * k * pres)
+    f = lambda pwf: c_stab * np.maximum(pres ** 2 - np.clip(pwf, 0, None) ** 2, 0) ** n
+    curve = _curve_from_rate("Modified Isochronal", "gas", pres, f, {
+        "C stabilised": c_stab, "C isochronal": c_iso, "n": float(n),
+        "Time to stabilise (days)": float(t_stab_days)}, notes)
+    curve.tests = pd.DataFrame({"Rate": q, "Pwf": pw})
+    curve.isochronal = pd.DataFrame({"Rate (Mscf/d)": q, "FBHP (psia)": pw, "Correction factor": cf,
+                                     "dP2 measured": dp2, "dP2 isochronal": dp2_iso, "dP2 stabilised": dp2_stab})
+    curve.c_iso = c_iso
+    return curve
