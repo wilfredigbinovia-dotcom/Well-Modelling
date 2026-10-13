@@ -32,18 +32,11 @@ jupyter notebook notebooks/demo.ipynb
 
 ### The Streamlit app (`app.py`)
 
-The sidebar holds the well setup (PVT, deviation survey, tubing, temperatures); it is being moved into dedicated setup tabs. Eight tabs follow the workflow in order:
+The app is being rebuilt tab by tab. It currently has one tab:
 
-1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the engine can calculate today, and lists the data the later steps will need. Analysis tabs lock when a choice is not modelled yet.
-2. **Well tests** - upload a CSV (a template is downloadable) or load the demo tests; edit in place.
-3. **QC** - adjustable thresholds; pass/warn/fail counts, chart and reasons.
-4. **Correlation selection** - leave-one-out ranking with rationale; one click adopts the winner.
-5. **Match** - choose correlation, parameters and error levels; override any test weight.
-6. **Nodal** - live operating point, stability flag, VLP comparison and a WHP × water-cut sensitivity grid.
-7. **Probabilistic** - pick a distribution per input; P90/P50/P10, exceedance, tornado; include match uncertainty.
-8. **Transient** - build-up fit (k, skin, storage, PI) and the depletion forecast with flow-stop warning.
+1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
 
-Results reset automatically when the well setup or tests change. Tables download as CSV.
+The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
 ```python
 import wellmodel as wm
