@@ -183,16 +183,16 @@ def test_unsupported_choices_block_calculation():
     o = WellOptions(fluid_type="dry_wet_gas", method="black_oil", flow_type="annular")
     assert not o.errors
     assert not o.computable
-    assert o.engine_status()["fluid_type"] == NOT_YET
-    assert len(o.unsupported) == 2
+    assert o.engine_status()["flow_type"] == NOT_YET
+    assert len(o.unsupported) == 1
 
 
-def test_eos_is_pvt_only_for_any_fluid():
-    from wellmodel.options import PVT_ONLY
+def test_eos_is_modelled_for_any_fluid():
+    from wellmodel.options import MODELLED_NOW
     o = WellOptions(fluid_type="retrograde_condensate", method="eos")
     st = o.engine_status()
-    assert st["method"] == PVT_ONLY and st["fluid_type"] == PVT_ONLY
-    assert not o.unsupported and not o.computable
+    assert st["method"] == MODELLED_NOW and st["fluid_type"] == MODELLED_NOW
+    assert not o.unsupported and o.computable
 
 
 def test_completion_choices_absorbed_not_blocking():

@@ -51,9 +51,9 @@ FIELDS = {  # field -> (display name, choices)
 
 # What the calculation engine models today. Anything else is accepted as a
 # setup choice but blocks calculations until the matching module exists.
-MODELLED = {
-    "fluid_type": {"oil"},
-    "method": {"black_oil"},
+MODELLED = {   # what the setup tabs built so far (PVT, IPR) can calculate
+    "fluid_type": {"oil", "dry_wet_gas", "retrograde_condensate"},
+    "method": {"black_oil", "eos"},
     "flow_type": {"tubing"},
     "well_type": {"producer"},
 }
@@ -62,7 +62,7 @@ MODELLED = {
 LUMPED = {"completion", "sand_control"}
 
 MODELLED_NOW, LUMPED_IN_PI, NOT_YET = "Modelled", "Absorbed in matched PI", "Not modelled yet"
-PVT_ONLY = "PVT only"   # PVT can be set up (equation of state); flow calculations not built yet
+PVT_ONLY = "PVT only"   # kept for compatibility; equation of state now feeds the IPR tab too
 
 
 @dataclass(frozen=True)
@@ -166,10 +166,6 @@ class WellOptions:
                 st[f] = MODELLED_NOW        # skin and sand-control models in the IPR tab
             else:
                 st[f] = MODELLED_NOW if getattr(self, f) in MODELLED[f] else NOT_YET
-        if self.method == "eos":
-            # compositional PVT works for every fluid type; flow calculations still use black oil
-            st["method"] = PVT_ONLY
-            st["fluid_type"] = PVT_ONLY
         return st
 
     @property

@@ -171,9 +171,6 @@ with tabs[0]:
     elif opts.unsupported:
         st.warning("The calculation engine does not yet model: " + "; ".join(opts.unsupported)
                    + ". Calculations for this configuration become available as those modules are built.")
-    else:
-        st.info("PVT for this configuration is set up from an equation-of-state (PRP) file in the "
-                "PVT Input Data tab. Flow calculations with compositional PVT are not built yet.")
 
     st.subheader("Calculation status")
     stat = opts.engine_status()
@@ -181,7 +178,8 @@ with tabs[0]:
                                "Selection": [opts.label(f) for f in wopt.FIELDS],
                                "Status": [STATUS_ICON[stat[f]] for f in wopt.FIELDS]}),
                  hide_index=True, width="stretch")
-    st.caption("Completion and sand control are modelled in the IPR Data tab (perforation, damage, "
+    st.caption("Status covers the tabs built so far (PVT and IPR). Black oil and equation-of-state "
+               "PVT both feed the IPR models. Completion and sand control are modelled in the IPR Data tab (perforation, damage, "
                "deviation and partial-penetration skins; gravel pack, screen and liner pressure drops).")
 
     st.subheader("Data you will need")
