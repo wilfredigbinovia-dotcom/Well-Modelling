@@ -26,21 +26,22 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 19 physics and workflow tests
+pytest -q                       # 26 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
 ### The Streamlit app (`app.py`)
 
-The sidebar holds the well setup (PVT, deviation survey, tubing, temperatures). Seven tabs follow the workflow in order:
+The sidebar holds the well setup (PVT, deviation survey, tubing, temperatures); it is being moved into dedicated setup tabs. Eight tabs follow the workflow in order:
 
-1. **Well tests** - upload a CSV (a template is downloadable) or load the demo tests; edit in place.
-2. **QC** - adjustable thresholds; pass/warn/fail counts, chart and reasons.
-3. **Correlation selection** - leave-one-out ranking with rationale; one click adopts the winner.
-4. **Match** - choose correlation, parameters and error levels; override any test weight.
-5. **Nodal** - live operating point, stability flag, VLP comparison and a WHP × water-cut sensitivity grid.
-6. **Probabilistic** - pick a distribution per input; P90/P50/P10, exceedance, tornado; include match uncertainty.
-7. **Transient** - build-up fit (k, skin, storage, PI) and the depletion forecast with flow-stop warning.
+1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the engine can calculate today, and lists the data the later steps will need. Analysis tabs lock when a choice is not modelled yet.
+2. **Well tests** - upload a CSV (a template is downloadable) or load the demo tests; edit in place.
+3. **QC** - adjustable thresholds; pass/warn/fail counts, chart and reasons.
+4. **Correlation selection** - leave-one-out ranking with rationale; one click adopts the winner.
+5. **Match** - choose correlation, parameters and error levels; override any test weight.
+6. **Nodal** - live operating point, stability flag, VLP comparison and a WHP × water-cut sensitivity grid.
+7. **Probabilistic** - pick a distribution per input; P90/P50/P10, exceedance, tornado; include match uncertainty.
+8. **Transient** - build-up fit (k, skin, storage, PI) and the depletion forecast with flow-stop warning.
 
 Results reset automatically when the well setup or tests change. Tables download as CSV.
 
@@ -80,6 +81,7 @@ wellmodel/
   selection.py      LOOCV correlation ranking
   probabilistic.py  Monte Carlo / LHS, tornado
   transient.py      pressure transient, build-up fit, forecast
+  options.py        options summary: choices, validation, engine status
   synthetic.py      known-answer test data
   plotting.py       figures
 app.py                Streamlit app

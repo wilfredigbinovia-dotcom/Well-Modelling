@@ -163,3 +163,46 @@ def test_forecast_runs_and_depletes():
     assert d["reservoir_pressure"].iloc[-1] < 4200
     assert (np.diff(d["Np"]) >= 0).all()
     assert fr.events["pr_below_pb_days"] is not None
+
+
+# -------------------------------------------------------------- options
+from wellmodel.options import WellOptions, NOT_YET
+
+
+def test_default_options_computable():
+    o = WellOptions()
+    assert o.computable and o.validate() == []
+
+
+def test_gas_injector_with_oil_is_invalid():
+    o = WellOptions(well_type="gas_injector", fluid_type="oil")
+    assert o.errors and not o.computable
+
+
+def test_unsupported_choices_block_calculation():
+    o = WellOptions(fluid_type="dry_wet_gas", method="eos", flow_type="annular")
+    assert not o.errors
+    assert not o.computable
+    assert o.engine_status()["method"] == NOT_YET
+    assert len(o.unsupported) == 3
+
+
+def test_completion_choices_absorbed_not_blocking():
+    o = WellOptions(completion="open_hole", sand_control="gravel_pack")
+    assert o.computable
+    assert any("pack thickness" in x for x in o.data_requirements()["Equipment"])
+
+
+def test_condensate_black_oil_warns():
+    o = WellOptions(fluid_type="retrograde_condensate")
+    assert any(i.level == "warning" and "method" in i.fields for i in o.validate())
+
+
+def test_cased_hole_slotted_liner_warns():
+    o = WellOptions(sand_control="slotted_liner")
+    assert any(i.level == "warning" for i in o.validate())
+
+
+def test_invalid_choice_rejected():
+    with pytest.raises(ValueError):
+        WellOptions(fluid_type="steam")

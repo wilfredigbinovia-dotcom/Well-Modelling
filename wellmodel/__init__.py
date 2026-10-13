@@ -15,5 +15,6 @@ from .probabilistic import monte_carlo, Fixed, Uniform, Triangular, Normal, LogN
 from .transient import (RadialReservoir, fit_buildup, bourdet_derivative, forecast,
                         DepletionInputs, logistic_water_cut, solution_gas_gor)
 from .correlations import CORRELATIONS, LABELS
+from .options import WellOptions
 
 __version__ = "0.1.0"
