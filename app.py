@@ -4,7 +4,8 @@ Run from the project folder:   streamlit run app.py
 
 The app is being rebuilt tab by tab. Current tabs:
   1. Options summary - what kind of well is being modelled
-  2. PVT Input Data  - fluid inputs, lab data, correlation matching and suggestion
+  2. PVT Input Data  - black oil: inputs, lab data, correlation matching and suggestion
+                       equation of state: PRP file import, flash, saturation point, envelope
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wellmodel import blackoil as bo
+from wellmodel import eos as wm_eos
 from wellmodel import options as wopt
 from wellmodel import plotting as wplt
 
@@ -50,6 +52,7 @@ CAPTIONS = {
                      "slotted_liner": "Pipe with machined slots"},
 }
 STATUS_ICON = {wopt.MODELLED_NOW: "✅ Modelled", wopt.LUMPED_IN_PI: "↪️ Absorbed in matched PI",
+               wopt.PVT_ONLY: "🧪 PVT only - flow calculations not built yet",
                wopt.NOT_YET: "⏳ Not modelled yet"}
 
 with tabs[0]:
@@ -83,9 +86,12 @@ with tabs[0]:
         st.error("Fix the invalid combination above before continuing.")
     elif opts.computable:
         st.success("The calculation engine supports this configuration.")
-    else:
+    elif opts.unsupported:
         st.warning("The calculation engine does not yet model: " + "; ".join(opts.unsupported)
                    + ". Calculations for this configuration become available as those modules are built.")
+    else:
+        st.info("PVT for this configuration is set up from an equation-of-state (PRP) file in the "
+                "PVT Input Data tab. Flow calculations with compositional PVT are not built yet.")
 
     st.subheader("Calculation status")
     stat = opts.engine_status()
@@ -208,13 +214,222 @@ def match_plot(model_raw: bo.BlackOilModel, model_m: bo.BlackOilModel, data: bo.
     return fig
 
 
+# ---------------------------------------------------------------- EOS (PRP import)
+EOS_NAMES = {"PR": "Peng-Robinson", "SRK": "Soave-Redlich-Kwong"}
+FLUID_FROM_SAT = {"bubble": "oil", "dew": "retrograde_condensate"}
+
+
+@st.cache_data(show_spinner=False)
+def eos_parse(text: str, name: str):
+    return wm_eos.parse_prp(text, name)
+
+
+@st.cache_data(show_spinner=False)
+def eos_calculate(text: str, name: str, t_f: float):
+    prp = wm_eos.parse_prp(text, name)
+    f = wm_eos.EOSFluid(prp)
+    ps, typ = f.saturation_pressure(t_f)
+    p_res = ps * 1.0005 if ps else 5000.0
+    sep = f.separator_train(T_res=t_f, P_res=p_res)
+    top = max(ps * 1.3 if ps else 6000.0, 1000.0)
+    pres = sorted(set(np.round(np.concatenate([[top, (ps or top) * 1.1, ps or top],
+                                               np.linspace((ps or top) * 0.92, 14.7, 11)]), 1)),
+                  reverse=True)
+    table = f.property_table(t_f, pres)
+    return {"psat": ps, "sat_type": typ, "sep": sep, "table": table, "p_res": p_res}
+
+
+@st.cache_data(show_spinner=False)
+def eos_envelope(text: str, name: str):
+    f = wm_eos.EOSFluid(wm_eos.parse_prp(text, name))
+    env = f.phase_envelope()
+    return env, wm_eos.EOSFluid.envelope_summary(env)
+
+
+def load_example_prp():
+    ss["prp_text"] = wm_eos.example_prp_text()
+    ss["prp_name"] = "example (synthetic oil).prp"
+    ss.pop("prp_t", None)
+    ss.pop("prp_show_env", None)
+
+
+def envelope_plot(env: pd.DataFrame, t_res: float, psat, summ: dict):
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    for typ, col, lab in (("bubble", wplt.SERIES[0], "Bubble point"), ("dew", wplt.SERIES[1], "Dew point")):
+        for br in ("upper", "lower"):
+            d = env[(env["type"] == typ) & (env["branch"] == br)].sort_values("T (degF)")
+            if not d.empty:
+                ax.plot(d["T (degF)"], d["P (psia)"], "-o", ms=3, color=col,
+                        label=lab if br == "upper" else None)
+    ax.axvline(t_res, color=wplt.INK2, lw=1, ls=":")
+    ax.text(t_res, ax.get_ylim()[1] * 0.03, f" {t_res:g} °F", fontsize=8.5, color=wplt.INK2, va="bottom")
+    if psat:
+        ax.scatter([t_res], [psat], s=70, color=wplt.INK, zorder=5)
+        ax.annotate(f"{psat:,.0f} psia", (t_res, psat), textcoords="offset points", xytext=(8, 6),
+                    fontsize=8.5, color=wplt.INK)
+    if "critical_T_approx" in summ:
+        ax.axvline(summ["critical_T_approx"], color=wplt.GRID, lw=6, alpha=0.6, zorder=0)
+    ax.set_xlabel("Temperature (°F)")
+    ax.set_ylabel("Pressure (psia)")
+    ax.set_ylim(bottom=0)
+    ax.set_title("Phase envelope")
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    return fig
+
+
+def properties_plot(table: pd.DataFrame, psat):
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
+    p = table["Pressure (psia)"]
+    axes[0].plot(p, table["Liquid volume (%)"], "-o", ms=3, color=wplt.SERIES[0])
+    axes[0].set_title("Liquid volume (% of total)")
+    for col, c, lab in (("Liquid density (lb/ft3)", wplt.SERIES[0], "liquid"),
+                        ("Vapour density (lb/ft3)", wplt.SERIES[1], "vapour")):
+        axes[1].plot(p, table[col], "-o", ms=3, color=c, label=lab)
+    axes[1].set_title("Density (lb/ft3)")
+    axes[1].legend()
+    for col, c, lab in (("Liquid viscosity (cp)", wplt.SERIES[0], "liquid"),
+                        ("Vapour viscosity (cp)", wplt.SERIES[1], "vapour")):
+        axes[2].plot(p, table[col], "-o", ms=3, color=c, label=lab)
+    axes[2].set_yscale("log")
+    axes[2].set_title("Viscosity (cp, LBC)")
+    axes[2].legend()
+    for a in axes:
+        a.set_xlabel("Pressure (psia)")
+        if psat:
+            a.axvline(psat, color=wplt.INK2, lw=1, ls=":")
+    fig.tight_layout()
+    return fig
+
+
+def render_eos(opts_now):
+    st.caption("Equation of state is selected in the Options summary: import the fluid "
+               "description as a Petroleum Experts PRP export file.")
+    c = st.columns([2, 1])
+    up = c[0].file_uploader("PVT file (.prp)", type=["prp", "txt"], key="prp_upload")
+    c[1].button("Load example PRP", on_click=load_example_prp, width="stretch",
+                help="A small synthetic oil - not a real fluid.")
+    if up is not None and ss.get("prp_upload_id") != (up.name, up.size):
+        ss["prp_upload_id"] = (up.name, up.size)
+        raw = up.getvalue()
+        try:
+            ss["prp_text"] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            ss["prp_text"] = raw.decode("latin-1")
+        ss["prp_name"] = up.name
+        ss.pop("prp_t", None)
+        ss.pop("prp_show_env", None)
+    text, name = ss.get("prp_text"), ss.get("prp_name", "")
+    if not text:
+        st.info("Upload a .prp file exported from PROSPER / PVTP, or load the example.")
+        return
+    try:
+        prp = eos_parse(text, name)
+    except Exception as e:
+        st.error(f"Could not read {name}: {e}")
+        return
+
+    comp = prp.components
+    c7 = wm_eos.c7_plus_fraction(prp)
+    st.subheader(f"Fluid file: {name}")
+    m = st.columns(6)
+    m[0].metric("Equation of state", prp.eos, help=EOS_NAMES[prp.eos])
+    m[1].metric("Components", len(comp))
+    m[2].metric("Non-zero BICs", int((prp.bic != 0).sum() // 2))
+    m[3].metric("Volume shift", "On" if prp.volume_shift else "Off")
+    m[4].metric("C7+ (mole %)", f"{100 * c7:.2f}")
+    m[5].metric("Water salinity (ppm)", f"{prp.salinity_ppm:,.0f}")
+    for note in prp.notes:
+        st.info(note)
+    st.caption(f"Viscosity model in file: oil {prp.oil_viscosity}, gas {prp.gas_viscosity} "
+               "(Lohrenz-Bray-Clark is used). Pressures in the file are psig and are shown here in psia.")
+
+    with st.expander("Composition and component properties", expanded=False):
+        show = comp.copy()
+        show.insert(0, "Mole %", 100 * show.pop("Mole fraction"))
+        st.dataframe(show.set_index("Name").round(5), width="stretch")
+    with st.expander("Binary interaction coefficients"):
+        st.dataframe(pd.DataFrame(prp.bic, index=comp["Name"], columns=comp["Name"])
+                     .style.format("{:.4g}").background_gradient(cmap="Blues", axis=None),
+                     width="stretch")
+    if prp.separators:
+        with st.expander("Separator train (from file)"):
+            st.dataframe(pd.DataFrame(prp.separators, columns=["T (degF)", "P (psia)"],
+                                      index=pd.RangeIndex(1, len(prp.separators) + 1, name="Stage")),
+                         width="stretch")
+
+    st.subheader("Calculations")
+    ss.setdefault("prp_t", float(prp.reference_temperature or 200.0))
+    t_f = st.number_input("Temperature (deg F)", -100.0, 600.0, step=1.0, key="prp_t",
+                          help="Defaults to the reference temperature in the file.")
+    with st.spinner("Flashing the fluid..."):
+        res = eos_calculate(text, name, float(t_f))
+    ps, typ, sep = res["psat"], res["sat_type"], res["sep"]
+
+    implied = FLUID_FROM_SAT.get(typ, "dry_wet_gas")
+    if opts_now is not None and implied != opts_now.fluid_type:
+        st.warning(f"At {t_f:g} °F this fluid has a **{typ or 'no'} point**, which makes it "
+                   f"**{wopt.FLUID_TYPES[implied].lower()}**, but the Options summary says "
+                   f"**{opts_now.label('fluid_type').lower()}**. Check the fluid type.", icon="⚠️")
+
+    m = st.columns(5)
+    if ps:
+        m[0].metric(f"{typ.capitalize()} point", f"{ps:,.0f} psia")
+    else:
+        m[0].metric("Saturation point", "none", help="Single phase at all pressures at this temperature")
+    is_gas = typ != "bubble"
+    if is_gas:
+        m[1].metric("CGR (STB/MMscf)", f"{sep['cgr']:,.1f}" if np.isfinite(sep["cgr"]) else "—")
+        m[2].metric("Bg at Psat (ft3/scf)", f"{sep.get('bg', np.nan):.5f}")
+    else:
+        m[1].metric("GOR (scf/STB)", f"{sep['gor']:,.0f}")
+        m[2].metric("Bo at Psat (RB/STB)", f"{sep.get('bo', np.nan):.4f}")
+    m[3].metric("Stock-tank liquid (°API)", f"{sep['api']:.1f}" if np.isfinite(sep["api"]) else "—")
+    m[4].metric("Separator gas gravity", f"{sep['gas_gravity']:.3f}")
+    st.caption(f"Reservoir fluid at {res['p_res']:,.0f} psia: density {sep.get('res_density', np.nan):.2f} lb/ft3, "
+               f"viscosity {sep.get('res_viscosity', np.nan):.4f} cp. Surface values from flashing the "
+               f"reservoir fluid through the file's {len(prp.separators) or 1}-stage separator train.")
+    with st.expander("Separator stages"):
+        st.dataframe(sep["stages"].round(4), hide_index=True, width="stretch")
+
+    st.markdown(f"**Properties at {t_f:g} °F**")
+    st.pyplot(properties_plot(res["table"], ps), clear_figure=True)
+    st.dataframe(res["table"].style.format(precision=4, na_rep="—")
+                 .format("{:,.1f}", subset=["Pressure (psia)"]),
+                 hide_index=True, width="stretch")
+    st.download_button("Download EOS properties (CSV)", res["table"].to_csv(index=False).encode(),
+                       "eos_properties.csv")
+
+    st.subheader("Phase envelope")
+    if st.button("Calculate phase envelope", help="Scans phase stability over temperature and "
+                                                  "pressure - takes about 20 seconds."):
+        ss["prp_show_env"] = True
+    if ss.get("prp_show_env"):
+        with st.spinner("Tracing the phase envelope..."):
+            env, summ = eos_envelope(text, name)
+        if env.empty:
+            st.info("No two-phase region found between -250 and 1300 °F.")
+        else:
+            m = st.columns(3)
+            m[0].metric("Cricondenbar", f"{summ['cricondenbar_psia']:,.0f} psia",
+                        f"at {summ['cricondenbar_T']:.0f} °F", delta_color="off")
+            m[1].metric("Cricondentherm", f"~{summ['cricondentherm_T']:.0f} °F")
+            m[2].metric("Critical temperature", f"~{summ['critical_T_approx']:.0f} °F"
+                        if "critical_T_approx" in summ else "outside scan")
+            st.pyplot(envelope_plot(env, float(t_f), ps, summ), clear_figure=True)
+            st.caption("Envelope traced at 35 °F steps; the shaded band marks where bubble points "
+                       "turn into dew points (approximate critical temperature).")
+
+
 with tabs[1]:
     st.header("PVT Input Data")
     opts_now = ss.get("options")
-    if opts_now is not None and (opts_now.fluid_type != "oil" or opts_now.method != "black_oil"):
-        st.info(f"This tab covers **oil and water with black-oil correlations**. The Options summary "
-                f"is set to {opts_now.label('fluid_type').lower()} with "
-                f"{opts_now.label('method').lower()}; that PVT input has not been built yet.")
+    if opts_now is not None and opts_now.method == "eos":
+        render_eos(opts_now)
+    elif opts_now is not None and opts_now.fluid_type != "oil":
+        st.info(f"Black-oil PVT input for {opts_now.label('fluid_type').lower()} has not been built yet. "
+                "Black-oil correlations here cover oil and water; choose **Equation of state** in the "
+                "Options summary to import a compositional PRP file for any fluid type.")
     else:
         # ------------------------------------------------------- fluid inputs
         st.subheader("Input parameters")

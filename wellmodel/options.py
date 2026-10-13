@@ -62,6 +62,7 @@ MODELLED = {
 LUMPED = {"completion", "sand_control"}
 
 MODELLED_NOW, LUMPED_IN_PI, NOT_YET = "Modelled", "Absorbed in matched PI", "Not modelled yet"
+PVT_ONLY = "PVT only"   # PVT can be set up (equation of state); flow calculations not built yet
 
 
 @dataclass(frozen=True)
@@ -165,7 +166,16 @@ class WellOptions:
                 st[f] = MODELLED_NOW if getattr(self, f) in ("none",) else LUMPED_IN_PI
             else:
                 st[f] = MODELLED_NOW if getattr(self, f) in MODELLED[f] else NOT_YET
+        if self.method == "eos":
+            # compositional PVT works for every fluid type; flow calculations still use black oil
+            st["method"] = PVT_ONLY
+            st["fluid_type"] = PVT_ONLY
         return st
+
+    @property
+    def pvt_only(self) -> list[str]:
+        return [FIELDS[f][0] + ": " + self.label(f)
+                for f, s in self.engine_status().items() if s == PVT_ONLY]
 
     @property
     def unsupported(self) -> list[str]:
@@ -175,7 +185,7 @@ class WellOptions:
     @property
     def computable(self) -> bool:
         """True when the engine can calculate this configuration today."""
-        return not self.errors and not self.unsupported
+        return not self.errors and not self.unsupported and not self.pvt_only
 
     # ------------------------------------------------- data requirements
     def data_requirements(self) -> dict[str, list[str]]:
@@ -187,11 +197,10 @@ class WellOptions:
         elif self.well_type == "gas_injector":
             pvt.append("Injected gas gravity and impurities (H2S, CO2, N2)")
         if self.method == "eos" and self.well_type != "water_injector":
-            pvt += ["Reservoir fluid composition (mole %), with plus-fraction molecular weight "
-                    "and specific gravity",
-                    "Separator train conditions (pressure and temperature per stage)",
-                    "Lab data to tune the EOS: saturation pressure, CCE/CVD or differential "
-                    "liberation results"]
+            pvt += ["PRP file exported from PROSPER / PVTP: composition, component properties, "
+                    "binary interaction coefficients, separator train and reference temperature",
+                    "The EOS should already be tuned to lab data (saturation pressure, CCE/CVD or "
+                    "differential liberation) before export"]
         elif self.well_type == "producer":
             if self.fluid_type == "oil":
                 pvt += ["Oil gravity (°API), solution GOR and separator gas gravity",

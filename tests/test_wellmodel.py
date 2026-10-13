@@ -180,11 +180,19 @@ def test_gas_injector_with_oil_is_invalid():
 
 
 def test_unsupported_choices_block_calculation():
-    o = WellOptions(fluid_type="dry_wet_gas", method="eos", flow_type="annular")
+    o = WellOptions(fluid_type="dry_wet_gas", method="black_oil", flow_type="annular")
     assert not o.errors
     assert not o.computable
-    assert o.engine_status()["method"] == NOT_YET
-    assert len(o.unsupported) == 3
+    assert o.engine_status()["fluid_type"] == NOT_YET
+    assert len(o.unsupported) == 2
+
+
+def test_eos_is_pvt_only_for_any_fluid():
+    from wellmodel.options import PVT_ONLY
+    o = WellOptions(fluid_type="retrograde_condensate", method="eos")
+    st = o.engine_status()
+    assert st["method"] == PVT_ONLY and st["fluid_type"] == PVT_ONLY
+    assert not o.unsupported and not o.computable
 
 
 def test_completion_choices_absorbed_not_blocking():
@@ -281,3 +289,62 @@ def test_gas_and_water_properties_sane():
     assert mu_w == pytest.approx(0.30, abs=0.03)
     sour = bo.PVTInputs(rsb=500, api=35, gas_sg=0.7, co2=10, h2s=5)
     assert bo.gas_pseudocritical(sour)[0] < bo.gas_pseudocritical(inp)[0]
+
+
+# ------------------------------------------------------------- EOS / PRP
+from wellmodel import eos as weos
+
+
+@pytest.fixture(scope="module")
+def example_fluid():
+    return weos.EOSFluid(weos.parse_prp(weos.example_prp_text(), "example"))
+
+
+def test_prp_parse_units_and_bics():
+    prp = weos.parse_prp(weos.example_prp_text())
+    c = prp.components
+    assert prp.eos == "PR" and len(c) == 13
+    assert c.loc[c["Name"] == "C1", "Pc (psia)"].iloc[0] == pytest.approx(667.8, abs=0.01)   # psig -> psia
+    assert c["Mole fraction"].sum() == pytest.approx(1.0)
+    assert prp.bic[2, 10] == prp.bic[10, 2] == pytest.approx(0.03)
+    assert prp.separators[-1][1] == pytest.approx(15.0, abs=0.01)
+    assert prp.reference_temperature == 210
+
+
+def test_prp_rejects_other_files():
+    with pytest.raises(ValueError):
+        weos.parse_prp("just some text\n1 2 3\n")
+
+
+def test_methane_z_close_to_nist(example_fluid):
+    f = example_fluid
+    z = np.zeros(f.n); z[f.names.index("C1")] = 1
+    f0 = weos.EOSFluid(f.prp, z); f0.c[:] = 0       # unshifted PR
+    assert f0.phase_props(z, 1000, 100).z == pytest.approx(0.885, abs=0.01)
+
+
+def test_flash_equilibrium_and_material_balance(example_fluid):
+    f = example_fluid
+    r = f.flash(1200, 210)
+    assert r.phases == "2P"
+    T = 210 + weos.RANKINE
+    lx, _ = f._lnphi(r.x, 1200, T, phase="L")
+    ly, _ = f._lnphi(r.y, 1200, T, phase="V")
+    assert np.max(np.abs(np.log(r.x) + lx - np.log(r.y) - ly)) < 1e-5
+    assert np.allclose(r.beta * r.y + (1 - r.beta) * r.x, f.z, atol=1e-10)
+    assert r.liquid.density > r.vapour.density and r.ift > 0
+
+
+def test_example_oil_bubble_point_and_surface_volumes(example_fluid):
+    f = example_fluid
+    ps, typ = f.saturation_pressure(210)
+    assert typ == "bubble" and 1800 < ps < 2800
+    assert f.stability(ps * 1.02, 210)[0] and not f.stability(ps * 0.98, 210)[0]
+    sep = f.separator_train(T_res=210, P_res=ps * 1.001)
+    assert 500 < sep["gor"] < 1200 and 25 < sep["api"] < 40 and 1.3 < sep["bo"] < 1.7
+
+
+def test_lbc_viscosity_reasonable(example_fluid):
+    r = example_fluid.flash(1200, 210)
+    assert 0.1 < r.liquid.viscosity < 2.0
+    assert 0.01 < r.vapour.viscosity < 0.03

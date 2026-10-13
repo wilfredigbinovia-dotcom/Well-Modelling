@@ -26,7 +26,7 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 38 tests
+pytest -q                       # 45 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
@@ -35,7 +35,11 @@ jupyter notebook notebooks/demo.ipynb
 The app is being rebuilt tab by tab. It currently has two tabs:
 
 1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
-2. **PVT Input Data** - solution GOR, oil and gas gravity, water salinity and H2S/CO2/N2, plus a lab-data table (pressure, GOR, oil FVF, oil viscosity) with temperature and bubble point. **Match** fits Parameter 1 (multiplier) and Parameter 2 (shift) for every correlation, reports the standard deviation, and suggests the Pb/Rs/Bo family and viscosity correlation needing the smallest correction. Shows match plots and a calculated PVT table.
+2. **PVT Input Data** - shows black-oil or compositional input depending on the Method chosen in tab 1.
+
+   **Equation of state:** import a Petroleum Experts PRP export (.prp). The tool reads the EOS (Peng-Robinson or SRK), components, binary interaction coefficients, volume shifts, separator train and reference temperature, then calculates the saturation pressure (bubble or dew), separator-train GOR/CGR, stock-tank API and gas gravity, Bo or Bg, phase properties versus pressure (LBC viscosity, parachor IFT, liquid dropout) and the phase envelope. It warns when the fluid's behaviour contradicts the fluid type chosen in tab 1.
+
+   **Black oil:** solution GOR, oil and gas gravity, water salinity and H2S/CO2/N2, plus a lab-data table (pressure, GOR, oil FVF, oil viscosity) with temperature and bubble point. **Match** fits Parameter 1 (multiplier) and Parameter 2 (shift) for every correlation, reports the standard deviation, and suggests the Pb/Rs/Bo family and viscosity correlation needing the smallest correction. Shows match plots and a calculated PVT table.
 
    - Bubble point / GOR / FVF: Glaso, Standing, Lasater, Vasquez-Beggs, Petrosky et al, Al-Marhoun.
    - Viscosity: Beal et al, Beggs et al, Petrosky et al, Egbogah et al.
@@ -81,6 +85,7 @@ wellmodel/
   transient.py      pressure transient, build-up fit, forecast
   options.py        options summary: choices, validation, engine status
   blackoil.py       black-oil correlation families, lab-data matching, suggestion
+  eos.py            PRP import, PR/SRK equation of state, flash, envelope, separators
   synthetic.py      known-answer test data
   plotting.py       figures
 app.py                Streamlit app
