@@ -22,16 +22,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wellmodel import blackoil as bo
 from wellmodel import eos as wm_eos
-from wellmodel import inflow as ipr
-from wellmodel import inflow_adv as ipr2
+import inspect
+
+from scipy.optimize import brentq
+
+from wellmodel import inflow as _ipr_mod
+from wellmodel import inflow_adv as _ipr2_mod
 from wellmodel import completion as wcomp
-from wellmodel import mpp as wmpp
+from wellmodel import mpp as _mpp_mod
+from wellmodel import vlp as wvlp
+from wellmodel.correlations import LABELS as VLP_LABELS
 from wellmodel import equipment as weq
+from wellmodel import schematic as wsch
 from wellmodel import options as wopt
 from wellmodel import plotting as wplt
 
 st.set_page_config(page_title="wellmodel", page_icon="🛢️", layout="wide")
 ss = st.session_state
+
+
+class _RecordIPR:
+    """Module proxy: any call that returns an IPR curve is remembered (function and arguments) so the VLP
+    tab can rebuild the IPR at another reservoir pressure, PI or skin."""
+
+    def __init__(self, mod):
+        self._mod = mod
+
+    def __getattr__(self, name):
+        obj = getattr(self._mod, name)
+        if not callable(obj) or isinstance(obj, type):
+            return obj
+
+        def wrapped(*a, **k):
+            out = obj(*a, **k)
+            if isinstance(out, _ipr_mod.IPRCurve):
+                ss["ipr_recipe"] = (obj, a, k)
+            return out
+        return wrapped
+
+
+ipr, ipr2, wmpp = _RecordIPR(_ipr_mod), _RecordIPR(_ipr2_mod), _RecordIPR(_mpp_mod)
 # Number inputs are typed in directly: hide the - / + step buttons everywhere.
 st.markdown("""<style>
 [data-testid="stNumberInputStepDown"], [data-testid="stNumberInputStepUp"] {display: none !important;}
@@ -113,7 +143,7 @@ def radio(col, label, options, key, default=None, **kw):
 
 st.title("🛢️ wellmodel")
 
-TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data"]
+TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP"]
 tabs = st.tabs(TAB_NAMES)
 
 CAPTIONS = {
@@ -180,8 +210,9 @@ with tabs[0]:
                                "Selection": [opts.label(f) for f in wopt.FIELDS],
                                "Status": [STATUS_ICON[stat[f]] for f in wopt.FIELDS]}),
                  hide_index=True, width="stretch")
-    st.caption("Status covers the tabs built so far (PVT and IPR). Black oil and equation-of-state "
-               "PVT both feed the IPR models. Completion and sand control are modelled in the IPR Data tab (perforation, damage, "
+    st.caption("Status covers the tabs built so far (PVT, IPR, Equipment and VLP). Black oil and "
+               "equation-of-state PVT both feed the IPR and VLP calculations; tubing, annular and tubing + annular "
+               "flow are handled in the VLP. Completion and sand control are modelled in the IPR Data tab (perforation, damage, "
                "deviation and partial-penetration skins; gravel pack, screen and liner pressure drops).")
 
     st.subheader("Data you will need")
@@ -530,7 +561,11 @@ with tabs[1]:
         num(c[1], "Mole Percent H2S (percent)", "pvt_h2s", 0.0, 0.0, 100.0, 0.1)
         num(c[2], "Mole Percent CO2 (percent)", "pvt_co2", 0.0, 0.0, 100.0, 0.1)
         num(c[3], "Mole Percent N2 (percent)", "pvt_n2", 0.0, 0.0, 100.0, 0.1)
-        num(st.columns(4)[0], "Reservoir temperature (deg F)", "pvt_t", 200.0, 40.0, 500.0, 1.0)
+        c = st.columns(4)
+        num(c[0], "Reservoir temperature (deg F)", "pvt_t", 200.0, 40.0, 500.0, 1.0)
+        num(c[1], "Condensate Gravity (API)", "pvt_cond_api", 50.0, 20.0, 90.0, 0.5,
+            help="Stock-tank condensate gravity. Used to carry condensate as wellstream gas in the tubing (VLP).")
+        num(c[2], "Water Salinity (ppm)", "pvt_sal", INPUT_DEFAULTS["pvt_sal"], 0.0, 300000.0, 1000.0, "%.0f")
     else:
         # ------------------------------------------------------- fluid inputs
         st.subheader("Input parameters")
@@ -1126,6 +1161,7 @@ with tabs[2]:
         if gas or pvt is not None:
             st.subheader(f"Model data - {model}")
             curve, err, skin_parts, kh_for_skin = None, None, {}, None
+            ss["ipr_recipe"], ss["ipr_sc_dp"] = None, None
             oil_kw = {} if gas else {"pb": pvt["pb"], "bo": pvt["bo"]}
             gas_kw = {"t_f": t_f, "z": gasp.get("z_r"), "sg": gasp.get("sg")} if gas else {}
             mu_used = gasp.get("mu_r") if gas else (pvt["mu"] if pvt else None)
@@ -1359,6 +1395,7 @@ with tabs[2]:
                 try:
                     dp_fn = wcomp.sand_control_dp(sc, fluid, sc_props(fluid, pvt, gasp, pr, t_f))
                     curve = wcomp.apply_sand_control(curve, dp_fn)
+                    ss["ipr_sc_dp"] = dp_fn
                     for attr in ("layer_rates", "profile", "profile_heel_pressure", "isochronal", "c_iso"):
                         if hasattr(raw_curve, attr):
                             setattr(curve, attr, getattr(raw_curve, attr))
@@ -1367,12 +1404,16 @@ with tabs[2]:
 
             # ----------------------------------------------------------- results
             st.subheader("Results")
+            if err or curve is None:
+                ss.pop("ipr_curve", None)
             if err:
                 st.warning(err)
             elif curve is None:
                 st.info("Enter the model data above.")
             else:
                 ss["ipr_curve"] = curve
+                ss["ipr_meta"] = {"model": model, "fluid": fluid, "skin_parts": dict(skin_parts),
+                                  "pb": None if gas else pvt["pb"]}
                 for n_ in curve.notes:
                     st.info(n_)
                 items = [(k_, v) for k_, v in curve.params.items() if isinstance(v, (int, float, np.floating))]
@@ -1548,44 +1589,6 @@ def survey_plot(md, tvd, long_md=None, long_tvd=None):
     return fig
 
 
-def schematic_plot(top, secs, points):
-    fig, ax = plt.subplots(figsize=(4.2, 6.2))
-    if len(secs):
-        for _, r in secs.iterrows():
-            y = [r["MD top (ft)"], r["MD bottom (ft)"]]
-            if r["Type"] == "Tubing":
-                for sgn in (-1, 1):
-                    ax.plot([sgn * r["Flow ID (in)"] / 2] * 2, y, color=wplt.SERIES[0], lw=1.6)
-                    if pd.notna(r["Tubing OD (in)"]):
-                        ax.plot([sgn * r["Tubing OD (in)"] / 2] * 2, y, color=wplt.SERIES[0], lw=0.8)
-                    if pd.notna(r["Casing ID (in)"]):
-                        ax.plot([sgn * r["Casing ID (in)"] / 2] * 2, y, color=wplt.INK, lw=1.6)
-        prev_shoe = top if top is not None else 0.0
-        for _, r in secs[secs["Type"] == "Casing"].iterrows():
-            # first casing runs from surface; later casing rows hang from the previous shoe (liners)
-            y = [prev_shoe, r["MD bottom (ft)"]]
-            for sgn in (-1, 1):
-                ax.plot([sgn * r["Flow ID (in)"] / 2] * 2, y, color=wplt.INK, lw=1.6)
-            ax.annotate(f'{r["Label"]} {r["Flow ID (in)"]:g}" ID', (-r["Flow ID (in)"] / 2, r["MD bottom (ft)"]),
-                        xytext=(-4, -2), textcoords="offset points", ha="right", va="top", fontsize=7.5)
-            prev_shoe = r["MD bottom (ft)"]
-        for _, p_ in points.iterrows():
-            w = (p_["ID (in)"] if pd.notna(p_["ID (in)"]) else 1.0) / 2
-            ax.plot([-w, w], [p_["MD (ft)"]] * 2, color=wplt.SERIES[1], lw=3)
-            ax.annotate(p_["Label"], (w, p_["MD (ft)"]), xytext=(6, 0), textcoords="offset points",
-                        fontsize=7.5, va="center", color=wplt.SERIES[1])
-        width = np.nanmax([secs["Flow ID (in)"].max(), secs["Casing ID (in)"].max()]) / 2
-        ax.set_xlim(-width * 1.6, width * 1.9)
-    if top is not None and np.isfinite(top):
-        ax.axhline(top, color=wplt.INK2, lw=0.8, ls=":")
-        ax.annotate("Xmas tree", (ax.get_xlim()[0], top), xytext=(3, 3), textcoords="offset points", ha="left",
-                    fontsize=7.5)
-    ax.invert_yaxis(); ax.set_ylabel("Measured depth (ft)"); ax.set_xlabel("Radius (in) - not to scale")
-    ax.set_title("Downhole schematic", fontsize=10)
-    fig.tight_layout()
-    return fig
-
-
 def geo_plot(gt, secs_bottom=None):
     fig, ax = plt.subplots(figsize=(5, 4.2))
     ax.plot(gt["Formation Temperature (deg F)"], gt["Formation TVD (ft)"], "-o", ms=4, color=wplt.SERIES[1])
@@ -1708,15 +1711,12 @@ with tabs[3]:
         if not any(l == "error" for l, _ in iss):
             top_md, secs, pts = weq.downhole_sections(ed_d, md_s if survey_ok else None,
                                                       tvd_s if survey_ok else None)
-            cc = st.columns([1.7, 1])
-            with cc[0]:
-                st.markdown("**Flow sections**")
-                st.dataframe(secs.style.format(precision=4, na_rep="—"), hide_index=True, width="stretch")
-                if len(pts):
-                    st.markdown("**Components**")
-                    st.dataframe(pts.style.format(precision=3, na_rep="—"), hide_index=True, width="stretch")
-            with cc[1]:
-                st.pyplot(schematic_plot(top_md, secs, pts), clear_figure=True)
+            st.markdown("**Flow sections**")
+            st.dataframe(secs.style.format(precision=4, na_rep="—"), hide_index=True, width="stretch")
+            if len(pts):
+                st.markdown("**Components**")
+                st.dataframe(pts.style.format(precision=3, na_rep="—"), hide_index=True, width="stretch")
+            st.caption("The well schematic is shown below the equipment sections once every section is complete.")
     bottom_md = float(secs["MD bottom (ft)"].max()) if len(secs) else None
 
     # ----------------------------------------------------- geothermal gradient
@@ -1762,7 +1762,599 @@ with tabs[3]:
         st.dataframe(pd.DataFrame({"Section": list(status), "Status": [status_of(v) for v in status.values()],
                                    "Messages": [len(v) for v in status.values()]}),
                      hide_index=True, width="stretch")
+    all_ok = all(not any(l == "error" for l, _ in v) for v in status.values())
+    st.divider()
+    st.subheader("Well schematic")
+    if all_ok and len(secs):
+        has_choke = "Choke" in set(weq.surface_summary(ed_s).get("Type", pd.Series(dtype=str)))
+        svg = wsch.well_schematic_svg(top_md, secs, pts, o.completion if o else "cased_hole",
+                                      o.sand_control if o else "none", has_choke)
+        cc = st.columns([1, 1.25])
+        with cc[0]:
+            st.image(svg, width="content")
+        with cc[1]:
+            st.markdown("**String summary**")
+            rows_ = [{"Item": "Xmas tree", "MD (ft)": top_md, "ID (in)": np.nan}]
+            rows_ += [{"Item": (f'{r["Type"]} shoe' if r["Type"] == "Casing" else "End of tubing")
+                       if r["Label"] == r["Type"] else f'{r["Label"]} ({r["Type"].lower()})',
+                       "MD (ft)": r["MD bottom (ft)"], "ID (in)": r["Flow ID (in)"]}
+                      for i_, (_, r) in enumerate(secs.iterrows())
+                      if r["Type"] == "Casing" or i_ == len(secs) - 1 or secs.iloc[i_ + 1]["Type"] != "Tubing"
+                      or secs.iloc[i_ + 1]["Flow ID (in)"] != r["Flow ID (in)"]]
+            rows_ += [{"Item": r["Label"] if r["Label"] == r["Type"] else f'{r["Label"]} ({r["Type"]})',
+                       "MD (ft)": r["MD (ft)"], "ID (in)": r["ID (in)"]} for _, r in pts.iterrows()]
+            summ_ = pd.DataFrame(rows_).sort_values("MD (ft)", kind="stable")
+            if survey_ok:
+                summ_["TVD (ft)"] = weq.tvd_at(md_s, tvd_s, summ_["MD (ft)"])
+            if len(gmd) >= 2:
+                summ_["Formation temperature (°F)"] = weq.temperature_at(gmd, gtemp, summ_["MD (ft)"])
+            fmt_ = {c_: "{:,.1f}" for c_ in summ_.columns if c_ not in ("Item", "ID (in)")}
+            fmt_["ID (in)"] = "{:.3f}"
+            st.dataframe(summ_.style.format(fmt_, na_rep="—"),
+                         hide_index=True, width="stretch")
+            st.caption(f"Completion: {o.label('completion').lower() if o else 'cased hole'}; sand control: "
+                       f"{o.label('sand_control').lower() if o else 'none'} (from the Options summary). "
+                       "Depth spacing is stretched so every component stays readable.")
+            st.download_button("Download schematic (SVG)", svg.encode(), "well_schematic.svg", "image/svg+xml")
+    else:
+        st.info("The schematic appears once every equipment section above is complete (no ❌ in the status table).")
     ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": ed_s, "t_surround": t_sur,
                        "u_surface": u_sur, "downhole": (top_md, secs, pts), "geothermal": (gmd, gtemp),
                        "u_geo": u_geo, "heat_capacities": hc,
                        "valid": all(not any(l == "error" for l, _ in v) for v in status.values())}
+
+
+
+# ================================================================ tab 5: VLP
+VLP_ROWS = 20
+VLP_ACTIONS = ["Estimate U Value", "Correlation Comparison", "Match VLP", "VLP/IPR", "Adjust IPR"]
+
+
+def vlp_columns(kind):
+    return wvlp.OIL_TEST_COLUMNS if kind == "oil" else wvlp.GAS_TEST_COLUMNS
+
+
+def vlp_blank(kind):
+    cols = vlp_columns(kind)
+    df = pd.DataFrame({c: pd.Series([None] * VLP_ROWS, dtype=object) if c in ("Test Point Date", "Test Point Comment")
+                       else pd.Series([np.nan] * VLP_ROWS, dtype=float) for c in cols})
+    df.index = pd.RangeIndex(1, VLP_ROWS + 1, name="Test")
+    return df
+
+
+def vlp_set_tests(kind, df):
+    ss["vlp_tests_" + kind] = df
+    ss["_ver_vlp_tests_" + kind] = ss.get("_ver_vlp_tests_" + kind, 0) + 1
+    for k_ in ("vlp_u", "vlp_cmp", "vlp_matches", "vlp_vi", "vlp_adj"):
+        ss.pop(k_, None)
+
+
+@st.cache_data(show_spinner=False)
+def eos_vlp_grid(text, name, p_max, t_min, t_max):
+    f = wm_eos.EOSFluid(wm_eos.parse_prp(text, name))
+    grid = wvlp.eos_grid(f, p_max, t_min, t_max)
+    sep = f.separator_train()
+    return grid, float(f.z @ f.mw), float(sep["stages"]["Gas (scf per lbmol feed)"].sum()), \
+        float(sep["stb_per_lbmol"]), float(sep["oil_density"]) if np.isfinite(sep["oil_density"]) else 50.0
+
+
+def vlp_fluid(o, kind, p_max, t_min, t_max):
+    """Fluid model for the tubing from the PVT tab. Returns (fluid, description) or (None, reason)."""
+    water = bo.PVTInputs(rsb=1, api=40, gas_sg=0.7, salinity_ppm=float(val("pvt_sal", 50000.0)),
+                         h2s=float(val("pvt_h2s", 0.0)), co2=float(val("pvt_co2", 0.0)), n2=float(val("pvt_n2", 0.0)))
+    if o.method == "eos":
+        if not ss.get("prp_text"):
+            return None, "Load a PRP file in the PVT Input Data tab."
+        p_max = float(np.ceil(p_max / 500) * 500)
+        grid, mw, scf, stb, rho = eos_vlp_grid(ss["prp_text"], ss.get("prp_name", ""), p_max,
+                                               float(np.floor(t_min / 10) * 10), float(np.ceil(t_max / 10) * 10))
+        if kind == "oil" and stb <= 0:
+            return None, "The PRP fluid gives no stock-tank oil."
+        water.salinity_ppm = float(eos_parse(ss["prp_text"], ss.get("prp_name", "")).salinity_ppm or 0.0)
+        return wvlp.EOSTableFluid(kind, grid, mw, scf, stb, rho, water), \
+            f"Equation of state ({ss.get('prp_name', 'PRP file')}): flashed on a pressure-temperature grid"
+    if kind == "oil":
+        model = blackoil_model(o)
+        if model is None:
+            return None, "Complete the PVT Input Data tab (black oil)."
+        fam = f"{bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}"
+        return wvlp.BlackOilFluid(model), f"Black oil ({fam}{', matched' if ss.get('pvt_model') else ', not matched'})"
+    inp = bo.PVTInputs(rsb=1, api=40, gas_sg=float(val("pvt_gas_sg", 0.70)), salinity_ppm=water.salinity_ppm,
+                       h2s=water.h2s, co2=water.co2, n2=water.n2)
+    api = float(val("pvt_cond_api", 50.0))
+    return wvlp.WetGasFluid(inp, api), f"Gas correlations, gas gravity {inp.gas_sg:.3f}, condensate {api:g} °API (wet gas)"
+
+
+def vlp_path(eqd, flow_type, extra_md):
+    top, secs, pts = eqd["downhole"]
+    smd, stvd = eqd["survey"]
+    gmd, gt = eqd["geothermal"]
+    return wvlp.build_flow_path(top, secs, pts, smd, stvd, gmd, gt, flow_type, extra_md)
+
+
+def rebuild_ipr(changes):
+    """Rebuild the tab-3 IPR with some arguments changed (pr, skin, j). Raises ValueError if not possible."""
+    rec = ss.get("ipr_recipe")
+    if rec is None:
+        raise ValueError("No IPR recipe - recalculate the IPR tab.")
+    fn, a, k = rec
+    b = inspect.signature(fn).bind(*a, **k)
+    for key, v in changes.items():
+        if key not in inspect.signature(fn).parameters:
+            raise ValueError(f"The {ss.get('ipr_meta', {}).get('model', 'current')} IPR has no '{key}' input.")
+        b.arguments[key] = v
+    c = fn(*b.args, **b.kwargs)
+    if ss.get("ipr_sc_dp") is not None:
+        c = wcomp.apply_sand_control(c, ss["ipr_sc_dp"])
+    return c
+
+
+def ipr_arg(name):
+    rec = ss.get("ipr_recipe")
+    if rec is None:
+        return None
+    fn, a, k = rec
+    b = inspect.signature(fn).bind(*a, **k)
+    b.apply_defaults()
+    return b.arguments.get(name)
+
+
+def ipr_for_test(curve, pr_test):
+    """IPR at the test reservoir pressure when it differs and the model can be rebuilt."""
+    if pr_test is None or not np.isfinite(pr_test) or abs(pr_test - curve.pr) < 0.5:
+        return curve, ""
+    try:
+        return rebuild_ipr({"pr": float(pr_test)}), f"IPR rebuilt at the test reservoir pressure {pr_test:,.0f} psia"
+    except (ValueError, TypeError, KeyError) as e:
+        return curve, f"IPR kept at {curve.pr:,.0f} psia ({e})"
+
+
+EXAMPLE_PI_FACTOR = 1.10
+
+
+def vlp_example_tests(kind, path, fluid, u, hc, pr, ipr_curve=None):
+    """Synthetic tests from the current equipment and PVT (truth: Hagedorn & Brown for oil, Gray for gas,
+    P1 1.04, P2 1.12). With an IPR, each test is the operating point of the VLP with that IPR made 10 % more
+    productive - so VLP/IPR shows a gap that Adjust IPR can close."""
+    gauge = float(path.md[np.argmin(np.abs(path.md - (path.top + 0.9 * (path.bottom - path.top))))])
+    if kind == "oil":
+        t = pd.DataFrame({"thp": [250.0, 300.0, 220.0, 350.0], "q": [1500.0, 2500.0, 3200.0, 1000.0],
+                          "wc": [0.10, 0.20, 0.30, 0.05], "gor": [750.0, 780.0, 820.0, 750.0]})
+        corr = "hagedorn_brown"
+    else:
+        t = pd.DataFrame({"thp": [2600.0, 2300.0, 2000.0, 1700.0], "q": [8.0, 12.0, 16.0, 20.0],
+                          "wgr": [2.0, 2.5, 3.0, 4.0], "cgr": [25.0, 25.0, 24.0, 24.0]})
+        corr = "gray"
+    if ipr_curve is not None and ipr_curve.fluid == kind:
+        scale = 1000.0 if kind == "gas" else 1.0
+        iq, ip = ipr_curve.q * EXAMPLE_PI_FACTOR / scale, ipr_curve.pwf
+        rates = np.linspace(iq.max() * 0.005, iq.max(), 60)
+        thps = np.array([0.05, 0.065, 0.08, 0.10]) * ipr_curve.pr if kind == "oil" else \
+            np.array([0.45, 0.55, 0.62, 0.70]) * ipr_curve.pr
+        keep = []
+        for i in range(len(t)):
+            for thp in (thps[i], thps[i] * 0.7, thps[i] * 0.5):
+                row = t.iloc[i].copy()
+                row["thp"] = round(float(thp), -1)
+                bhp = wvlp.vlp_curve(path, fluid, row, rates, corr, 1.04, 1.12, u, hc)
+                hit = wvlp.intersect(rates, bhp, iq, ip)
+                if hit:
+                    row["q"] = round(hit[0], 0 if kind == "oil" else 3)
+                    keep.append(row)
+                    break
+        if keep:
+            t = pd.DataFrame(keep).reset_index(drop=True)
+    P, T = wvlp.traverse(path, fluid, t["thp"].to_numpy(), wvlp.case_of(t, kind), corr, 1.04, 1.12, u, hc)
+    gp = P[:, path.node(gauge)] + np.array([3.0, -4.0, 2.0, -2.0])[:len(t)]
+    rows = []
+    for i, r in t.iterrows():
+        d = {"Test Point Date": f"2026-0{i + 3}-15", "Test Point Comment": "synthetic",
+             "Tubing Head Pressure (psia)": r["thp"], "Tubing Head Temperature (deg F)": round(float(T[i, 0]), 1),
+             "Gauge Depth (Measured) (feet)": gauge, "Gauge Pressure (psia)": round(float(gp[i]), 1),
+             "Reservoir Pressure (psia)": pr}
+        if kind == "oil":
+            d.update({"Water Cut (percent)": r["wc"] * 100, "Liquid Rate (STB/day)": r["q"],
+                      "Gas Oil Ratio (scf/STB)": r["gor"], "GOR Free (scf/STB)": 0.0})
+        else:
+            d.update({"Water Gas Ratio (STB/MMscf)": r["wgr"], "Separator Gas Oil Ratio (scf/STB)": round(1e6 / r["cgr"]),
+                      "Gas Rate (MMscf/day)": r["q"]})
+        rows.append(d)
+    df = vlp_blank(kind)
+    for i, d in enumerate(rows):
+        for c_, v_ in d.items():
+            df.iat[i, df.columns.get_loc(c_)] = v_
+    return df
+
+
+def traverse_plot(path, P_by, T_by, test, title, temp_meas=None):
+    fig, (a, b) = plt.subplots(1, 2, figsize=(11, 4.6), gridspec_kw={"width_ratios": [1.5, 1]})
+    for i, (name, P) in enumerate(P_by.items()):
+        a.plot(P, path.tvd, color=wplt.SERIES[i % len(wplt.SERIES)], lw=1.6, label=name)
+    if np.isfinite(test.get("gauge_p", np.nan)):
+        a.scatter([test["gauge_p"]], [np.interp(test["gauge_md"], path.md, path.tvd)], s=60, color=wplt.INK,
+                  zorder=5, label="gauge (measured)")
+    a.invert_yaxis(); a.set_xlabel("Pressure (psia)"); a.set_ylabel("TVD (ft)")
+    a.set_title(title, fontsize=10); a.legend(fontsize=8, loc="lower left")
+    b.plot(path.t_form, path.tvd, color=wplt.INK2, ls="--", lw=1.2, label="formation")
+    for i, (name, T) in enumerate(T_by.items()):
+        b.plot(T, path.tvd, color=wplt.SERIES[i % len(wplt.SERIES)], lw=1.4, label=name)
+    if temp_meas is not None and np.isfinite(temp_meas):
+        b.scatter([temp_meas], [path.tvd[0]], s=60, color=wplt.INK, zorder=5, label="THT (measured)")
+    b.invert_yaxis(); b.set_xlabel("Temperature (°F)"); b.set_title("Temperature", fontsize=10)
+    b.legend(fontsize=8, loc="lower left")
+    fig.tight_layout()
+    return fig
+
+
+def show_vlp_issues(issues, infos=True):
+    for lvl, msg in issues:
+        if lvl == "error":
+            st.error(msg)
+        elif lvl == "warning":
+            st.warning(msg)
+        elif infos:
+            st.caption("ℹ️ " + msg)
+
+
+def accept_u(u):
+    put("eq_u", float(round(u, 5)))
+    ss["vlp_u_accepted"] = float(round(u, 5))
+
+
+def accept_ipr(key, value, label):
+    put(key, float(value))
+    ss["vlp_adj_accepted"] = label
+    ss.pop("vlp_vi", None)
+
+
+with tabs[4]:
+    st.header("VLP")
+    o = ss.get("options")
+    eqd = ss.get("equipment", {})
+    if o is None or o.errors:
+        st.info("Fix the configuration in the Options summary first.")
+    elif o.is_injector:
+        st.info("VLP matching for injectors is not built yet - this tab covers producers.")
+    elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
+        st.info("Complete the Equipment Data tab first (every section in its status table must be OK).")
+    else:
+        kind = "gas" if o.is_gas else "oil"
+        st.caption(("Gas" if kind == "gas" else "Oil") + " well test data. Pressures in psia; the tubing is calculated "
+                   "from the Xmas tree down to the deepest equipment "
+                   f"({eqd['downhole'][1]['MD bottom (ft)'].max():,.0f} ft MD), which is taken as the IPR depth.")
+        key = "vlp_tests_" + kind
+        ss.setdefault(key, vlp_blank(kind))
+        ed_key = f"{key}_ed_{ss.get('_ver_' + key, 0)}"
+        cfg = {c_: st.column_config.NumberColumn(c_.split(" (")[0] + "\n(" + c_.split(" (", 1)[1] if " (" in c_ else c_,
+                                                 format="%g") for c_ in vlp_columns(kind)[2:]}
+        cfg["Test Point Date"] = st.column_config.TextColumn("Test Point Date")
+        cfg["Test Point Comment"] = st.column_config.TextColumn("Test Point Comment")
+        tbl = st.data_editor(ss[key], key=ed_key, num_rows="fixed", width="stretch", column_config=cfg,
+                             height=36 * 11)
+
+        u_cur = float(val("eq_u", eqd.get("u_geo", 8.0)))
+        hc = eqd["heat_capacities"]
+        top_md, secs_, _ = eqd["downhole"]
+        tests, t_issues = wvlp.clean_tests(tbl, kind, float(top_md), float(secs_["MD bottom (ft)"].max()))
+        ipr_curve = ss.get("ipr_curve")
+        prs = [x for x in ([ipr_curve.pr] if ipr_curve is not None else []) + list(tests.get("pr", []))
+               + list(tests.get("gauge_p", [])) if np.isfinite(x)]
+        p_max = max(prs + [5000.0]) * 1.15
+        gmd, gt = eqd["geothermal"]
+        t_min = min([float(np.min(gt))] + [x for x in tests.get("tht", []) if np.isfinite(x)]) - 10
+        fluid, fluid_note = vlp_fluid(o, kind, p_max, t_min, float(np.max(gt)) + 10)
+
+        c = st.columns([1, 1, 3])
+        if fluid is not None:
+            def _load_example():
+                path0 = vlp_path(eqd, o.flow_type, ())
+                pr0 = float(ipr_curve.pr) if ipr_curve is not None else float(val("ipr_pr", 3000.0))
+                vlp_set_tests(kind, vlp_example_tests(kind, path0, fluid, u_cur, hc, pr0, ipr_curve))
+            c[0].button("Load example tests", on_click=_load_example, width="stretch",
+                        help="Synthetic tests generated from the current equipment, PVT and IPR: Hagedorn & Brown "
+                             "(oil) or Gray (gas) with P1 1.04 and P2 1.12, at the operating points of the IPR made "
+                             "10 % more productive.")
+        c[1].button("Clear tests", on_click=vlp_set_tests, args=(kind, vlp_blank(kind)), width="stretch")
+        c[2].caption(f"PVT: {fluid_note}. U value {u_cur:.4g} BTU/h/ft2/F (Equipment tab).")
+        show_vlp_issues(t_issues)
+        bad = any(l == "error" for l, _ in t_issues)
+
+        if fluid is None:
+            st.warning(fluid_note)
+        elif not len(tests):
+            st.info("Enter at least one test, or load the example tests.")
+        elif bad:
+            st.info("Fix the test table errors above to continue.")
+        else:
+            labels = tests["label"].tolist()
+            use = st.multiselect("Tests to use", labels, default=labels, key=f"vlp_use_{kind}_{len(labels)}")
+            tests = tests[tests["label"].isin(use)].reset_index(drop=True)
+            try:
+                path = vlp_path(eqd, o.flow_type, [m for m in tests["gauge_md"] if np.isfinite(m)])
+            except ValueError as e:
+                st.error(str(e))
+                path = None
+            if path is not None and len(tests):
+                st.divider()
+                bc = st.columns(5)
+                for i, name in enumerate(VLP_ACTIONS):
+                    bc[i].button(name, width="stretch", on_click=lambda n=name: ss.__setitem__("vlp_action", n),
+                                 type="primary" if ss.get("vlp_action", VLP_ACTIONS[0]) == name else "secondary")
+                action = ss.get("vlp_action", VLP_ACTIONS[0])
+                st.subheader(action)
+                qunit = "STB/d" if kind == "oil" else "MMscf/d"
+
+                # ------------------------------------------------ estimate U
+                if action == "Estimate U Value":
+                    st.caption("Finds the overall heat transfer coefficient that makes the calculated wellhead "
+                               "temperature equal to the measured tubing head temperature, test by test. The "
+                               "temperature model uses the geothermal gradient and heat capacities from the "
+                               "Equipment tab.")
+                    tab_u = wvlp.estimate_u(path, fluid, tests, hc)
+                    good = tab_u["U (BTU/h/ft2/F)"].dropna()
+                    st.dataframe(tab_u.style.format({"Measured THT (°F)": "{:.1f}", "U (BTU/h/ft2/F)": "{:.4f}"},
+                                                    na_rep="—"), hide_index=True, width="stretch")
+                    if len(good):
+                        u_new = float(good.median())
+                        m = st.columns(4)
+                        m[0].metric("Estimated U (median)", f"{u_new:.4g}")
+                        m[1].metric("Current U (Equipment tab)", f"{u_cur:.4g}")
+                        m[2].metric("Spread across tests", f"{good.min():.3g} – {good.max():.3g}")
+                        m[3].button(f"Accept U = {u_new:.4g}", type="primary", on_click=accept_u, args=(u_new,),
+                                    help="Transfers the value to the Geothermal gradient section of the Equipment tab.")
+                        if ss.get("vlp_u_accepted") is not None and abs(ss["vlp_u_accepted"] - u_cur) < 1e-4:
+                            st.success(f"U = {u_cur:.5g} BTU/h/ft2/F transferred to the Geothermal gradient section.")
+                        case = wvlp.case_of(tests, kind)
+                        w, cp = fluid.mass_cp(case, hc)
+                        T_new = wvlp.temperature_profile(path, w, cp, u_new)
+                        fig, ax = plt.subplots(figsize=(6.5, 4.4))
+                        ax.plot(path.t_form, path.tvd, color=wplt.INK2, ls="--", label="formation")
+                        for i, (_, t) in enumerate(tests.iterrows()):
+                            col = wplt.SERIES[i % len(wplt.SERIES)]
+                            ax.plot(T_new[i], path.tvd, color=col, lw=1.4, label=f"test {t['label']}")
+                            if np.isfinite(t["tht"]):
+                                ax.scatter([t["tht"]], [path.tvd[0]], color=col, s=45, zorder=5, edgecolor=wplt.INK)
+                        ax.invert_yaxis(); ax.set_xlabel("Temperature (°F)"); ax.set_ylabel("TVD (ft)")
+                        ax.set_title(f"Flowing temperature at U = {u_new:.4g} (dots: measured THT)", fontsize=10)
+                        ax.legend(fontsize=8)
+                        fig.tight_layout()
+                        st.pyplot(fig, clear_figure=True)
+                    else:
+                        st.warning("No test has a usable tubing head temperature.")
+
+                # ------------------------------------------- correlation comparison
+                elif action == "Correlation Comparison":
+                    st.caption("Each correlation, unmatched (Parameter 1 = Parameter 2 = 1), is run from the "
+                               "measured tubing head pressure down to the gauge. The one with the smallest error "
+                               "is suggested; Match VLP then fine-tunes it.")
+                    corrs = st.multiselect("Correlations", wvlp.VLP_CORRELATIONS, default=wvlp.VLP_CORRELATIONS,
+                                           format_func=VLP_LABELS.get, key="vlp_cmp_corrs")
+                    with st.expander("Correlations not available"):
+                        st.markdown("\n".join(f"- **{k_}** - {v_}" for k_, v_ in wvlp.NOT_AVAILABLE.items()))
+                        st.caption("Fancher & Brown (lowest) and Duns & Ros (highest in slug flow) bound the "
+                                   "measured gauge pressure as a quality check; they are flagged automatically below.")
+                        st.caption("Suitability: Gray is intended for gas/condensate wells; Orkiszewski and Aziz were "
+                                   "developed for oil wells and overstate holdup in high-pressure gas wells, where the "
+                                   "Duns & Ros map places the flow in slug flow; Ansari and Mukherjee & Brill are "
+                                   "general, with abrupt changes at flow-pattern boundaries.")
+                    if not np.isfinite(tests["gauge_p"]).any():
+                        st.warning("No test has gauge data - comparison needs a measured downhole pressure.")
+                    elif corrs:
+                        with st.spinner("Running traverses..."):
+                            summ, detail, travs, g = wvlp.compare(path, fluid, tests, corrs, u_cur, hc)
+                        cand = summ[~summ["key"].isin(wvlp.LOWER_BOUNDS)]
+                        best = cand.iloc[0] if len(cand) else summ.iloc[0]
+                        st.success(f"**Suggested: {best['Correlation']}** - mean absolute error "
+                                   f"{best['Mean abs error (psi)']:.0f} psi ({best['Mean abs error (%)']:.1f} %) "
+                                   f"over {int(best['Tests'])} test(s).")
+                        st.dataframe(summ.drop(columns="key").style.format(precision=2), hide_index=True,
+                                     width="stretch")
+                        tsel = st.selectbox("Plot test", g["label"].tolist(), key="vlp_cmp_test")
+                        i = g.index[g["label"] == tsel][0]
+                        P_by = {VLP_LABELS[c_]: travs[c_][0][i] for c_ in corrs}
+                        T_by = {"flowing": travs[corrs[0]][1][i]}
+                        st.pyplot(traverse_plot(path, P_by, T_by, g.iloc[i], f"Test {tsel}: gradient traverses",
+                                                g.iloc[i]["tht"]), clear_figure=True)
+                        with st.expander("Error by test"):
+                            st.dataframe(detail.style.format(precision=2), hide_index=True, width="stretch")
+                        ss["vlp_suggested"] = best["key"]
+                        for lb_ in wvlp.LOWER_BOUNDS:
+                            bad_ = detail[(detail["Correlation"] == VLP_LABELS[lb_]) & (detail["Error (psi)"] > 0)]
+                            if len(bad_):
+                                st.warning(f"{VLP_LABELS[lb_]} (a lower bound) is above the measured gauge pressure "
+                                           f"for test(s) {', '.join(bad_['Test'])} - the gauge pressure, THP, rates or "
+                                           "PVT for those tests are suspect.")
+                                break
+                        if "duns_ros" in corrs:
+                            hi_ = detail[(detail["Correlation"] == VLP_LABELS["duns_ros"]) & (detail["Error (psi)"] < 0)]
+                            if len(hi_):
+                                st.info(f"Duns & Ros, usually the highest pressure in slug flow, is below the measured "
+                                        f"gauge for test(s) {', '.join(hi_['Test'])} - check those tests.")
+
+                # -------------------------------------------------------- match
+                elif action == "Match VLP":
+                    st.caption("Regression of Parameter 1 (gravity term multiplier) and Parameter 2 (friction "
+                               "term multiplier) so the calculated gauge pressures match the tests. Parameter 1 "
+                               "within 0.9-1.1 means the correlation and data are consistent; larger corrections "
+                               "point to PVT, rate or gauge problems.")
+                    match_list = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+                    corrs = st.multiselect("Correlations to match", match_list,
+                                           default=[c_ for c_ in wvlp.VLP_CORRELATIONS if c_ in
+                                                    ("duns_ros", "duns_ros_gould", "ansari", "beggs_brill",
+                                                     "hagedorn_brown", "gray",
+                                                     "mukherjee_brill", "orkiszewski", "aziz")],
+                                           format_func=VLP_LABELS.get,
+                                           key="vlp_match_corrs")
+                    if not np.isfinite(tests["gauge_p"]).any():
+                        st.warning("No test has gauge data to match.")
+                    elif corrs:
+                        sig = (tuple(corrs), tests.to_json(), u_cur, fluid_note, o.flow_type)
+                        if st.button("Run match", type="primary") or (ss.get("vlp_matches", {}).get("sig") == sig):
+                            if ss.get("vlp_matches", {}).get("sig") != sig:
+                                with st.spinner("Regressing Parameter 1 and 2..."):
+                                    ms = [wvlp.match(path, fluid, tests, c_, u_cur, hc) for c_ in corrs]
+                                ss["vlp_matches"] = {"sig": sig, "ms": {m_.correlation: m_ for m_ in ms}}
+                            ms = ss["vlp_matches"]["ms"]
+                            mt = wvlp.match_table(list(ms.values()))
+                            st.dataframe(mt.drop(columns=["key", "Score"]).style.format(
+                                {"Parameter 1": "{:.4f}", "Parameter 2": "{:.4f}", "Std Deviation (psi)": "{:.2f}",
+                                 "RMS error before (psi)": "{:.1f}", "RMS error after (psi)": "{:.2f}"}),
+                                hide_index=True, width="stretch")
+                            best = mt.iloc[0]["key"]
+                            opts_ = list(mt["key"])
+                            cur = ss.get("vlp_selected", best)
+                            chosen = st.selectbox("Correlation to use for VLP/IPR", opts_,
+                                                  index=opts_.index(cur) if cur in opts_ else 0,
+                                                  format_func=VLP_LABELS.get, key=f"vlp_sel_{len(opts_)}_{best}",
+                                                  help="Suggested: the correlation needing the smallest correction "
+                                                       "with Parameter 1 within limits.")
+                            ss["vlp_selected"] = chosen
+                            sel_m = ms[chosen]
+                            st.success(f"**{sel_m.label}**: Parameter 1 = {sel_m.p1:.4f}, Parameter 2 = "
+                                       f"{sel_m.p2:.4f}, std deviation {sel_m.std:.2f} psi"
+                                       + (" (suggested)" if chosen == best else ""))
+                            for f_ in sel_m.flags:
+                                st.warning(f_)
+                            g = tests[np.isfinite(tests["gauge_p"])].reset_index(drop=True)
+                            pc0, P0, T0 = wvlp.gauge_pressures(path, fluid, g, chosen, 1, 1, u_cur, hc)
+                            pc1, P1_, T1 = wvlp.gauge_pressures(path, fluid, g, chosen, sel_m.p1, sel_m.p2, u_cur, hc)
+                            tsel = st.selectbox("Plot test", g["label"].tolist(), key="vlp_match_test")
+                            i = g.index[g["label"] == tsel][0]
+                            st.pyplot(traverse_plot(path, {"unmatched": P0[i], "matched": P1_[i]}, {"flowing": T1[i]},
+                                                    g.iloc[i], f"Test {tsel}: {sel_m.label}", g.iloc[i]["tht"]),
+                                      clear_figure=True)
+                    else:
+                        st.info("Choose at least one correlation.")
+
+                # --------------------------------------------------------- VLP/IPR
+                elif action in ("VLP/IPR", "Adjust IPR"):
+                    ms = ss.get("vlp_matches", {}).get("ms", {})
+                    chosen = ss.get("vlp_selected")
+                    if not ms or chosen not in ms:
+                        st.info("Run **Match VLP** first and choose the correlation to use.")
+                    elif ipr_curve is None:
+                        st.info("Calculate an IPR in the IPR Data tab first.")
+                    elif ipr_curve.fluid != kind:
+                        st.info("The IPR in the IPR Data tab is for a different fluid type - recalculate it.")
+                    else:
+                        mm = ms[chosen]
+                        scale = 1000.0 if kind == "gas" else 1.0          # IPR gas rates are Mscf/d
+                        rows_, curves_ = [], []
+                        q_top = max(float(ipr_curve.aof) / scale, float(tests["q"].max()) * 1.6)
+                        rates = np.linspace(q_top * 0.01, q_top, 40)
+                        with st.spinner("Calculating VLP curves..."):
+                            for _, t in tests.iterrows():
+                                curve_t, note = ipr_for_test(ipr_curve, t["pr"])
+                                bhp = wvlp.vlp_curve(path, fluid, t, rates, chosen, mm.p1, mm.p2, u_cur, hc)
+                                bhp_test = float(wvlp.vlp_curve(path, fluid, t, [t["q"]], chosen, mm.p1, mm.p2,
+                                                                u_cur, hc)[0])
+                                hit = wvlp.intersect(rates, bhp, curve_t.q / scale, curve_t.pwf)
+                                ipr_at_test = float(np.interp(t["q"] * scale, np.sort(curve_t.q),
+                                                              curve_t.pwf[np.argsort(curve_t.q)]))
+                                rows_.append({"Test": t["label"], f"Test rate ({qunit})": t["q"],
+                                              f"Calculated rate ({qunit})": hit[0] if hit else np.nan,
+                                              "Rate difference (%)": 100 * (hit[0] - t["q"]) / t["q"] if hit else np.nan,
+                                              "BHP from VLP at test rate (psia)": bhp_test,
+                                              "BHP from IPR at test rate (psia)": ipr_at_test,
+                                              "IPR reservoir pressure (psia)": curve_t.pr, "Note": note
+                                              or ("" if hit else "no intersection - well does not flow")})
+                                curves_.append((t, curve_t, bhp, bhp_test, hit))
+                        vi = pd.DataFrame(rows_)
+                        ss["vlp_vi"] = vi
+                        if action == "VLP/IPR":
+                            st.caption(f"VLP: {mm.label} matched (P1 {mm.p1:.3f}, P2 {mm.p2:.3f}) at each test's "
+                                       f"THP and ratios. IPR: {ss.get('ipr_meta', {}).get('model', '')} from the IPR "
+                                       "tab, rebuilt at each test's reservoir pressure where possible. A good IPR "
+                                       "puts every intersection close to the measured rate.")
+                            fmt_ = {c_: ("{:,.3f}" if kind == "gas" and "rate" in c_.lower() else "{:,.1f}")
+                                    for c_ in vi.columns if c_ not in ("Test", "Note")}
+                            fmt_["Rate difference (%)"] = "{:+.1f}"
+                            st.dataframe(vi.style.format(fmt_, na_rep="—"), hide_index=True, width="stretch")
+                            md_ = vi["Rate difference (%)"].abs().max()
+                            if np.isfinite(md_):
+                                (st.success if md_ <= 5 else st.warning)(
+                                    f"Largest rate difference {md_:.1f} %. " + ("The IPR is consistent with the tests."
+                                    if md_ <= 5 else "Use Adjust IPR to bring the IPR in line with the tests."))
+                            fig, ax = plt.subplots(figsize=(8.5, 5))
+                            for i, (t, curve_t, bhp, bhp_test, hit) in enumerate(curves_):
+                                col = wplt.SERIES[i % len(wplt.SERIES)]
+                                ax.plot(curve_t.q / scale, curve_t.pwf, color=col, lw=1.2, ls="--")
+                                ax.plot(rates, bhp, color=col, lw=1.6, label=f"test {t['label']} VLP")
+                                ax.scatter([t["q"]], [bhp_test], marker="s", s=55, color=col, edgecolor=wplt.INK,
+                                           zorder=5)
+                                if hit:
+                                    ax.scatter([hit[0]], [hit[1]], marker="o", s=45, facecolor="white", edgecolor=col,
+                                               lw=1.8, zorder=6)
+                            ax.set_xlabel(f"Rate ({qunit})"); ax.set_ylabel("Pressure at IPR depth (psia)")
+                            ax.set_ylim(0, max(float(ipr_curve.pr), float(np.nanmax(tests["pr"])) if
+                                               np.isfinite(tests["pr"]).any() else 0) * 1.08)
+                            ax.set_xlim(0, q_top)
+                            ax.set_title("VLP (solid) and IPR (dashed); squares = test, circles = solution", fontsize=10)
+                            ax.legend(fontsize=8)
+                            fig.tight_layout()
+                            st.pyplot(fig, clear_figure=True)
+
+                        # ----------------------------------------------- adjust IPR
+                        else:
+                            meta = ss.get("ipr_meta", {})
+                            st.caption("Finds the IPR input that makes the IPR pass through a test point: the test "
+                                       "rate at the bottomhole pressure the matched VLP gives for that rate. Accepting "
+                                       "writes the value back to the IPR Data tab.")
+                            tsel = st.selectbox("Test", tests["label"].tolist(), key="vlp_adj_test")
+                            t = tests[tests["label"] == tsel].iloc[0]
+                            bhp_t = float(vi.loc[vi["Test"] == tsel, "BHP from VLP at test rate (psia)"].iloc[0])
+                            q_t = float(t["q"]) * scale
+                            avail = []
+                            if meta.get("model") == "P.I. Entry":
+                                avail.append("Adjust PI")
+                            if "Mechanical (entered)" in meta.get("skin_parts", {}) and ipr_arg("skin") is not None:
+                                avail.append("Adjust skin")
+                            if ipr_arg("pr") is not None:
+                                avail.append("Adjust pressure")
+                            st.caption(f"Test {tsel}: rate {t['q']:,.4g} {qunit}, BHP from matched VLP "
+                                       f"{bhp_t:,.0f} psia. IPR model: {meta.get('model', '?')}.")
+                            if not avail:
+                                st.info("This IPR model has no adjustable PI, hand-entered skin or reservoir pressure.")
+                            else:
+                                how = st.radio("Parameter", avail, horizontal=True, key="vlp_adj_how")
+                                if bhp_t <= 0 or (np.isfinite(t["pr"]) and bhp_t >= t["pr"] and how != "Adjust pressure"):
+                                    st.warning("The VLP bottomhole pressure at the test rate is not below the reservoir "
+                                               "pressure - adjust the reservoir pressure, or check the test.")
+                                res_txt, accept = None, None
+                                try:
+                                    pr_t = float(t["pr"]) if np.isfinite(t["pr"]) else float(ipr_curve.pr)
+                                    base = {"pr": pr_t} if ipr_arg("pr") is not None and how != "Adjust pressure" else {}
+                                    if how == "Adjust PI":
+                                        j0 = float(ipr_arg("j"))
+                                        f_ = lambda j: float(rebuild_ipr({**base, "j": j}).rate(bhp_t)) - q_t
+                                        j_new = brentq(f_, 1e-6, 1e6, xtol=1e-8)
+                                        res_txt = f"PI {j0:.4g} → **{j_new:.4g} STB/d/psi**"
+                                        accept = ("ipr_j", j_new, f"PI = {j_new:.4g} STB/d/psi")
+                                    elif how == "Adjust skin":
+                                        s0 = float(ipr_arg("skin"))
+                                        entered = float(meta["skin_parts"]["Mechanical (entered)"])
+                                        f_ = lambda s_: float(rebuild_ipr({**base, "skin": s_}).rate(bhp_t)) - q_t
+                                        lo = -4.0
+                                        while f_(lo) < 0 and lo > -8:
+                                            lo -= 1
+                                        s_new = brentq(f_, lo, 500.0, xtol=1e-6)
+                                        new_entered = entered + (s_new - s0)
+                                        res_txt = (f"Total skin {s0:.3g} → **{s_new:.3g}** (hand-entered skin "
+                                                   f"{entered:.3g} → **{new_entered:.3g}**)")
+                                        accept = ("ipr_skin", new_entered, f"skin = {new_entered:.3g}")
+                                    else:
+                                        f_ = lambda p_: float(rebuild_ipr({"pr": p_}).rate(bhp_t)) - q_t
+                                        p_new = brentq(f_, bhp_t + 1.0, max(bhp_t * 4, bhp_t + 8000), xtol=0.01)
+                                        p0 = float(ipr_curve.pr)
+                                        res_txt = f"Reservoir pressure {p0:,.0f} → **{p_new:,.1f} psia**"
+                                        accept = ("ipr_pr", p_new, f"reservoir pressure = {p_new:,.1f} psia")
+                                except (ValueError, RuntimeError, TypeError) as e:
+                                    st.error(f"No solution found: {e}")
+                                if res_txt:
+                                    st.success(res_txt)
+                                    if accept[0] == "ipr_pr" and np.isfinite(t["pr"]) and abs(accept[1] - t["pr"]) > 50:
+                                        st.warning(f"The adjusted pressure differs from the test reservoir pressure "
+                                                   f"({t['pr']:,.0f} psia) by {accept[1] - t['pr']:+,.0f} psi.")
+                                    st.button("Accept", type="primary", on_click=accept_ipr, args=accept)
+                                    if ss.get("vlp_adj_accepted") == accept[2]:
+                                        st.success(f"Accepted: {accept[2]} written to the IPR Data tab.")

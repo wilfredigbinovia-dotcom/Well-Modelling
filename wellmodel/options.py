@@ -51,10 +51,10 @@ FIELDS = {  # field -> (display name, choices)
 
 # What the calculation engine models today. Anything else is accepted as a
 # setup choice but blocks calculations until the matching module exists.
-MODELLED = {   # what the setup tabs built so far (PVT, IPR) can calculate
+MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calculate
     "fluid_type": {"oil", "dry_wet_gas", "retrograde_condensate"},
     "method": {"black_oil", "eos"},
-    "flow_type": {"tubing"},
+    "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer"},
 }
 # Completion and sand control change near-wellbore pressure drop. Until they

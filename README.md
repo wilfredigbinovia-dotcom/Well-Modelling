@@ -16,7 +16,7 @@ Everything is vectorised: thousands of nodal solutions (Monte Carlo samples, tes
 
 - **PVT (black oil):** Standing Pb/Rs/Bo (optionally calibrated to a measured Pb), Vasquez-Beggs undersaturated Bo and viscosity, Beggs-Robinson viscosity, Dranchuk-Abou-Kassem Z, Lee-Gonzalez-Eakin gas viscosity, McCain water, Baker-Swerdloff surface tension.
 - **IPR:** composite straight-line PI / Vogel (liquid basis); Darcy PSS PI helper.
-- **VLP:** Beggs & Brill (Payne-corrected), modified Hagedorn & Brown (Griffith bubble flow, no-slip floor), no-slip homogeneous. Deviation survey, tapered strings, linear temperature profile. Heun-integrated top-down traverse.
+- **VLP:** Beggs & Brill (Payne-corrected), modified Hagedorn & Brown (Griffith bubble flow, no-slip floor), Gray (gas wells), Mukherjee & Brill (uphill), Orkiszewski (Griffith bubble, Griffith-Wallis slug, Duns & Ros mist/transition; no-slip density floor), Aziz-Govier-Fogarasi (with Duns & Ros mist), Beggs & Brill no-slip, no-slip homogeneous (lower bound). Duns & Ros (original: F1-F7, L1/L2 and f2 charts digitised from Brill & Beggs 1991, Figs 3-11 to 3-14; Duns & Ros mist with the d - eps correction and the modified gas density in transition) and Fancher & Brown (1963: no-slip density with the energy-loss factor digitised from Figs 7-9 for the three GLR ranges). Fancher & Brown and no-slip act as lower bounds and Duns & Ros as the slug-flow upper bound in the comparison's data checks. Duns & Ros (modified): Duns & Ros holdup on the Gould, Tek & Katz (1974) flow-regime map - Wallis bubble boundary, holdup interpolated across the bubble/slug transition band, plug region (1-in. and 3.15-in. curves, interpolated by tubing size) treated as slug - with Kleyweg friction in bubble and slug flow: a single-phase Moody friction factor on the average (mixture) velocity with holdup-weighted density and viscosity. The froth region has no drawn boundary in the paper and is treated as slug flow; mist flow keeps the Duns & Ros gas-film friction. The exact mixture properties in Kleyweg's method are an interpretation, so results may differ somewhat from commercial implementations. Ansari et al. (1994) mechanistic model: Taitel-Dukler bubble/slug and Barnea dispersed-bubble (void < 0.76) and annular-stability transitions; drift-flux bubble flow, no-slip dispersed bubble, Fernandes/Sylvester slug unit (Taylor bubble, Brotz falling film, slug-body balance) and Alves et al. annular film/core model with Wallis entrainment, its film thickness solved from the combined momentum balance. Not available: Petroleum Experts 1-5 (proprietary, not planned). Digitised chart values carry a reading uncertainty of a few per cent. Orkiszewski and Aziz switch regimes abruptly, as published; Aziz in particular can misbehave at high liquid rates where its map gives mist flow. Deviation survey, tapered strings, linear temperature profile. Heun-integrated top-down traverse.
 - **Nodal:** stable (right-hand) IPR/VLP intersection with stability flag at the VLP minimum.
 
 Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
@@ -26,13 +26,13 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 74 tests
+pytest -q                       # 85 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
 ### The Streamlit app (`app.py`)
 
-The app is being rebuilt tab by tab. It currently has four tabs:
+The app is being rebuilt tab by tab. It currently has five tabs:
 
 1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
 2. **PVT Input Data** - shows black-oil or compositional input depending on the Method chosen in tab 1. For dry/wet gas with black oil it takes gas gravity, impurities and temperature.
@@ -63,6 +63,17 @@ The app is being rebuilt tab by tab. It currently has four tabs:
    - **Downhole equipment:** Xmas tree, tubing, SSSV, restriction, gas lift mandrel, SSD and casing, PROSPER-style. Checks depths, diameters and roughness, requires tubing OD and casing ID when annular flow is selected, and checks the string against the survey. Shows flow sections, components and a schematic.
    - **Geothermal gradient:** formation temperature against MD (TVD from the survey), gradient per interval and the overall heat transfer coefficient.
    - **Average heat capacities:** oil 0.53, gas 0.51, water 1.0 BTU/lb/F by default.
+   - **Well schematic:** appears once every section is complete - an illustrated, not-to-scale drawing of the Xmas tree, flowline and choke, casing, tubing and its components (SSSV with control line, gas lift mandrels, SSDs, restrictions), tubing end and reservoir, showing perforations or open hole and the sand control from tab 1. Comes with a string summary (MD, ID, TVD, formation temperature) and an SVG download.
+
+5. **VLP** - well test table laid out like PROSPER's (oil: THP, THT, water cut, liquid rate, gauge depth and pressure, reservoir pressure, GOR, GOR free; gas: THP, THT, WGR, separator GOR, gas rate, gauge, reservoir pressure), then five actions:
+
+   - **Estimate U Value** - the overall heat transfer coefficient that reproduces each measured tubing head temperature; **Accept** writes the median to the Geothermal gradient section.
+   - **Correlation Comparison** - Duns & Ros (original and modified), Ansari, Hagedorn & Brown (mod.), Beggs & Brill, Beggs & Brill (no-slip), Gray, Mukherjee & Brill, Orkiszewski, Aziz-Govier-Fogarasi, Fancher & Brown and the No-slip lower bound, unmatched, from THP to the gauge; ranks them by error and plots pressure and temperature traverses against the measured gauge point.
+   - **Match VLP** - regression of Parameter 1 (gravity) and Parameter 2 (friction) for each correlation over all tests, with standard deviation, before/after error and flags when Parameter 1 is outside 0.9-1.1. Suggests the correlation needing the least correction; you choose the one to carry forward.
+   - **VLP/IPR** - matched lift curve at each test's THP and ratios against the IPR from tab 3 (rebuilt at the test reservoir pressure where the model allows), the calculated operating rate against the measured rate, and the plot.
+   - **Adjust IPR** - for a chosen test, solves for the PI (P.I. Entry), the hand-entered skin, or the reservoir pressure that puts the IPR through the test point; **Accept** writes it back to the IPR tab.
+
+   The tubing model runs from the Xmas tree to the deepest equipment (taken as the IPR depth) on the tab 4 equipment: survey inclination, tubing / annulus / tubing + annulus geometry, SSSV and restriction pressure drops, and a heat-loss temperature profile from the geothermal gradient, U value and heat capacities. Fluids come from tab 2: matched black oil, gas correlations with condensate carried as wellstream gas, or the PRP equation of state flashed on a pressure-temperature grid. **Load example tests** generates synthetic tests from the current equipment, PVT and IPR (known answer: P1 1.04, P2 1.12).
 
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
@@ -107,7 +118,9 @@ wellmodel/
   eos.py            PRP import, PR/SRK equation of state, flash, envelope, separators
   inflow.py         IPR models (oil, gas/condensate), multi-rate fitting, pseudo-pressure
   inflow_adv.py     fractured, horizontal, dual-porosity, multilayer, friction, modified isochronal
+  vlp.py            VLP engine: flow path, fluids (black oil, wet gas, EOS grid), heat loss, U estimate, comparison, P1/P2 match, VLP/IPR
   equipment.py      deviation survey and filter, surface/downhole equipment, geothermal gradient
+  schematic.py      illustrated well schematic (SVG)
   mpp.py            multiphase pseudo-pressure (Corey, black oil / EOS integrands)
   completion.py     skin models (Karakas & Tariq, MacLeod, Hawkins, deviation, partial penetration), sand control
   synthetic.py      known-answer test data
@@ -131,6 +144,7 @@ On synthetic data with a known answer (truth: Hagedorn & Brown, gravity 1.04, fr
 
 - Multilayer-with-dP and horizontal friction models treat wellbore flow as single phase. Fractured wells assume infinite-conductivity geometry with a Cinco-Ley correction; bilinear flow is not modelled.
 - Steady-state VLP at each forecast step - no slugging or start-up dynamics.
+- VLP: acceleration pressure loss is neglected; SSSV/restrictions use a homogeneous orifice equation (Cd 0.9); with the equation of state the wellstream keeps the PRP composition (test GOR/CGR are not used to re-mix it); rate multipliers in the equipment table are not applied yet; surface equipment is not part of the VLP (tests start at the tubing head).
 - Single-layer homogeneous reservoir; forecast water cut and GOR follow trend functions, not relative permeability.
 - No artificial lift design yet (gas-lift and ESP are natural next modules).
 - **Validated on synthetic data only.** Check against real field tests before relying on results.

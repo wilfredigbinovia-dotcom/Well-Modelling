@@ -180,10 +180,10 @@ def test_gas_injector_with_oil_is_invalid():
 
 
 def test_unsupported_choices_block_calculation():
-    o = WellOptions(fluid_type="dry_wet_gas", method="black_oil", flow_type="annular")
+    o = WellOptions(fluid_type="dry_wet_gas", method="black_oil", flow_type="annular", well_type="gas_injector")
     assert not o.errors
     assert not o.computable
-    assert o.engine_status()["flow_type"] == NOT_YET
+    assert o.engine_status()["well_type"] == NOT_YET and o.engine_status()["flow_type"] != NOT_YET
     assert len(o.unsupported) == 1
 
 
@@ -630,3 +630,213 @@ def test_surface_fittings_and_geothermal():
     assert weq.check_geothermal(md, t, 4.17, 35.5, 10963, 11000) == []
     assert any(l == "error" for l, _ in weq.check_geothermal(md, t, 4.17, 35.5, 12000, 13000))
     assert weq.temperature_at(md, t, 5499.25) == pytest.approx((60 + 182.19) / 2)
+
+
+def test_well_schematic_svg_is_valid_and_labelled():
+    import xml.etree.ElementTree as ET
+    from wellmodel import schematic as wsch
+    df = _downhole([{"Type": "Xmas Tree", "Measured Depth (ft)": 35.5},
+                    {"Type": "Tubing", "Measured Depth (ft)": 3000, "Tubing Inside Diameter (in)": 2.992,
+                     "Tubing Inside Roughness (in)": 0.0006},
+                    {"Type": "SSSV", "Label": "TRSV", "Tubing Inside Diameter (in)": 1.5},
+                    {"Type": "Gas Lift Mandrel", "Label": "GLM 1", "Measured Depth (ft)": 5000},
+                    {"Type": "Tubing", "Measured Depth (ft)": 9000, "Tubing Inside Diameter (in)": 2.992,
+                     "Tubing Inside Roughness (in)": 0.0006},
+                    {"Type": "Casing", "Measured Depth (ft)": 9500, "Casing Inside Diameter (in)": 6.276,
+                     "Casing Inside Roughness (in)": 0.0006}])
+    top, secs, pts = weq.downhole_sections(df)
+    for comp, sc in (("cased_hole", "none"), ("open_hole", "gravel_pack"), ("cased_hole", "slotted_liner")):
+        svg = wsch.well_schematic_svg(top, secs, pts, comp, sc, has_choke=True)
+        ET.fromstring(svg)
+        assert "TRSV" in svg and "GLM 1" in svg and "5,000.0 ft MD" in svg
+
+
+
+# ------------------------------------------------------------------- VLP
+from wellmodel import vlp as wvlp
+from wellmodel import blackoil as wbo
+
+
+def _vlp_setup():
+    long_ = weq.example_long_survey()
+    md, tvd = weq.survey_arrays(long_)
+    idx, _, _ = weq.filter_survey(md, tvd)
+    df = _downhole([{"Type": "Xmas Tree", "Measured Depth (ft)": 35.5},
+                    {"Type": "Tubing", "Measured Depth (ft)": 136.54, "Tubing Inside Diameter (in)": 2.992,
+                     "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 3.5,
+                     "Casing Inside Diameter (in)": 8.681},
+                    {"Type": "SSSV", "Tubing Inside Diameter (in)": 1.5},
+                    {"Type": "Tubing", "Measured Depth (ft)": 10962, "Tubing Inside Diameter (in)": 2.992,
+                     "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 3.5,
+                     "Casing Inside Diameter (in)": 8.681},
+                    {"Type": "Casing", "Measured Depth (ft)": 10963, "Casing Inside Diameter (in)": 8.681,
+                     "Casing Inside Roughness (in)": 0.0006}])
+    top, secs, pts = weq.downhole_sections(df)
+    path = wvlp.build_flow_path(top, secs, pts, md[idx], tvd[idx], [35.5, 10963.0], [60.0, 182.19],
+                                extra_md=[10000.0])
+    inp, _ = wbo.example_data()
+    return top, secs, pts, md[idx], tvd[idx], path, wvlp.BlackOilFluid(wbo.BlackOilModel(inp, "standing", "beal", {}))
+
+
+def test_vlp_flow_path_geometry():
+    top, secs, pts, smd, stvd, path, _ = _vlp_setup()
+    assert path.top == 35.5 and path.bottom == 10963 and 10000.0 in path.md
+    assert len(path.restrictions) == 1
+    assert path.area[3] == pytest.approx(np.pi / 4 * (2.992 / 12) ** 2)
+    ann = wvlp.build_flow_path(top, secs, pts, smd, stvd, [35.5, 10963.0], [60.0, 182.19], "annular")
+    assert ann.area[3] == pytest.approx(np.pi / 4 * ((8.681 / 12) ** 2 - (3.5 / 12) ** 2))
+    assert ann.d_h[3] == pytest.approx((8.681 - 3.5) / 12)
+
+
+def test_vlp_static_columns_and_temperature_limits():
+    *_, path, oil = _vlp_setup()
+    gas = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.65), 50)
+    P, _ = wvlp.traverse(path, gas, 3000.0, {"q": 1e-6, "wgr": 0.0, "cgr": 0.0}, "gray", u=4.17)
+    assert 750 < P[0, -1] - P[0, 0] < 1050                       # gas column ~0.08-0.1 psi/ft
+    P, _ = wvlp.traverse(path, oil, 200.0, {"q": 1.0, "wc": 0.9999, "gor": 0.0}, "beggs_brill")
+    assert (P[0, -1] - P[0, 0]) / (path.tvd[-1] - path.tvd[0]) == pytest.approx(0.445, abs=0.01)
+    _, T = wvlp.traverse(path, oil, 200.0, {"q": 2000.0, "wc": 0.2, "gor": 750.0}, "beggs_brill", u=0.0)
+    assert T[0, 0] == pytest.approx(182.19)
+    _, T = wvlp.traverse(path, oil, 200.0, {"q": 2000.0, "wc": 0.2, "gor": 750.0}, "beggs_brill", u=1e4)
+    assert T[0, 0] == pytest.approx(60.0, abs=0.1)
+
+
+def test_vlp_match_recovers_synthetic_truth():
+    *_, path, oil = _vlp_setup()
+    tests = pd.DataFrame({"label": list("1234"), "thp": [250.0, 300.0, 220.0, 350.0],
+                          "q": [1500.0, 2500.0, 3200.0, 1000.0], "wc": [0.1, 0.2, 0.3, 0.05],
+                          "gor": [750.0, 800.0, 900.0, 750.0], "gauge_md": [10000.0] * 4})
+    P, T = wvlp.traverse(path, oil, tests["thp"].values, wvlp.case_of(tests, "oil"), "hagedorn_brown", 1.04, 1.15,
+                         4.17)
+    tests["gauge_p"], tests["tht"] = P[:, path.node(10000.0)], T[:, 0]
+    u = wvlp.estimate_u(path, oil, tests)["U (BTU/h/ft2/F)"]
+    assert np.allclose(u, 4.17, atol=1e-3)
+    m = wvlp.match(path, oil, tests, "hagedorn_brown", 4.17)
+    assert m.p1 == pytest.approx(1.04, abs=0.005) and m.p2 == pytest.approx(1.15, abs=0.02) and m.rmse_after < 2
+    s, *_ = wvlp.compare(path, oil, tests, u=4.17)
+    assert set(s["key"]) == set(wvlp.VLP_CORRELATIONS)
+
+
+def test_vlp_ipr_intersection():
+    rates = np.linspace(10, 3000, 50)
+    vlp_bhp = 1500 + 0.2 * rates                              # rising VLP
+    ipr = iflow.pi_entry(3000, 1000, 1.5)
+    q, pwf = wvlp.intersect(rates, vlp_bhp, ipr.q, ipr.pwf)
+    assert pwf == pytest.approx(1500 + 0.2 * q, abs=1.0) and q == pytest.approx(1.5 * (3000 - pwf), rel=0.01)
+
+
+def test_new_correlations_limits_and_ordering():
+    from wellmodel import correlations as C
+    d, rough = 2.992 / 12, 0.0006 / 12
+    one = lambda v: np.array([v])
+    for k in ("orkiszewski", "aziz", "beggs_brill_noslip"):
+        f = C.CORRELATIONS[k]
+        # bubble-ish flow: gradient between gas and liquid hydrostatics, holdup >= no-slip
+        e, fr, hl = f(one(4.0), one(0.6), one(50.0), one(5.0), one(1.5), one(0.02), one(25.0), d, rough, one(1.0),
+                      one(1500.0))
+        lam = 4.0 / 4.6
+        assert 5 / 144 < e[0] <= 50 / 144 + 1e-9 and hl[0] >= lam - 1e-9 and fr[0] >= 0
+        # gas well: finite, positive
+        e, fr, hl = f(one(0.05), one(40.0), one(62.0), one(5.0), one(0.5), one(0.02), one(60.0), d, rough, one(1.0),
+                      one(1500.0))
+        assert np.isfinite(e[0] + fr[0]) and e[0] > 0 and fr[0] > 0
+    # no-slip is the lower bound of the slip correlations in slug flow
+    args = (one(1.5), one(3.0), one(50.0), one(5.0), one(1.5), one(0.02), one(25.0), d, rough, one(1.0), one(1500.0))
+    g_ns = sum(C.no_slip(*args)[:2])
+    for k in ("beggs_brill", "hagedorn_brown", "mukherjee_brill", "aziz", "orkiszewski"):
+        assert sum(C.CORRELATIONS[k](*args)[:2])[0] >= g_ns[0] - 1e-3
+
+
+def test_duns_ros_and_fancher_brown_charts():
+    from wellmodel import correlations as C
+    assert C._li(10.0, *C._DR_ND) == 2.0 and C._li(200.0, *C._DR_ND) == 1.0          # L1 limits (Fig 3-11)
+    assert C._li(100.0, *C._DR_L2) == pytest.approx(1.10, abs=0.01)
+    assert C._li(0.15, C._NL6, C._F6) > 2.0 and C._li(0.015, C._NL6, C._F6) < 0       # F6 peak and minimum
+    assert C._li(2.0, *C._F2V) == pytest.approx(1.0, abs=0.06) or C._li(2.0, *C._F2V) < 1.0
+    # Fancher & Brown: friction falls with x, and with GLR at fixed x (Fig 6)
+    x = np.array([5.0, 10.0, 20.0])
+    for glr in (500, 2000, 4000):
+        f = C.fancher_brown_f(x, glr)
+        assert np.all(np.diff(f) < 0)
+    assert C.fancher_brown_f(10.0, 500) > C.fancher_brown_f(10.0, 2000) > C.fancher_brown_f(10.0, 4000)
+    assert C.fancher_brown_f(10.0, 2000) == pytest.approx(0.0551 * (10 / 4.71) ** -1.153)
+
+
+def test_duns_ros_and_fancher_brown_bracket_measured_gauge():
+    *_, path, oil = _vlp_setup()
+    tests = pd.DataFrame({"label": list("1234"), "thp": [250.0, 300.0, 220.0, 350.0],
+                          "q": [1500.0, 2500.0, 3200.0, 1000.0], "wc": [0.1, 0.2, 0.3, 0.05],
+                          "gor": [750.0, 800.0, 900.0, 750.0], "gauge_md": [10000.0] * 4})
+    P, _ = wvlp.traverse(path, oil, tests["thp"].values, wvlp.case_of(tests, "oil"), "hagedorn_brown", 1.04, 1.15, 4.17)
+    meas = P[:, path.node(10000.0)]
+    lo, *_ = wvlp.gauge_pressures(path, oil, tests, "fancher_brown", u=4.17)
+    hi, *_ = wvlp.gauge_pressures(path, oil, tests, "duns_ros", u=4.17)
+    assert np.mean(lo - meas) < 0 < np.mean(hi - meas)
+
+
+def test_duns_ros_gould_map_regions():
+    from wellmodel import correlations as C
+    nl = np.array([0.3, 3.0, 20.0])
+    assert np.all(np.isfinite(C._gould_plug_ng(np.array([0.3, 0.9]), 1.0)))
+    assert np.isnan(C._gould_plug_ng(np.array([3.0]), 1.0))[0]          # plug region only at low NL
+    assert C._gould_plug_ng(np.array([0.3]), 3.15)[0] > C._gould_plug_ng(np.array([0.3]), 1.0)[0]
+    d, rough = 2.992 / 12, 0.0006 / 12
+    k = (50 / 25) ** 0.25
+    vsg = np.geomspace(0.005, 150, 300)
+    for n in nl:
+        one = np.ones_like(vsg)
+        args = (n / (1.938 * k) * one, vsg, 50 * one, 5 * one, 1.5 * one, 0.02 * one, 25 * one, d, rough, one,
+                1500 * one)
+        g = sum(C.duns_ros_gould(*args)[:2])
+        assert np.all(np.isfinite(g)) and np.all(g > 0)
+        # same elevation (holdup) as the original away from the bubble/slug boundary; mist identical
+        e0, f0, _ = C.duns_ros(*args)
+        e1, f1, _ = C.duns_ros_gould(*args)
+        ng_ = 1.938 * k * vsg
+        mist = ng_ > 75 + 84 * n ** 0.75
+        assert np.allclose(f1[mist], f0[mist]) and np.allclose(e1[mist], e0[mist])
+        g, g0 = e1, e0
+        nd = 120.872 * d * np.sqrt(50 / 25)
+        ng = 1.938 * k * vsg
+        far = (ng > 0.62 * (max(n, 1.3) / 1.30) ** 0.984 * 1.05) & (ng > 1.0)
+        far &= ng > (C._li(nd, *C._DR_ND) + C._li(nd, *C._DR_L2) * n) * 1.05     # past the original bubble limit
+        assert np.allclose(g[far], g0[far])
+
+
+def test_kleyweg_friction_in_modified_duns_ros():
+    from wellmodel import correlations as C
+    d, rough, k = 2.992 / 12, 0.0006 / 12, (50 / 25) ** 0.25
+    one = lambda v: np.array([v])
+    args = lambda nl, ng: (one(nl / (1.938 * k)), one(ng / (1.938 * k)), one(50.0), one(5.0), one(1.5), one(0.02),
+                           one(25.0), d, rough, one(1.0), one(1500.0))
+    # gas-dominated slug flow: single-phase friction on the mixture velocity exceeds the liquid-based original
+    assert C.duns_ros_gould(*args(0.3, 50))[1][0] > 5 * C.duns_ros(*args(0.3, 50))[1][0]
+    # liquid-dominated: the two friction methods agree closely
+    f0, f1 = C.duns_ros(*args(20, 0.5))[1][0], C.duns_ros_gould(*args(20, 0.5))[1][0]
+    assert f1 == pytest.approx(f0, rel=0.1)
+
+
+def test_ansari_patterns_and_limits():
+    from wellmodel import correlations as C
+    d, rough = 2.992 / 12, 0.0006 / 12
+    one = lambda v: np.array([v])
+    run = lambda vsl, vsg: C.ansari(one(vsl), one(vsg), one(50.0), one(5.0), one(1.5), one(0.02), one(25.0), d, rough,
+                                    one(1.0), one(1500.0))
+    # dispersed bubble at high liquid rate: reduces to no-slip
+    e, f, h = run(12.0, 1.5)
+    e0, f0, h0 = C.no_slip(one(12.0), one(1.5), one(50.0), one(5.0), one(1.5), one(0.02), one(25.0), d, rough,
+                           one(1.0), one(1500.0))
+    assert e[0] == pytest.approx(e0[0]) and f[0] == pytest.approx(f0[0], rel=1e-6)
+    # bubble flow: slip holdup above no-slip; slug: holdup between no-slip and 1
+    e, f, h = run(2.0, 0.3)
+    assert h[0] > 2.0 / 2.3
+    e, f, h = run(1.5, 3.0)
+    assert 1.5 / 4.5 < h[0] < 1.0
+    # annular gas well: holdup small, friction dominated, finite
+    e, f, h = run(0.02, 80.0)
+    assert h[0] < 0.02 and f[0] > e[0]
+    # continuous within patterns over a sweep
+    vsg = np.geomspace(0.05, 120, 300)
+    o = np.ones_like(vsg)
+    e, f, h = C.ansari(1.0 * o, vsg, 50 * o, 5 * o, 1.5 * o, 0.02 * o, 25 * o, d, rough, o, 1500 * o)
+    assert np.all(np.isfinite(e + f)) and np.all((h >= 0) & (h <= 1))
