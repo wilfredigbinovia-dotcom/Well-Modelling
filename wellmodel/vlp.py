@@ -414,11 +414,14 @@ def traverse(path: FlowPath, fluid, whp, case, correlation="beggs_brill", p1=1.0
 OIL_TEST_COLUMNS = ["Test Point Date", "Test Point Comment", "Tubing Head Pressure (psia)",
                     "Tubing Head Temperature (deg F)", "Water Cut (percent)", "Liquid Rate (STB/day)",
                     "Gauge Depth (Measured) (feet)", "Gauge Pressure (psia)", "Reservoir Pressure (psia)",
-                    "Gas Oil Ratio (scf/STB)", "GOR Free (scf/STB)"]
+                    "Gas Oil Ratio (scf/STB)", "GOR Free (scf/STB)", "Manifold Pressure (psia)",
+                    "Choke Size (64ths in)"]
 GAS_TEST_COLUMNS = ["Test Point Date", "Test Point Comment", "Tubing Head Pressure (psia)",
                     "Tubing Head Temperature (deg F)", "Water Gas Ratio (STB/MMscf)",
                     "Separator Gas Oil Ratio (scf/STB)", "Gas Rate (MMscf/day)", "Gauge Depth (Measured) (feet)",
-                    "Gauge Pressure (psia)", "Reservoir Pressure (psia)"]
+                    "Gauge Pressure (psia)", "Reservoir Pressure (psia)", "Manifold Pressure (psia)",
+                    "Choke Size (64ths in)"]
+SURFACE_TEST_COLUMNS = ("Manifold Pressure (psia)", "Choke Size (64ths in)")   # optional: Match Surface
 
 
 def _num(df, c):
@@ -427,7 +430,8 @@ def _num(df, c):
 
 def clean_tests(df: pd.DataFrame, kind: str, path_top=None, path_bottom=None):
     """Standardise the test table. Returns (tests DataFrame, issues). Columns: test, label, thp, tht, q, wc,
-    gor, gor_free / wgr, cgr, gauge_md, gauge_p, pr."""
+    gor, gor_free / wgr, cgr, gauge_md, gauge_p, pr, pman (manifold pressure), choke (64ths) - the last two
+    optional, for matching the surface equipment."""
     issues, rows = [], []
     for i, (_, r) in enumerate(df.iterrows(), 1):
         thp = _num(df, "Tubing Head Pressure (psia)").loc[r.name]
@@ -440,7 +444,9 @@ def clean_tests(df: pd.DataFrame, kind: str, path_top=None, path_bottom=None):
                "tht": _num(df, "Tubing Head Temperature (deg F)").loc[r.name],
                "gauge_md": _num(df, "Gauge Depth (Measured) (feet)").loc[r.name],
                "gauge_p": _num(df, "Gauge Pressure (psia)").loc[r.name],
-               "pr": _num(df, "Reservoir Pressure (psia)").loc[r.name]}
+               "pr": _num(df, "Reservoir Pressure (psia)").loc[r.name],
+               "pman": _num(df, "Manifold Pressure (psia)").loc[r.name],
+               "choke": _num(df, "Choke Size (64ths in)").loc[r.name]}
         if kind == "oil":
             rec["wc"] = _num(df, "Water Cut (percent)").loc[r.name] / 100
             rec["gor"] = _num(df, "Gas Oil Ratio (scf/STB)").loc[r.name]
@@ -476,6 +482,13 @@ def clean_tests(df: pd.DataFrame, kind: str, path_top=None, path_bottom=None):
                 issues.append(("warning", f"{name}: gauge pressure is not above the tubing head pressure."))
         else:
             issues.append(("info", f"{name}: no gauge data - used for temperature and VLP/IPR only."))
+        if np.isfinite(rec["pman"]):
+            if rec["pman"] <= 0:
+                issues.append(("error", f"{name}: manifold pressure must be positive."))
+            elif np.isfinite(thp) and rec["pman"] >= thp:
+                issues.append(("warning", f"{name}: manifold pressure is not below the tubing head pressure."))
+        if np.isfinite(rec["choke"]) and rec["choke"] <= 0:
+            issues.append(("error", f"{name}: choke size must be positive (64ths of an inch)."))
         if np.isfinite(rec["pr"]) and np.isfinite(rec["gauge_p"]) and rec["gauge_p"] >= rec["pr"]:
             issues.append(("warning", f"{name}: gauge pressure is not below the reservoir pressure."))
         rows.append(rec)
@@ -488,6 +501,41 @@ def case_of(tests: pd.DataFrame, kind: str):
                 "gor": tests["gor"].to_numpy(float)}
     return {"q": tests["q"].to_numpy(float), "wgr": tests["wgr"].to_numpy(float),
             "cgr": tests["cgr"].to_numpy(float)}
+
+
+def traverse_up(path: FlowPath, fluid, p_bottom, case, correlation="beggs_brill", p1=1.0, p2=1.0, u=8.0,
+                hc: HeatCapacities | None = None):
+    """Pressure (cases x nodes) from the bottom node up to the wellhead for a given bottom-node pressure (the inflow
+    side of a top-node solution). NaN from the node where the pressure is exhausted upwards."""
+    hc = hc or HeatCapacities()
+    case = dict(case)
+    case["_pb"], case["_p1"], case["_p2"] = p_bottom, p1, p2
+    case = _broadcast_case(case)
+    pb, p1, p2 = case.pop("_pb"), case.pop("_p1"), case.pop("_p2")
+    corr = CORRELATIONS[correlation]
+    w, cp = fluid.mass_cp(case, hc)
+    T = temperature_profile(path, w, cp, u)
+    n = len(path.md)
+    P = np.full((pb.size, n), np.nan)
+    bad = ~np.isfinite(pb) | (pb <= 14.7)
+    p = np.where(bad, 1000.0, pb)
+    P[:, -1] = np.where(bad, np.nan, p)
+    for i in range(n - 2, -1, -1):
+        if (i + 1) in path.restrictions:            # restriction at node i+1: pressure above it is lower
+            dp = _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1])
+            p = p - _restriction_dp(fluid.state(np.maximum(p - dp, 14.7), T[:, i + 1], case),
+                                    path.restrictions[i + 1])
+            bad |= p < 14.7
+            p = np.where(bad, 1000.0, p)
+        L = path.seg_len[i]
+        g0, _ = _gradient(path, fluid, i, p, T[:, i + 1], case, corr, p1, p2)
+        pp = np.maximum(p - g0 * L, 14.7)
+        g1, _ = _gradient(path, fluid, i, pp, T[:, i], case, corr, p1, p2)
+        pn = p - 0.5 * (g0 + g1) * L
+        bad |= pn < 14.7
+        p = np.where(bad, 1000.0, pn)
+        P[:, i] = np.where(bad, np.nan, pn)
+    return P, T
 
 
 # ================================================================ matching

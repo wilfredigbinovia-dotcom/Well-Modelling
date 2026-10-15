@@ -840,3 +840,187 @@ def test_ansari_patterns_and_limits():
     o = np.ones_like(vsg)
     e, f, h = C.ansari(1.0 * o, vsg, 50 * o, 5 * o, 1.5 * o, 0.02 * o, 25 * o, d, rough, o, 1500 * o)
     assert np.all(np.isfinite(e + f)) and np.all((h >= 0) & (h <= 1))
+
+
+
+# --------------------------------------------------------- system analysis
+from wellmodel import system as wsys
+
+
+def test_system_values_and_combinations():
+    assert np.allclose(wsys.generate_values(100, 400, 4, "Linear"), [100, 200, 300, 400])
+    assert np.allclose(wsys.generate_values(100, 400, 3, "Geometric"), [100, 200, 400])
+    with pytest.raises(ValueError):
+        wsys.generate_values(0, 10, 3, "Geometric")
+    combos = wsys.combinations({"whp": [100, 200], "wc": [0, 50, 90]})
+    assert len(combos) == 6 and {"whp": 200, "wc": 90} in combos
+    with pytest.raises(ValueError):
+        wsys.combinations({"a": range(10), "b": range(10), "c": range(10)})
+
+
+def test_system_solution_matches_vlp_intersection_and_sensitivity_trends():
+    top, secs, pts, smd, stvd, path, oil = _vlp_setup()
+    pb = oil.m.bubble_point(205.0)
+    ipr_for = lambda ch: iflow.pi_entry(ch.get("pr", 3000.0), pb, ch.get("j", 2.0))
+    path_for = lambda tid: path
+    base = {"whp": 250.0, "u": 4.17, "wc": 20.0, "gor": 750.0}
+    res, paths = wsys.solve_cases(path_for, oil, "oil", base, [{}], ipr_for, "hagedorn_brown", 1.04, 1.15)
+    r = res[0]
+    rates = np.linspace(20, 3500, 400)
+    t = pd.Series({"thp": 250.0, "q": 1.0, "wc": 0.2, "gor": 750.0})
+    q_ref, p_ref = wvlp.intersect(rates, wvlp.vlp_curve(path, oil, t, rates, "hagedorn_brown", 1.04, 1.15, 4.17),
+                                  ipr_for({}).q, ipr_for({}).pwf)
+    assert r.q == pytest.approx(q_ref, rel=2e-3) and r.pwf == pytest.approx(p_ref, abs=3) and r.stable
+    det, reg, prof = wsys.solution_details(path, oil, "oil", r.params, r.q, "hagedorn_brown", 1.04, 1.15)
+    total = det["dP gravity - production string (psi)"] + det["dP friction - production string (psi)"] \
+        + det["dP restrictions (psi)"] + 250
+    assert total == pytest.approx(det["Bottom node pressure (psia)"], abs=10)
+    # higher top-node pressure and higher water cut both reduce the rate; higher PI raises it
+    res, _ = wsys.solve_cases(path_for, oil, "oil", base, wsys.combinations({"whp": [150, 300]}), ipr_for,
+                              "hagedorn_brown", 1.04, 1.15)
+    assert res[0].q > res[1].q
+    res, _ = wsys.solve_cases(path_for, oil, "oil", base, wsys.combinations({"wc": [0, 30]}), ipr_for,
+                              "hagedorn_brown", 1.04, 1.15)
+    assert res[0].q > (res[1].q or 0)
+    res, _ = wsys.solve_cases(path_for, oil, "oil", base, wsys.combinations({"j": [1.5, 3.0]}), ipr_for,
+                              "hagedorn_brown", 1.04, 1.15)
+    assert res[1].q > res[0].q
+
+
+# ------------------------------------------------------------ surface equipment (choke and flowline)
+from wellmodel import surface as wsurf
+
+
+def _surface_df(manifold_tvd=0.0, bean=0.75):
+    return pd.DataFrame([
+        {"Label": "Manifold", "Type": "Manifold", "TVD of End Point (ft)": manifold_tvd},
+        {"Label": "Flowline", "Type": "Line Pipe", "Pipe Length (ft)": 3000.0, "TVD of End Point (ft)": 0.0,
+         "Pipe Inside Diameter (in)": 4.026, "Pipe Inside Roughness (in)": 0.0006},
+        {"Label": "Elbow", "Type": "Fitting", "Fitting": "90° elbow (standard)", "Pipe Inside Diameter (in)": 4.026},
+        {"Label": "Choke", "Type": "Choke", "Pipe Inside Diameter (in)": bean},
+        {"Label": "Spool", "Type": "Line Pipe", "Pipe Length (ft)": 30.0, "TVD of End Point (ft)": 0.0,
+         "Pipe Inside Diameter (in)": 2.992, "Pipe Inside Roughness (in)": 0.0006}])
+
+
+def test_surface_items_flow_order_fittings_and_elevation():
+    tvd, items = wsurf.build_items(_surface_df(-100.0))
+    assert [i.label for i in items] == ["Spool", "Choke", "Elbow", "Flowline"]      # wellhead -> manifold
+    assert items[2].length == pytest.approx(30 * 4.026 / 12)                         # L/D 30
+    assert items[3].rise == pytest.approx(100.0) and tvd == -100.0                   # manifold 100 ft higher
+    assert [i.d_in for i in wsurf.with_choke_size(items, 32) if i.kind == "choke"] == [0.5]
+
+
+def test_choke_liquid_orifice_gas_critical_and_gilbert_family():
+    *_, oil = _vlp_setup()
+    hc = weq.HeatCapacities()
+    water = {"q": np.array([2000.0]), "wc": np.array([0.9999]), "gor": np.array([0.0])}
+    p1, reg, _ = wsurf.choke_upstream(oil, water, np.array([200.0]), 120.0, 0.5, hc, cd=0.75)
+    s = oil.state(p1, 120.0, water)
+    v = s["ql"] / (np.pi / 4 * (0.5 / 12) ** 2)
+    assert p1[0] - 200 == pytest.approx(float(s["rho_l"][0] * v[0] ** 2 / (2 * 32.174 * 0.75 ** 2) / 144), rel=1e-3)
+    assert reg[0] == "SubCritical"
+    gas = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.65), 50)
+    gc = {"q": np.array([5.0]), "wgr": np.array([0.0]), "cgr": np.array([0.0])}
+    lo, r_lo, _ = wsurf.choke_upstream(gas, gc, np.array([100.0]), 100.0, 0.5, hc)
+    lo2, _, _ = wsurf.choke_upstream(gas, gc, np.array([300.0]), 100.0, 0.5, hc)
+    assert r_lo[0] == "Critical" and lo[0] == pytest.approx(lo2[0], rel=1e-3)        # independent of p2
+    assert 900 < lo[0] < 1200                                                        # ideal-gas estimate ~1120
+    oc = {"q": np.array([1000.0, 2000.0]), "wc": np.array([0.2, 0.2]), "gor": np.array([750.0, 750.0])}
+    sach, _, _ = wsurf.choke_upstream(oil, oc, np.array([150.0, 150.0]), 120.0, 0.5, hc)
+    assert sach[1] > sach[0]
+    for m in ("Gilbert", "Ros", "Baxendell", "Achong"):
+        pg, rg, _ = wsurf.choke_upstream(oil, oc, np.array([150.0, 150.0]), 120.0, 0.5, hc, method=m)
+        assert list(rg) == ["Critical", "Critical"] and np.all(np.abs(pg / sach - 1) < 0.5)
+    _, _, note = wsurf.choke_upstream(gas, gc, np.array([100.0]), 100.0, 0.5, hc, method="Gilbert")
+    assert "Sachdeva used" in note
+
+
+def test_system_with_manifold_top_node_consistent_with_wellhead_solution():
+    top, secs, pts, smd, stvd, path, oil = _vlp_setup()
+    pb = oil.m.bubble_point(205.0)
+    ipr_for = lambda ch: iflow.pi_entry(ch.get("pr", 3000.0), pb, ch.get("j", 2.0))
+    base = {"whp": 150.0, "u": 4.17, "wc": 20.0, "gor": 750.0}
+    _, items = wsurf.build_items(_surface_df())
+    surf = wsys.SurfaceSetup(items, 60.0, 8.0)
+    res, paths = wsys.solve_cases(lambda t: path, oil, "oil", base, [{}], ipr_for, "hagedorn_brown", 1.04, 1.15,
+                                  surface=surf)
+    r = res[0]
+    assert r.q is not None and r.pwh_q > 150
+    res2, _ = wsys.solve_cases(lambda t: path, oil, "oil", {**base, "whp": r.pwh_q}, [{}], ipr_for, "hagedorn_brown",
+                               1.04, 1.15)
+    assert res2[0].q == pytest.approx(r.q, rel=3e-3)
+    det, reg, _ = wsys.solution_details(path, oil, "oil", r.params, r.q, "hagedorn_brown", 1.04, 1.15, surface=surf)
+    tab = det.pop("_surface")
+    assert det["Manifold pressure (psia)"] + det["dP choke (psi)"] + det["dP flowline and fittings (psi)"] == \
+        pytest.approx(det["Wellhead pressure (psia)"], abs=0.5)
+    assert list(tab["Item"]) == ["Spool", "Choke", "Elbow", "Flowline"] and any(k.startswith("Surface choke") for k in reg)
+    assert "Wellhead pressure (psia)" in wsys.rate_table("oil", r).columns
+    # a bigger bean gives more rate
+    res, _ = wsys.solve_cases(lambda t: path, oil, "oil", base, wsys.combinations({"choke": [32, 64]}), ipr_for,
+                              "hagedorn_brown", 1.04, 1.15, surface=surf)
+    assert res[1].q > res[0].q
+
+
+def test_upward_traverse_and_forward_surface_march_invert_the_backward_ones():
+    *_, path, oil = _vlp_setup()
+    hc = weq.HeatCapacities()
+    case = {"q": np.array([300.0, 1500.0]), "wc": 0.2, "gor": 750.0}
+    P, _ = wvlp.traverse(path, oil, 250.0, case, "hagedorn_brown", 1.04, 1.15, 4.17, hc)
+    Pu, _ = wvlp.traverse_up(path, oil, P[:, -1], case, "hagedorn_brown", 1.04, 1.15, 4.17, hc)
+    assert np.allclose(Pu[:, 0], 250.0, atol=0.5)
+    _, items = wsurf.build_items(_surface_df())
+    t = np.array([80.0, 90.0])
+    pwh = wsurf.wellhead_pressure(items, oil, "oil", 150.0, case, t, "beggs_brill", hc)
+    sub = {"q": np.array([300.0]), "wc": 0.2, "gor": 750.0}                     # subcritical: exact inverse
+    pm = wsurf.manifold_pressure(items, oil, "oil", pwh[:1], sub, t[:1], "beggs_brill", hc)
+    assert pm[0] == pytest.approx(150.0, abs=0.5)
+    crit = {"q": np.array([1500.0]), "wc": 0.2, "gor": 750.0}                   # critical: cannot pass below p1
+    assert np.isnan(wsurf.manifold_pressure(items, oil, "oil", pwh[1:] * 0.95, crit, t[1:], "beggs_brill", hc)[0])
+
+
+def test_top_node_solution_same_rate_and_inflow_meets_top_pressure():
+    top, secs, pts, smd, stvd, path, oil = _vlp_setup()
+    pb = oil.m.bubble_point(205.0)
+    ipr_for = lambda ch: iflow.pi_entry(ch.get("pr", 3000.0), pb, ch.get("j", 2.0))
+    base = {"whp": 250.0, "u": 4.17, "wc": 20.0, "gor": 750.0}
+    rb, _ = wsys.solve_cases(lambda t: path, oil, "oil", base, [{}], ipr_for, "hagedorn_brown", 1.04, 1.15)
+    rt, _ = wsys.solve_cases(lambda t: path, oil, "oil", base, [{}], ipr_for, "hagedorn_brown", 1.04, 1.15,
+                             node="top")
+    assert rt[0].q == rb[0].q and rt[0].node_pressure == 250.0 and rb[0].node_pressure == rb[0].pwf
+    assert rt[0].top_in_q == pytest.approx(250.0, abs=1.0)
+    assert "Inflow pressure at top node (psia)" in wsys.rate_table("oil", rt[0]).columns
+    _, items = wsurf.build_items(_surface_df())
+    rs, _ = wsys.solve_cases(lambda t: path, oil, "oil", {**base, "whp": 150.0}, [{}], ipr_for, "hagedorn_brown",
+                             1.04, 1.15, surface=wsys.SurfaceSetup(items), node="top")
+    r = rs[0]                                       # 48/64 choke runs critical: inflow sits above the manifold
+    assert r.q is not None and (np.isnan(r.top_in_q) or r.top_in_q >= 150.0 - 1.0)
+
+
+def test_test_table_reads_manifold_pressure_and_choke():
+    df = pd.DataFrame([{"Tubing Head Pressure (psia)": 300.0, "Liquid Rate (STB/day)": 1000.0, "Water Cut (percent)": 10,
+                        "Gas Oil Ratio (scf/STB)": 700.0, "Manifold Pressure (psia)": 150.0,
+                        "Choke Size (64ths in)": 48.0},
+                       {"Tubing Head Pressure (psia)": 300.0, "Liquid Rate (STB/day)": 1000.0, "Water Cut (percent)": 10,
+                        "Gas Oil Ratio (scf/STB)": 700.0, "Manifold Pressure (psia)": 350.0}])
+    t, issues = wvlp.clean_tests(df, "oil")
+    assert t.loc[0, "pman"] == 150.0 and t.loc[0, "choke"] == 48.0 and np.isnan(t.loc[1, "choke"])
+    assert any("manifold pressure is not below" in m for _, m in issues)
+
+
+def test_surface_match_recovers_cd_and_friction():
+    *_, oil = _vlp_setup()
+    hc = weq.HeatCapacities()
+    _, items = wsurf.build_items(_surface_df())
+    tests = pd.DataFrame({"label": list("12345"), "q": [800.0, 1500, 2500, 1200, 3000], "wc": 0.2, "gor": 750.0,
+                          "pman": [150.0, 200, 180, 250, 150], "choke": [48.0, 64, 96, 32, 128]})
+    twh = np.array([85.0, 95, 105, 90, 110])
+    tests["thp"] = wsurf._calc_thp(items, oil, "oil", tests, twh, "beggs_brill", hc, 60, 8, 0.85, 1.3)
+    m = wsurf.match_surface(items, oil, "oil", tests, twh, "beggs_brill", hc, 60, 8)
+    assert m.cd == pytest.approx(0.85, abs=0.01) and m.friction == pytest.approx(1.3, abs=0.05)
+    assert m.rms_after < 0.5 < m.rms_before and set(m.fitted) == {"cd", "friction"}
+    crit = tests.assign(choke=24.0, q=[400.0, 500, 600, 450, 550])                  # every test critical
+    crit["thp"] = wsurf._calc_thp(items, oil, "oil", crit, twh, "beggs_brill", hc, 60, 8, 0.85, 1.3)
+    m2 = wsurf.match_surface(items, oil, "oil", crit, twh, "beggs_brill", hc, 60, 8)
+    assert m2.fitted == ("cd",) and m2.friction == 1.0 and m2.cd == pytest.approx(0.85, abs=0.01)
+    with pytest.raises(ValueError):
+        wsurf.match_surface(items, oil, "oil", tests.assign(pman=np.nan), twh)

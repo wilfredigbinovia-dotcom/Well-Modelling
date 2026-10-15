@@ -26,13 +26,13 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 85 tests
+pytest -q                       # 94 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
 ### The Streamlit app (`app.py`)
 
-The app is being rebuilt tab by tab. It currently has five tabs:
+The app is being rebuilt tab by tab. It currently has six tabs:
 
 1. **Options summary** - fluid type, method, flow type, well type, completion and sand control. Checks the combination, shows what the calculation engine can model today, and lists the data the later setup tabs will need.
 2. **PVT Input Data** - shows black-oil or compositional input depending on the Method chosen in tab 1. For dry/wet gas with black oil it takes gas gravity, impurities and temperature.
@@ -72,8 +72,13 @@ The app is being rebuilt tab by tab. It currently has five tabs:
    - **Match VLP** - regression of Parameter 1 (gravity) and Parameter 2 (friction) for each correlation over all tests, with standard deviation, before/after error and flags when Parameter 1 is outside 0.9-1.1. Suggests the correlation needing the least correction; you choose the one to carry forward.
    - **VLP/IPR** - matched lift curve at each test's THP and ratios against the IPR from tab 3 (rebuilt at the test reservoir pressure where the model allows), the calculated operating rate against the measured rate, and the plot.
    - **Adjust IPR** - for a chosen test, solves for the PI (P.I. Entry), the hand-entered skin, or the reservoir pressure that puts the IPR through the test point; **Accept** writes it back to the IPR tab.
+   - **Match Surface** - for tests with the optional **Manifold Pressure** (and **Choke Size**, in 64ths, when the bean changed between tests) columns filled: from each manifold pressure the calculation works back through the flowline, fittings and choke to the wellhead, starting at the measured tubing head temperature, and regresses the Sachdeva discharge coefficient and a flowline friction multiplier so the calculated wellhead pressure matches the measured THP. Choose the parameters and the flowline correlation; a parameter the data cannot see is held (friction when the choke is critical in every test, Cd without a choke) and values at their bounds or Cd outside 0.5-1.0 are flagged. Shows the fitted values, RMS error before and after, a test-by-test table with choke regime and losses, and a measured-v-calculated plot. **Accept** sends Cd, the friction multiplier and the correlation to the Calculation tab ("Use matched surface parameters"). The example tests carry manifold pressures generated with Cd 0.85 and friction x 1.2.
 
    The tubing model runs from the Xmas tree to the deepest equipment (taken as the IPR depth) on the tab 4 equipment: survey inclination, tubing / annulus / tubing + annulus geometry, SSSV and restriction pressure drops, and a heat-loss temperature profile from the geothermal gradient, U value and heat capacities. Fluids come from tab 2: matched black oil, gas correlations with condensate carried as wellstream gas, or the PRP equation of state flashed on a pressure-temperature grid. **Load example tests** generates synthetic tests from the current equipment, PVT and IPR (known answer: P1 1.04, P2 1.12).
+
+6. **Calculation - System analysis (IPR + VLP)** - PROSPER-style nodal analysis at the bottom node. Inputs: top node - the **manifold** (through the surface equipment) or the wellhead - and its pressure, water cut and total GOR (oil) or WGR and separator GOR (gas) - copied from any VLP test with one click - the vertical lift correlation with Parameter 1/2 from Match VLP (or entered by hand), rate method (automatic geometric, automatic linear or user-selected rates), solution node - **bottom node** (default: IPR against VLP at the bottom of the downhole equipment, the solution pressure is the flowing bottom-hole pressure) or **top node** (the inflow - IPR, tubing traversed upwards and, with a manifold top node, the surface equipment downstream - against the top-node pressure; a critical choke shows as a vertical drop at the rate it sets; the solution rate is the same at either node), left-hand intersection (allow/disallow) and stability flags. With the manifold as top node the calculation works back from the manifold pressure through the flowline, fittings (equivalent length) and choke to the wellhead, then down the tubing: choose the surface (flowline) correlation (Beggs & Brill default, Mukherjee & Brill, Beggs & Brill no-slip, Duns & Ros, no-slip), the choke method - Sachdeva et al. (1986, critical and subcritical two-phase flow, discharge coefficient 0.75 by default) or the Gilbert, Ros, Baxendell and Achong critical-flow correlations for oil wells (subcritical points fall back to Sachdeva) - and the fluid cools along each pipe towards the surrounding temperature with the surface U value. Elevation changes come from the TVD column of the surface table and the rate multiplier scales the rate through each item. Results: solution rates (liquid, oil, water, gas or gas, condensate, water), bottom node pressure, wellhead temperature, the IPR/VLP plot, the curve table, and a solution panel with dP friction and gravity in the production string, restriction pressure drops and regime, transit time, maximum/minimum no-slip and erosional velocities (API RP 14E, C = 100), pressure range and stability; with surface equipment also the wellhead pressure, manifold temperature, dP choke, dP flowline and fittings, the choke regime (critical/subcritical) and an item-by-item surface table.
+
+   **Sensitivity** - pick up to three variables (top node pressure, water cut / WGR, GOR / separator GOR, reservoir pressure, PI, skin, tubing ID, U value, choke size in 64ths when the manifold is the top node - only those the current IPR supports), enter up to 10 values each or generate them with linear or geometric spacing; every combination is calculated (limit 500). Shows a results table (CSV download), IPR/VLP curves for the cases, a solution-rate sensitivity plot and full details for any chosen case. Cases that do not flow or only intersect left of the VLP minimum are flagged.
 
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
@@ -118,6 +123,8 @@ wellmodel/
   eos.py            PRP import, PR/SRK equation of state, flash, envelope, separators
   inflow.py         IPR models (oil, gas/condensate), multi-rate fitting, pseudo-pressure
   inflow_adv.py     fractured, horizontal, dual-porosity, multilayer, friction, modified isochronal
+  surface.py        surface equipment: flowline/fittings march, Sachdeva and Gilbert-type chokes, line cooling
+  system.py         system analysis: multi-case VLP/IPR solve, sensitivity combinations, solution details
   vlp.py            VLP engine: flow path, fluids (black oil, wet gas, EOS grid), heat loss, U estimate, comparison, P1/P2 match, VLP/IPR
   equipment.py      deviation survey and filter, surface/downhole equipment, geothermal gradient
   schematic.py      illustrated well schematic (SVG)
@@ -144,7 +151,7 @@ On synthetic data with a known answer (truth: Hagedorn & Brown, gravity 1.04, fr
 
 - Multilayer-with-dP and horizontal friction models treat wellbore flow as single phase. Fractured wells assume infinite-conductivity geometry with a Cinco-Ley correction; bilinear flow is not modelled.
 - Steady-state VLP at each forecast step - no slugging or start-up dynamics.
-- VLP: acceleration pressure loss is neglected; SSSV/restrictions use a homogeneous orifice equation (Cd 0.9); with the equation of state the wellstream keeps the PRP composition (test GOR/CGR are not used to re-mix it); rate multipliers in the equipment table are not applied yet; surface equipment is not part of the VLP (tests start at the tubing head).
+- VLP: acceleration pressure loss is neglected; SSSV/restrictions use a homogeneous orifice equation (Cd 0.9); with the equation of state the wellstream keeps the PRP composition (test GOR/CGR are not used to re-mix it); downhole rate multipliers are not applied yet; the surface equipment is calibrated by Match Surface only from tests with a manifold pressure (the Gilbert-type chokes have no discharge coefficient, so the match uses Sachdeva); the choke is taken as isothermal and Sachdeva uses a fixed gas heat-capacity ratio k = 1.26; restriction regime uses a 0.53 pressure-ratio rule.
 - Single-layer homogeneous reservoir; forecast water cut and GOR follow trend functions, not relative permeability.
 - No artificial lift design yet (gas-lift and ESP are natural next modules).
 - **Validated on synthetic data only.** Check against real field tests before relying on results.

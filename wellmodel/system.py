@@ -1,0 +1,472 @@
+"""System analysis (nodal): VLP from the top node (the wellhead, or the manifold when surface equipment is used)
+against the IPR at the bottom node, for a base case and for sensitivity combinations of up to three variables.
+
+The VLP curve of every case is a vectorised traverse over its rate grid, so all cases sharing a flow path and U value
+run through the tubing in one pass. The solution is the intersection of the VLP and IPR curves at the bottom node,
+refined by regula falsi; intersections left of the VLP minimum are unstable (heading / loading region).
+
+Rates: oil wells liquid STB/d, gas wells MMscf/d. IPR curves are in their own units (oil STB/d, gas Mscf/d).
+"""
+from __future__ import annotations
+
+import itertools
+from dataclasses import dataclass, field
+
+import numpy as np
+import pandas as pd
+
+from . import surface as SF
+from . import vlp as V
+from .correlations import CORRELATIONS, NEEDS_GLR, no_slip
+from .equipment import HeatCapacities
+
+MAX_CASES = 500
+EROSION_C = 100.0          # API RP 14E constant for continuous service (lb^0.5 / (ft^0.5 s))
+
+OIL_VARIABLES = {
+    "whp": "Top node pressure (psia)",
+    "wc": "Water cut (%)",
+    "gor": "Total GOR (scf/STB)",
+    "pr": "Reservoir pressure (psia)",
+    "j": "Productivity index (STB/d/psi)",
+    "skin": "Skin",
+    "tubing_id": "Tubing ID (in)",
+    "u": "Overall heat transfer coefficient (BTU/h/ft2/F)",
+    "choke": "Choke size (64ths in)",
+}
+GAS_VARIABLES = {
+    "whp": "Top node pressure (psia)",
+    "wgr": "Water gas ratio (STB/MMscf)",
+    "sep_gor": "Separator GOR (scf/STB)",
+    "pr": "Reservoir pressure (psia)",
+    "skin": "Skin",
+    "tubing_id": "Tubing ID (in)",
+    "u": "Overall heat transfer coefficient (BTU/h/ft2/F)",
+    "choke": "Choke size (64ths in)",
+}
+SURFACE_ONLY = ("choke",)     # variables that need surface equipment with a choke
+IPR_KEYS = ("pr", "j", "skin")
+
+
+def generate_values(first, last, n, spacing="Linear"):
+    """n values from first to last, linear or geometric spacing."""
+    n = int(n)
+    if n < 1:
+        raise ValueError("Number of values must be at least 1.")
+    if n == 1:
+        return np.array([float(first)])
+    if spacing.lower().startswith("geo"):
+        if first <= 0 or last <= 0:
+            raise ValueError("Geometric spacing needs positive first and last values.")
+        return np.geomspace(first, last, n)
+    return np.linspace(first, last, n)
+
+
+def combinations(variables: dict) -> list[dict]:
+    """All combinations of the sensitivity values: {name: values} -> list of {name: value}."""
+    if not variables:
+        return [{}]
+    names = list(variables)
+    combos = [dict(zip(names, vals)) for vals in itertools.product(*[list(variables[k]) for k in names])]
+    if len(combos) > MAX_CASES:
+        raise ValueError(f"{len(combos)} combinations - reduce the number of values (limit {MAX_CASES}).")
+    return combos
+
+
+def rate_grid(aof, method="Automatic - Geometric", n=25, user_rates=None):
+    if method == "User selected":
+        r = np.unique(np.asarray([x for x in (user_rates or []) if x is not None and np.isfinite(x) and x > 0], float))
+        if len(r) < 2:
+            raise ValueError("Enter at least two positive rates.")
+        return r
+    top = max(float(aof), 1e-6)
+    if method == "Automatic - Linear":
+        return np.linspace(top * 0.01, top, n)
+    return np.geomspace(top * 0.002, top, n)
+
+
+def _case_arrays(kind, p):
+    """Fluid case dict for one parameter set (oil: q filled later)."""
+    if kind == "oil":
+        return {"wc": p["wc"] / 100.0, "gor": p["gor"]}
+    sg = p.get("sep_gor", 0.0)
+    return {"wgr": p["wgr"], "cgr": 1e6 / sg if sg and sg > 0 else 0.0}
+
+
+@dataclass
+class CaseResult:
+    params: dict
+    rates: np.ndarray
+    vlp: np.ndarray
+    ipr_pwf: np.ndarray
+    ipr_curve: object
+    q: float | None
+    pwf: float | None
+    stable: bool
+    note: str
+    q_vlp_min: float
+    aof: float
+    wht: np.ndarray | None = None          # wellhead temperature at each rate
+    wht_q: float | None = None            # wellhead temperature at the solution
+    details: dict = field(default_factory=dict)
+    profile: pd.DataFrame | None = None
+    pwh: np.ndarray | None = None          # wellhead pressure at each rate (surface equipment in use)
+    pwh_q: float | None = None
+    node: str = "bottom"                   # solution node: "bottom" or "top"
+    top_in: np.ndarray | None = None       # top-node solution: inflow (IPR + tubing [+ surface]) pressure at the top node
+    top_in_q: float | None = None          # ... at the solution rate (NaN when a critical choke sets the rate)
+
+    @property
+    def node_pressure(self):
+        """Solution node pressure: bottom-node flowing pressure, or the top-node pressure."""
+        if self.q is None:
+            return None
+        return self.pwf if self.node == "bottom" else float(self.params["whp"])
+
+
+@dataclass
+class SurfaceSetup:
+    """Surface equipment from the manifold back to the wellhead (items in flow order, see surface.build_items)."""
+    items: list
+    t_surround: float = 60.0
+    u: float = 8.0
+    correlation: str = "beggs_brill"
+    choke_method: str = "Sachdeva"
+    cd: float = 0.75
+    friction: float = 1.0      # flowline / fittings friction multiplier (from Match Surface)
+
+    def items_for(self, params):
+        c = params.get("choke")
+        return SF.with_choke_size(self.items, float(c)) if c is not None and SF.has_choke(self.items) else self.items
+
+
+def _wellhead(kind, path, fluid, plist, qlist, u, surface: SurfaceSetup | None, hc):
+    """Wellhead pressure arrays for (params, rates) pairs sharing a flow path and U. Without surface equipment the
+    top node is the wellhead. With it, params['whp'] is the manifold pressure and the surface items are marched back
+    to the wellhead at the wellhead temperature of each rate (batched by choke size)."""
+    if surface is None or not surface.items:
+        return [np.full(len(q), float(p["whp"])) for p, q in zip(plist, qlist)]
+    out = [None] * len(plist)
+    by_choke = {}
+    for j, p in enumerate(plist):
+        by_choke.setdefault(p.get("choke"), []).append(j)
+    for _, js in by_choke.items():
+        q = np.concatenate([qlist[j] for j in js])
+        flu = {}
+        for j in js:
+            for k, v in _case_arrays(kind, plist[j]).items():
+                flu.setdefault(k, []).append(np.full(len(qlist[j]), float(v)))
+        case = {"q": q, **{k: np.concatenate(v) for k, v in flu.items()}}
+        w, cp = fluid.mass_cp(case, hc)
+        t_wh = V.temperature_profile(path, w, cp, u)[:, 0]
+        pm = np.concatenate([np.full(len(qlist[j]), float(plist[j]["whp"])) for j in js])
+        pwh = SF.wellhead_pressure(surface.items_for(plist[js[0]]), fluid, kind, pm, case, t_wh, surface.correlation,
+                                   hc, surface.t_surround, surface.u, surface.choke_method, surface.cd, p2=surface.friction)
+        pos = 0
+        for j in js:
+            out[j] = pwh[pos:pos + len(qlist[j])]
+            pos += len(qlist[j])
+    return out
+
+
+def _ipr_at(curve, rates_ipr_units):
+    order = np.argsort(curve.q)
+    q, p = curve.q[order], curve.pwf[order]
+    out = np.interp(rates_ipr_units, q, p)
+    return np.where(rates_ipr_units <= q.max() * (1 + 1e-9), out, np.nan)
+
+
+def _roots(rates, diff):
+    s = np.where(np.isfinite(diff[:-1]) & np.isfinite(diff[1:]) & (np.sign(diff[:-1]) != np.sign(diff[1:])))[0]
+    return [(k, rates[k] + diff[k] / (diff[k] - diff[k + 1]) * (rates[k + 1] - rates[k])) for k in s]
+
+
+def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, correlation, p1=1.0, p2=1.0,
+                hc: HeatCapacities | None = None, method="Automatic - Geometric", n=25, user_rates=None,
+                allow_left=False, surface: SurfaceSetup | None = None, node="bottom"):
+    """Solve every case. path_for(tubing_id) -> FlowPath; ipr_for(changes) -> IPR curve (changes: pr, j, skin).
+    base holds whp, u, wc/gor (oil, wc in %) or wgr/sep_gor (gas); each case overrides some of them.
+    With surface equipment, whp is the manifold pressure and 'choke' (64ths) may be sensitised.
+    node="top" also builds the inflow curve at the top node (IPR, tubing traversed upwards, then the surface equipment
+    downstream). The solution rate does not depend on the node, so it is solved at the bottom node in both cases."""
+    hc = hc or HeatCapacities()
+    scale = 1000.0 if kind == "gas" else 1.0          # VLP rate units -> IPR units
+    prep = []
+    for c in cases:
+        p = {**base, **c}
+        changes = {k: float(p[k]) for k in IPR_KEYS if k in c}
+        curve = ipr_for(changes)
+        aof = float(curve.aof) / scale
+        rates = rate_grid(aof, method, n, user_rates)
+        prep.append((p, curve, aof, rates))
+    groups = {}
+    for i, (p, *_rest) in enumerate(prep):
+        groups.setdefault((p.get("tubing_id"), float(p["u"])), []).append(i)
+    vlp = [None] * len(prep)
+    pwh_store = [None] * len(prep)
+    paths = {}
+    for (tid, u), idx in groups.items():
+        path = paths.setdefault(tid, path_for(tid))
+        qs, flu = [], {}
+        whps = _wellhead(kind, path, fluid, [prep[i][0] for i in idx], [prep[i][3] for i in idx], u, surface, hc)
+        for j, i in enumerate(idx):
+            p, _, _, rates = prep[i]
+            qs.append(rates)
+            pwh_store[i] = whps[j]
+            for k, v in _case_arrays(kind, p).items():
+                flu.setdefault(k, []).append(np.full(len(rates), float(v)))
+        case = {"q": np.concatenate(qs), **{k: np.concatenate(v) for k, v in flu.items()}}
+        P, _ = V.traverse(path, fluid, np.concatenate(whps), case, correlation, p1, p2, u, hc)
+        bottom = P[:, -1]
+        pos = 0
+        for i in idx:
+            m = len(prep[i][3])
+            vlp[i] = bottom[pos:pos + m]
+            pos += m
+    # intersections and regula-falsi refinement (batched per group)
+    results = []
+    pending = []
+    for i, (p, curve, aof, rates) in enumerate(prep):
+        ipr_p = _ipr_at(curve, rates * scale)
+        diff = vlp[i] - ipr_p
+        q_min = float(rates[int(np.nanargmin(vlp[i]))])
+        roots = _roots(rates, diff)
+        note, pick = "", None
+        if roots:
+            k, q0 = roots[-1]
+            if q0 >= q_min * (1 - 1e-9) or allow_left:
+                pick = (k, q0)
+                if q0 < q_min:
+                    note = "left-hand (unstable) intersection"
+            else:
+                note = "only a left-hand intersection - well unstable (left-hand intersection disallowed)"
+        else:
+            note = "no intersection - the well does not flow at this top-node pressure"
+        results.append(CaseResult(p, rates, vlp[i], ipr_p, curve, None, None, False, note, q_min, aof,
+                                  pwh=pwh_store[i] if surface is not None and surface.items else None))
+        if pick:
+            pending.append((i, pick))
+    for _ in range(2):                      # regula falsi refinement of each picked bracket
+        if not pending:
+            break
+        by_group = {}
+        for i, (k, q0) in pending:
+            p = results[i].params
+            by_group.setdefault((p.get("tubing_id"), float(p["u"])), []).append((i, k, q0))
+        new_pending = []
+        for (tid, u), items in by_group.items():
+            path = paths[tid]
+            q_arr = np.array([q0 for _, _, q0 in items])
+            whp = np.concatenate(_wellhead(kind, path, fluid, [results[i].params for i, _, _ in items],
+                                           [np.array([q0]) for _, _, q0 in items], u, surface, hc))
+            flu = {}
+            for i, _, _ in items:
+                for kk, v in _case_arrays(kind, results[i].params).items():
+                    flu.setdefault(kk, []).append(float(v))
+            P, _ = V.traverse(path, fluid, whp, {"q": q_arr, **{kk: np.array(v) for kk, v in flu.items()}},
+                              correlation, p1, p2, u, hc)
+            wh_of = {i: w for (i, _, _), w in zip(items, whp)}
+            for (i, k, q0), pv in zip(items, P[:, -1]):
+                r = results[i]
+                d0 = pv - _ipr_at(r.ipr_curve, np.array([q0 * scale]))[0]
+                dl, dr = r.vlp[k] - r.ipr_pwf[k], r.vlp[k + 1] - r.ipr_pwf[k + 1]
+                ql, qr = r.rates[k], r.rates[k + 1]
+                # keep the sub-bracket containing the sign change
+                if np.sign(d0) == np.sign(dl):
+                    ql, dl = q0, d0
+                else:
+                    qr, dr = q0, d0
+                q1 = ql + dl / (dl - dr) * (qr - ql) if dl != dr else q0
+                # store refined bracket back into the curve arrays for the next pass
+                r.rates = np.insert(r.rates, k + 1, q0)
+                r.vlp = np.insert(r.vlp, k + 1, pv)
+                r.ipr_pwf = np.insert(r.ipr_pwf, k + 1, pv - d0)
+                if r.pwh is not None:
+                    r.pwh = np.insert(r.pwh, k + 1, wh_of[i])
+                kk = k if q1 <= q0 else k + 1
+                new_pending.append((i, (kk, q1)))
+        pending = new_pending
+    for i, (k, q1) in pending:
+        r = results[i]
+        r.q = float(q1)
+        r.pwf = float(_ipr_at(r.ipr_curve, np.array([q1 * scale]))[0])
+        r.stable = r.q >= r.q_vlp_min * (1 - 1e-9)
+    for r in results:                       # wellhead temperatures (independent of pressure)
+        path = paths[r.params.get("tubing_id")]
+        qq = np.append(r.rates, r.q if r.q is not None else r.rates[-1])
+        case = {"q": qq, **{k: np.full(len(qq), float(v)) for k, v in _case_arrays(kind, r.params).items()}}
+        w, cp = fluid.mass_cp(case, hc)
+        tt = V.temperature_profile(path, w, cp, float(r.params["u"]))[:, 0]
+        r.wht, r.wht_q = tt[:-1], (float(tt[-1]) if r.q is not None else None)
+        if r.pwh is not None and r.q is not None:
+            r.pwh_q = float(np.interp(r.q, r.rates, r.pwh))
+    if node == "top":
+        _top_node_inflow(results, paths, fluid, kind, correlation, p1, p2, hc, surface, scale)
+    return results, paths
+
+
+def _top_node_inflow(results, paths, fluid, kind, correlation, p1, p2, hc, surface, scale):
+    """Inflow curve at the top node for every case (batched per flow path and U)."""
+    groups = {}
+    for r in results:
+        r.node = "top"
+        groups.setdefault((r.params.get("tubing_id"), float(r.params["u"])), []).append(r)
+    for (tid, u), rs in groups.items():
+        path = paths[tid]
+        qs, pb, flu, plist = [], [], {}, []
+        for r in rs:
+            q = np.append(r.rates, r.q if r.q is not None else np.nan)
+            pbot = _ipr_at(r.ipr_curve, np.nan_to_num(q, nan=0.0) * scale)
+            pbot[-1] = r.pwf if r.q is not None else np.nan
+            qs.append(np.nan_to_num(q, nan=r.rates[0]))
+            pb.append(pbot)
+            for k, v in _case_arrays(kind, r.params).items():
+                flu.setdefault(k, []).append(np.full(len(q), float(v)))
+        case = {"q": np.concatenate(qs), **{k: np.concatenate(v) for k, v in flu.items()}}
+        P, T = V.traverse_up(path, fluid, np.concatenate(pb), case, correlation, p1, p2, u, hc)
+        top = P[:, 0]
+        if surface is not None and surface.items:
+            by_choke = {}
+            pos = 0
+            for r, q in zip(rs, qs):
+                by_choke.setdefault(r.params.get("choke"), []).append((pos, len(q), r))
+                pos += len(q)
+            out = np.full_like(top, np.nan)
+            for _, members in by_choke.items():
+                idx = np.concatenate([np.arange(a, a + m) for a, m, _ in members])
+                sub = {k: v[idx] for k, v in case.items()}
+                p_wh = top[idx].copy()
+                sol = np.concatenate([np.arange(a, a + m) == a + m - 1 for a, m, _ in members])
+                p_wh[sol] *= 1 + 2e-4      # solution rate sits on the critical-choke boundary: step just inside it
+                out[idx] = SF.manifold_pressure(surface.items_for(members[0][2].params), fluid, kind, p_wh, sub,
+                                                T[idx, 0], surface.correlation, hc, surface.t_surround, surface.u,
+                                                surface.choke_method, surface.cd, p2=surface.friction)
+            top = out
+        pos = 0
+        for r, q in zip(rs, qs):
+            m = len(q)
+            r.top_in = top[pos:pos + m - 1]
+            r.top_in_q = float(top[pos + m - 1]) if r.q is not None else None
+            pos += m
+
+
+def rate_table(kind, r: CaseResult) -> pd.DataFrame:
+    """PROSPER-style table of the VLP/IPR curves of one case."""
+    rows = []
+    for i, q in enumerate(r.rates):
+        sr = surface_rates(kind, r.params, q)
+        row = {"Point": i + 1, **sr}
+        if r.node == "top" and r.top_in is not None:
+            row["Inflow pressure at top node (psia)"] = r.top_in[i]
+            row["Top node pressure (psia)"] = float(r.params["whp"])
+        row.update({"VLP pressure (psia)": r.vlp[i], "IPR pressure (psia)": r.ipr_pwf[i]})
+        if r.node != "top":
+            row["Top node pressure (psia)"] = float(r.params["whp"])
+        if r.pwh is not None:
+            row["Wellhead pressure (psia)"] = r.pwh[i]
+        row["Wellhead temperature (°F)"] = r.wht[i]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------- details
+def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, hc=None,
+                     surface: SurfaceSetup | None = None):
+    """Traverse at the solution rate with a breakdown of pressure losses, velocities and restriction regimes.
+    With surface equipment, det also carries the manifold and the surface losses, and the regimes dict the choke."""
+    hc = hc or HeatCapacities()
+    case = {"q": np.array([q]), **{k: np.array([v]) for k, v in _case_arrays(kind, params).items()}}
+    whp, u = float(params["whp"]), float(params["u"])
+    surf_rows, surf_det = None, {}
+    if surface is not None and surface.items:
+        w, cp = fluid.mass_cp(case, hc)
+        t_wh = V.temperature_profile(path, w, cp, u)[:, 0]
+        pwh, surf_rows, t_man, notes = SF.wellhead_pressure(
+            surface.items_for(params), fluid, kind, np.array([whp]), case, t_wh, surface.correlation, hc,
+            surface.t_surround, surface.u, surface.choke_method, surface.cd, p2=surface.friction, detail=True)
+        dpc = sum(float(r["dP (psi)"][0]) for r in surf_rows if r["Type"] == "Choke")
+        dpl = sum(float(r["dP (psi)"][0]) for r in surf_rows if r["Type"] == "Pipe")
+        surf_det = {"Manifold pressure (psia)": whp, "Manifold temperature (°F)": float(t_man[0]),
+                    "dP choke (psi)": dpc, "dP flowline and fittings (psi)": dpl}
+        whp = float(pwh[0])
+    P, T = V.traverse(path, fluid, whp, case, correlation, p1, p2, u, hc)
+    P, T = P[0], T[0]
+    corr = CORRELATIONS[correlation]
+    rows, dpg, dpf, transit = [], 0.0, 0.0, 0.0
+    vms, ves = [], []
+    for i in range(len(path.md) - 1):
+        pm, tm, L = 0.5 * (P[i] + P[i + 1]), 0.5 * (T[i] + T[i + 1]), path.seg_len[i]
+        s = fluid.state(np.array([pm]), np.array([tm]), case)
+        a = path.area[i]
+        vsl, vsg = max(float(s["ql"][0]) / a, 1e-12), max(float(s["qg"][0]) / a, 0.0)
+        args = (np.array([vsl]), np.array([vsg]), s["rho_l"], np.maximum(s["rho_g"], 1e-4), s["mu_l"],
+                np.maximum(s["mu_g"], 1e-4), np.maximum(s["sig"], 0.5), path.d_h[i], path.rough[i],
+                path.sin_t[i], np.array([pm]))
+        lam = vsl / max(vsl + vsg, 1e-30)
+        if lam > 0.99999 or lam < 1e-6:
+            e, f, hl = no_slip(*args)
+        elif corr.__name__ in NEEDS_GLR:
+            e, f, hl = corr(*args, glr=V._glr(case, kind))
+        else:
+            e, f, hl = corr(*args)
+        dpg += p1 * float(e[0]) * L
+        dpf += p2 * float(f[0]) * L
+        vm = vsl + vsg
+        rho_ns = lam * float(s["rho_l"][0]) + (1 - lam) * float(s["rho_g"][0])
+        ve = EROSION_C / np.sqrt(max(rho_ns, 1e-6))
+        transit += L / max(vm, 1e-9)
+        vms.append(vm)
+        ves.append(ve)
+        rows.append({"MD (ft)": path.md[i + 1], "TVD (ft)": path.tvd[i + 1], "Pressure (psia)": P[i + 1],
+                     "Temperature (°F)": T[i + 1], "Liquid holdup": float(hl[0]), "No-slip holdup": lam,
+                     "Mixture velocity (ft/s)": vm, "Erosional velocity (ft/s)": ve})
+    regimes = {}
+    for r in surf_rows or []:
+        if r["Type"] == "Choke":
+            regimes[f"Surface choke - {r['Item']} ({r['Size']})"] = (str(r["Regime"][0]), float(r["dP (psi)"][0]))
+    for j, (node, d_in) in enumerate(sorted(path.restrictions.items()), 1):
+        s = fluid.state(np.array([P[node]]), np.array([T[node]]), case)
+        dp = float(V._restriction_dp(s, d_in)[0])
+        p_up, p_dn = P[node], P[node] - dp
+        regimes[f"Restriction {j} at {path.md[node]:,.0f} ft (ID {d_in:g} in)"] = (
+            ("Critical" if p_dn / max(p_up, 1e-9) < 0.53 else "SubCritical"), dp)
+    det = {
+        **surf_det,
+        "Wellhead pressure (psia)": P[0], "Wellhead temperature (°F)": T[0],
+        "Bottom node pressure (psia)": P[-1], "Bottom node temperature (°F)": T[-1],
+        "dP friction - production string (psi)": dpf, "dP gravity - production string (psi)": dpg,
+        "dP restrictions (psi)": sum(v[1] for k, v in regimes.items() if k.startswith("Restriction")),
+        "Cumulative transit time (s)": transit,
+        "Max. no-slip velocity (ft/s)": max(vms), "Min. no-slip velocity (ft/s)": min(vms),
+        "Max. erosional velocity (ft/s)": max(ves), "Min. erosional velocity (ft/s)": min(ves),
+        "Max. velocity / erosional velocity": max(v / e for v, e in zip(vms, ves)),
+        "Max. pressure (psia)": float(P.max()), "Min. pressure (psia)": float(P.min()),
+    }
+    if surf_rows:
+        det["_surface"] = surface_table(surf_rows)
+    return det, regimes, pd.DataFrame(rows)
+
+
+def surface_table(rows) -> pd.DataFrame:
+    """Item-by-item surface breakdown at one rate (wellhead first)."""
+    out = []
+    for r in rows:
+        out.append({"Item": r["Item"], "Type": r["Type"], "Size": r["Size"],
+                    "Inlet pressure (psia)": float(r["Upstream pressure (psia)"][0]),
+                    "Outlet pressure (psia)": float(r["Downstream pressure (psia)"][0]),
+                    "dP (psi)": float(r["dP (psi)"][0]), "Temperature (°F)": float(np.atleast_1d(r["Temperature (°F)"])[0]),
+                    "Regime": str(r["Regime"][0]) if r["Type"] == "Choke" else ""})
+    return pd.DataFrame(out)
+
+
+def surface_rates(kind, params, q):
+    """Surface rates at a solution rate: oil (liquid, oil, water STB/d, gas MMscf/d) / gas (gas MMscf/d,
+    condensate and water STB/d)."""
+    if kind == "oil":
+        wc = params["wc"] / 100.0
+        qo = q * (1 - wc)
+        return {"Liquid rate (STB/d)": q, "Oil rate (STB/d)": qo, "Water rate (STB/d)": q * wc,
+                "Gas rate (MMscf/d)": qo * params["gor"] / 1e6}
+    sg = params.get("sep_gor", 0.0)
+    cgr = 1e6 / sg if sg and sg > 0 else 0.0
+    return {"Gas rate (MMscf/d)": q, "Condensate rate (STB/d)": q * cgr, "Water rate (STB/d)": q * params["wgr"]}

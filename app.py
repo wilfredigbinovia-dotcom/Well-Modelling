@@ -31,6 +31,8 @@ from wellmodel import inflow_adv as _ipr2_mod
 from wellmodel import completion as wcomp
 from wellmodel import mpp as _mpp_mod
 from wellmodel import vlp as wvlp
+from wellmodel import system as wsys
+from wellmodel import surface as wsurf
 from wellmodel.correlations import LABELS as VLP_LABELS
 from wellmodel import equipment as weq
 from wellmodel import schematic as wsch
@@ -143,7 +145,7 @@ def radio(col, label, options, key, default=None, **kw):
 
 st.title("🛢️ wellmodel")
 
-TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP"]
+TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP", "6 · Calculation"]
 tabs = st.tabs(TAB_NAMES)
 
 CAPTIONS = {
@@ -1806,8 +1808,26 @@ with tabs[3]:
 
 
 # ================================================================ tab 5: VLP
+SURFACE_CORRELATIONS = ["beggs_brill", "mukherjee_brill", "beggs_brill_noslip", "duns_ros", "duns_ros_gould",
+                        "no_slip"]
+TOP_NODES = ["Manifold", "Wellhead"]
+
+
+def surface_items(eqd):
+    """Surface items (flow order) from the Equipment tab, or None when no surface equipment is entered."""
+    df = eqd.get("surface")
+    if df is None or not len(weq.surface_rows(df)):
+        return None
+    try:
+        _, items = wsurf.build_items(df)
+    except (ValueError, TypeError, KeyError):
+        return None
+    return items or None
+
+
 VLP_ROWS = 20
-VLP_ACTIONS = ["Estimate U Value", "Correlation Comparison", "Match VLP", "VLP/IPR", "Adjust IPR"]
+VLP_ACTIONS = ["Estimate U Value", "Correlation Comparison", "Match VLP", "VLP/IPR", "Adjust IPR", "Match Surface"]
+EXAMPLE_SURFACE_TRUTH = (0.85, 1.2)        # Cd, flowline friction multiplier used for the example manifold pressures
 
 
 def vlp_columns(kind):
@@ -1825,7 +1845,7 @@ def vlp_blank(kind):
 def vlp_set_tests(kind, df):
     ss["vlp_tests_" + kind] = df
     ss["_ver_vlp_tests_" + kind] = ss.get("_ver_vlp_tests_" + kind, 0) + 1
-    for k_ in ("vlp_u", "vlp_cmp", "vlp_matches", "vlp_vi", "vlp_adj"):
+    for k_ in ("vlp_u", "vlp_cmp", "vlp_matches", "vlp_vi", "vlp_adj", "surf_match"):
         ss.pop(k_, None)
 
 
@@ -1946,12 +1966,17 @@ def vlp_example_tests(kind, path, fluid, u, hc, pr, ipr_curve=None):
             t = pd.DataFrame(keep).reset_index(drop=True)
     P, T = wvlp.traverse(path, fluid, t["thp"].to_numpy(), wvlp.case_of(t, kind), corr, 1.04, 1.12, u, hc)
     gp = P[:, path.node(gauge)] + np.array([3.0, -4.0, 2.0, -2.0])[:len(t)]
+    pman, beans = example_manifold(kind, fluid, t, T[:, 0], hc)
     rows = []
     for i, r in t.iterrows():
         d = {"Test Point Date": f"2026-0{i + 3}-15", "Test Point Comment": "synthetic",
              "Tubing Head Pressure (psia)": r["thp"], "Tubing Head Temperature (deg F)": round(float(T[i, 0]), 1),
              "Gauge Depth (Measured) (feet)": gauge, "Gauge Pressure (psia)": round(float(gp[i]), 1),
              "Reservoir Pressure (psia)": pr}
+        if np.isfinite(pman[i]):
+            d["Manifold Pressure (psia)"] = round(float(pman[i]), 1)
+            if np.isfinite(beans[i]):
+                d["Choke Size (64ths in)"] = beans[i]
         if kind == "oil":
             d.update({"Water Cut (percent)": r["wc"] * 100, "Liquid Rate (STB/day)": r["q"],
                       "Gas Oil Ratio (scf/STB)": r["gor"], "GOR Free (scf/STB)": 0.0})
@@ -1964,6 +1989,39 @@ def vlp_example_tests(kind, path, fluid, u, hc, pr, ipr_curve=None):
         for c_, v_ in d.items():
             df.iat[i, df.columns.get_loc(c_)] = v_
     return df
+
+
+def example_manifold(kind, fluid, t, t_wh, hc):
+    """Manifold pressures for the example tests: the surface equipment of the Equipment tab marched downstream from
+    each test's THP with Cd 0.85 and friction x 1.2, at a mix of bean sizes (some critical, some subcritical)."""
+    n = len(t)
+    nan = np.full(n, np.nan)
+    eqd = ss.get("equipment", {})
+    items = surface_items(eqd)
+    if items is None:
+        return nan, nan
+    cd, fr = EXAMPLE_SURFACE_TRUTH
+    case = wvlp.case_of(t, kind)
+    thp = t["thp"].to_numpy(float)
+    choke = wsurf.has_choke(items)
+    cands = [24, 32, 40, 48, 64, 80, 96, 128] if choke else [None]
+    res = {}
+    for b in cands:
+        its = wsurf.with_choke_size(items, b) if b else items
+        try:
+            res[b] = wsurf.manifold_pressure(its, fluid, kind, thp, case, t_wh, "beggs_brill", hc,
+                                             float(eqd.get("t_surround", 60.0)), float(eqd.get("u_surface", 8.0)),
+                                             "Sachdeva", cd, 1.0, fr)
+        except (ValueError, FloatingPointError):
+            res[b] = nan
+    pman, beans = nan.copy(), nan.copy()
+    for i in range(n):
+        ok = [b for b in cands if np.isfinite(res[b][i]) and 50.0 < res[b][i] < 0.92 * thp[i]]
+        if ok:
+            b = ok[(i * 2) % len(ok)]       # spread the tests over the feasible beans
+            pman[i] = res[b][i]
+            beans[i] = float(b) if b else np.nan
+    return pman, beans
 
 
 def traverse_plot(path, P_by, T_by, test, title, temp_meas=None):
@@ -1999,6 +2057,14 @@ def show_vlp_issues(issues, infos=True):
 def accept_u(u):
     put("eq_u", float(round(u, 5)))
     ss["vlp_u_accepted"] = float(round(u, 5))
+
+
+def accept_surface(cd, friction, corr):
+    ss["surf_matched"] = {"cd": float(cd), "friction": float(friction), "corr": corr}
+    put("sys_cd", float(round(cd, 4)))
+    put("sys_scorr", corr)
+    put("sys_choke", "Sachdeva")
+    put("sys_use_smatch", True)
 
 
 def accept_ipr(key, value, label):
@@ -2076,7 +2142,7 @@ with tabs[4]:
                 path = None
             if path is not None and len(tests):
                 st.divider()
-                bc = st.columns(5)
+                bc = st.columns(len(VLP_ACTIONS))
                 for i, name in enumerate(VLP_ACTIONS):
                     bc[i].button(name, width="stretch", on_click=lambda n=name: ss.__setitem__("vlp_action", n),
                                  type="primary" if ss.get("vlp_action", VLP_ACTIONS[0]) == name else "secondary")
@@ -2226,6 +2292,98 @@ with tabs[4]:
                     else:
                         st.info("Choose at least one correlation.")
 
+                # --------------------------------------------------- match surface
+                elif action == "Match Surface":
+                    st.caption("Calibrates the surface equipment against tests with a measured manifold pressure: "
+                               "from each manifold pressure the calculation works back through the flowline, "
+                               "fittings and choke to the wellhead, and the Sachdeva discharge coefficient and a "
+                               "flowline friction multiplier are regressed so the calculated wellhead pressure matches "
+                               "the measured tubing head pressure. A choke size in the test table overrides the bean "
+                               "of the Equipment tab for that test.")
+                    s_items = surface_items(eqd)
+                    st_ = tests[np.isfinite(tests["pman"])].reset_index(drop=True)
+                    if s_items is None:
+                        st.info("Enter the surface equipment (manifold, flowline, choke) in the Equipment Data tab.")
+                    elif not len(st_):
+                        st.info("Enter the manifold pressure (and the choke size, if it varied) for at least one "
+                                "test in the table above.")
+                    else:
+                        cc_ = st.columns([1.2, 2, 1])
+                        s_corr = sel(cc_[0], "Surface equipment correlation", SURFACE_CORRELATIONS, "vlp_scorr",
+                                     format_func=VLP_LABELS.get)
+                        fit_opts = {"cd": "Choke discharge coefficient (Cd)",
+                                    "friction": "Flowline friction multiplier"}
+                        fit_ = cc_[1].multiselect("Parameters to match", list(fit_opts), default=list(fit_opts),
+                                                  format_func=fit_opts.get, key="vlp_sfit")
+                        sig_s = (st_.to_json(), s_corr, tuple(fit_), u_cur, fluid_note, repr(s_items),
+                                 float(eqd.get("t_surround", 60.0)), float(eqd.get("u_surface", 8.0)))
+                        cc_[2].markdown("&nbsp;")
+                        run_s = cc_[2].button("Run surface match", type="primary", width="stretch")
+                        if run_s and fit_:
+                            case_ = wvlp.case_of(st_, kind)
+                            w_, cp_ = fluid.mass_cp(case_, hc)
+                            t_calc = wvlp.temperature_profile(path, w_, cp_, u_cur)[:, 0]
+                            t_wh_ = np.where(np.isfinite(st_["tht"].to_numpy(float)), st_["tht"].to_numpy(float),
+                                             t_calc)
+                            try:
+                                with st.spinner("Regressing the surface parameters..."):
+                                    sm_ = wsurf.match_surface(s_items, fluid, kind, st_, t_wh_, s_corr, hc,
+                                                              float(eqd.get("t_surround", 60.0)),
+                                                              float(eqd.get("u_surface", 8.0)), fit=tuple(fit_))
+                                ss["surf_match"] = {"sig": sig_s, "m": sm_, "corr": s_corr}
+                            except (ValueError, FloatingPointError) as e:
+                                st.error(f"Surface match failed: {e}")
+                        elif run_s:
+                            st.info("Choose at least one parameter to match.")
+                        sm = ss.get("surf_match")
+                        if sm and sm["sig"] == sig_s:
+                            m_ = sm["m"]
+                            mc = st.columns(4)
+                            mc[0].metric("Discharge coefficient (Cd)", f"{m_.cd:.3f}",
+                                         None if "cd" in m_.fitted else "held")
+                            mc[1].metric("Friction multiplier", f"{m_.friction:.3f}",
+                                         None if "friction" in m_.fitted else "held")
+                            mc[2].metric("RMS THP error", f"{m_.rms_after:.1f} psi",
+                                         f"{m_.rms_after - m_.rms_before:+.1f} psi vs unmatched", delta_color="inverse")
+                            mc[3].button("Accept surface match", type="primary", width="stretch",
+                                         on_click=accept_surface, args=(m_.cd, m_.friction, sm["corr"]),
+                                         help="Uses Cd (Sachdeva), the friction multiplier and this flowline "
+                                              "correlation in the Calculation tab.")
+                            acc_ = ss.get("surf_matched")
+                            if acc_ and abs(acc_["cd"] - m_.cd) < 1e-9 and abs(acc_["friction"] - m_.friction) < 1e-9:
+                                st.success(f"Accepted: Cd {m_.cd:.3f}, friction multiplier {m_.friction:.3f}, "
+                                           f"{VLP_LABELS[acc_['corr']]} - used by the Calculation tab.")
+                            for n_ in m_.notes:
+                                st.warning(n_)
+                            st.dataframe(m_.table.style.format(precision=1, na_rep="—"), hide_index=True,
+                                         width="stretch")
+                            fig, ax = plt.subplots(figsize=(6.2, 4.6))
+                            tb_ = m_.table
+                            lo_ = float(min(tb_["Measured THP (psia)"].min(), tb_["Calculated THP - before (psia)"].min()))
+                            hi_ = float(max(tb_["Measured THP (psia)"].max(), tb_["Calculated THP - before (psia)"].max()))
+                            pad_ = 0.08 * (hi_ - lo_ + 1)
+                            ax.plot([lo_ - pad_, hi_ + pad_], [lo_ - pad_, hi_ + pad_], color=wplt.INK2, lw=1, ls="--")
+                            ax.scatter(tb_["Measured THP (psia)"], tb_["Calculated THP - before (psia)"], s=45,
+                                       color=wplt.SERIES[1], label="unmatched (Cd 0.75, friction x 1)", zorder=4)
+                            ax.scatter(tb_["Measured THP (psia)"], tb_["Calculated THP - matched (psia)"], s=55,
+                                       color=wplt.SERIES[0], edgecolor=wplt.INK, label="matched", zorder=5)
+                            for _, r_ in tb_.iterrows():
+                                ax.annotate(str(r_["Test"]).split(" ")[0], (r_["Measured THP (psia)"],
+                                            r_["Calculated THP - matched (psia)"]), xytext=(5, -10),
+                                            textcoords="offset points", fontsize=8)
+                            ax.set_xlabel("Measured THP (psia)"); ax.set_ylabel("Calculated THP (psia)")
+                            ax.set_title("Wellhead pressure from the manifold pressure", fontsize=10)
+                            ax.legend(fontsize=8)
+                            fig.tight_layout()
+                            pc_ = st.columns([1, 1])
+                            pc_[0].pyplot(fig, clear_figure=True)
+                            pc_[1].caption("Points on the dashed line: calculated wellhead pressure equals the "
+                                           "measured THP. The choke regime column shows which tests can see the "
+                                           "flowline: with a critical choke the wellhead pressure does not depend "
+                                           "on anything downstream of the bean.")
+                        elif sm:
+                            st.info("Inputs have changed - press Run surface match to update.")
+
                 # --------------------------------------------------------- VLP/IPR
                 elif action in ("VLP/IPR", "Adjust IPR"):
                     ms = ss.get("vlp_matches", {}).get("ms", {})
@@ -2358,3 +2516,477 @@ with tabs[4]:
                                     st.button("Accept", type="primary", on_click=accept_ipr, args=accept)
                                     if ss.get("vlp_adj_accepted") == accept[2]:
                                         st.success(f"Accepted: {accept[2]} written to the IPR Data tab.")
+
+
+
+# ======================================================== tab 6: calculation
+RATE_METHODS = ["Automatic - Geometric", "Automatic - Linear", "User selected"]
+
+
+def parse_values(text):
+    out = []
+    for tok in str(text).replace(";", ",").split(","):
+        tok = tok.strip()
+        if tok:
+            out.append(float(tok))
+    return out
+
+
+def sys_plot(results, kind, highlight=None, max_curves=12):
+    if results and results[0].node == "top":
+        return sys_plot_top(results, kind, max_curves)
+    qunit = "STB/d" if kind == "oil" else "MMscf/d"
+    scale = 1000.0 if kind == "gas" else 1.0
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    shown = results if len(results) <= max_curves else results[:max_curves]
+    single = len(results) == 1
+    cmap = plt.get_cmap("tab20" if len(shown) > 10 else "tab10")
+    for i, r in enumerate(shown):
+        col = cmap(i % cmap.N)
+        lab = "" if single else " " + ", ".join(f"{k}={v:g}" for k, v in r.case_label.items())
+        ax.plot(r.rates, r.vlp, color=wplt.SERIES[0] if single else col, lw=1.8, label="VLP" + lab)
+        order = np.argsort(r.ipr_curve.q)
+        ax.plot(r.ipr_curve.q[order] / scale, r.ipr_curve.pwf[order], color=wplt.SERIES[1] if single else col,
+                lw=1.4, ls="-" if single else "--", label="IPR" if single else None)
+        if r.q is not None:
+            ax.scatter([r.q], [r.pwf], s=60, zorder=5, color=wplt.INK if r.stable else "#c0392b",
+                       marker="o" if r.stable else "X")
+    ax.set_xlabel(f"Rate ({qunit})"); ax.set_ylabel("Pressure at bottom node (psia)")
+    top = max(float(np.nanmax(r.ipr_curve.pr)) for r in shown)
+    ax.set_ylim(0, top * 1.6)
+    ax.set_xlim(0, max(r.rates.max() for r in shown) * 1.02)
+    ax.set_title("Inflow (IPR) v Outflow (VLP)" + ("" if single else "  -  dashed: IPR; X = unstable solution"),
+                 fontsize=10)
+    ax.legend(fontsize=7.5, ncol=2 if len(shown) > 6 else 1)
+    fig.tight_layout()
+    return fig
+
+
+def sys_plot_top(results, kind, max_curves=12):
+    """Solution at the top node: inflow (IPR + tubing [+ surface equipment]) against the top-node pressure."""
+    qunit = "STB/d" if kind == "oil" else "MMscf/d"
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    shown = results if len(results) <= max_curves else results[:max_curves]
+    single = len(results) == 1
+    cmap = plt.get_cmap("tab20" if len(shown) > 10 else "tab10")
+    surf = any(r.pwh is not None for r in shown)
+    top_name = "manifold" if surf else "wellhead"
+    ymax = 0.0
+    for i, r in enumerate(shown):
+        col = cmap(i % cmap.N)
+        lab = "" if single else " " + ", ".join(f"{k}={v:g}" for k, v in r.case_label.items())
+        qx, py = r.rates, r.top_in
+        if r.q is not None and r.top_in_q is not None and np.isfinite(r.top_in_q):
+            k_ = np.searchsorted(qx, r.q)
+            qx, py = np.insert(qx, k_, r.q), np.insert(py, k_, r.top_in_q)
+        ok = np.isfinite(py)
+        ax.plot(qx[ok], py[ok], color=wplt.SERIES[1] if single else col, lw=1.8,
+                label=("Inflow (IPR + tubing" + (" + surface equipment" if surf else "") + ")") if single
+                else "Inflow" + lab)
+        pt = float(r.params["whp"])
+        ax.axhline(pt, color=wplt.SERIES[0] if single else col, lw=1.4, ls="-" if single else "--",
+                   label=f"Outflow: {top_name} pressure" if single else None)
+        ymax = max(ymax, float(np.nanmax(py)) if ok.any() else 0.0, pt)
+        if r.q is not None:
+            up = r.top_in_q if r.top_in_q is not None and np.isfinite(r.top_in_q) else \
+                (float(np.interp(r.q, qx[ok], py[ok])) if ok.any() else pt)
+            if up > pt + 1.0:                      # critical choke: rate set by the bean, vertical drop
+                ax.plot([r.q, r.q], [up, pt], color=wplt.SERIES[1] if single else col, lw=1.4, ls=":")
+                if single:
+                    ax.annotate("critical choke - rate set by the bean", (r.q, 0.5 * (up + pt)),
+                                xytext=(8, 0), textcoords="offset points", fontsize=8, va="center")
+            ax.scatter([r.q], [pt], s=60, zorder=5, color=wplt.INK if r.stable else "#c0392b",
+                       marker="o" if r.stable else "X")
+    ax.set_xlabel(f"Rate ({qunit})"); ax.set_ylabel(f"Pressure at top node - {top_name} (psia)")
+    ax.set_ylim(0, max(ymax, 1.0) * 1.25)
+    ax.set_xlim(0, max(r.rates.max() for r in shown) * 1.02)
+    ax.set_title("Solution at the top node" + ("" if single else "  -  dashed: top-node pressure; X = unstable"),
+                 fontsize=10)
+    ax.legend(fontsize=7.5, ncol=2 if len(shown) > 6 else 1)
+    fig.tight_layout()
+    return fig
+
+
+def sens_plot(tab, var_names, labels, qcol):
+    fig, ax = plt.subplots(figsize=(8, 4.6))
+    x = var_names[0]
+    others = var_names[1:]
+    groups = tab.groupby(others) if others else [((), tab)]
+    cmap = plt.get_cmap("tab10")
+    for i, (key, g) in enumerate(groups):
+        if i >= 12:
+            break
+        key = key if isinstance(key, tuple) else (key,)
+        lab = ", ".join(f"{labels[o].split(' (')[0]} = {v:g}" for o, v in zip(others, key)) or "solution"
+        g = g.sort_values(x)
+        ax.plot(g[x], g[qcol], "-o", ms=4, color=cmap(i % cmap.N), label=lab)
+    ax.set_xlabel(labels[x]); ax.set_ylabel(qcol)
+    ax.set_title("Sensitivity: solution rate", fontsize=10)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def solution_panel(kind, r, det, regimes):
+    sr = wsys.surface_rates(kind, r.params, r.q)
+    rows = [(k_, v_) for k_, v_ in sr.items()]
+    rows += [("Solution node", "Bottom node" if r.node == "bottom" else
+              ("Top node (manifold)" if r.pwh_q is not None else "Top node (wellhead)")),
+             ("Solution node pressure (psia)", r.node_pressure),
+             ("Top node (manifold) pressure (psia)" if r.pwh_q is not None else "Top node (wellhead) pressure (psia)",
+              float(r.params["whp"]))]
+    if r.pwh_q is not None:
+        rows += [("Wellhead pressure (psia)", r.pwh_q)]
+    rows += [("Wellhead temperature (°F)", r.wht_q)]
+    rows += [(k_, v_) for k_, v_ in det.items() if k_ not in ("Wellhead pressure (psia)", "Wellhead temperature (°F)",
+                                                              "Manifold pressure (psia)") and not k_.startswith("_")]
+    rows += [(f"Regime - {k_}", f"{v_[0]} (dP {v_[1]:.1f} psi)") for k_, v_ in regimes.items()]
+    rows += [("Stability", "Stable" if r.stable else "UNSTABLE - left of the VLP minimum"),
+             ("Rate at VLP minimum", f"{r.q_vlp_min:,.4g} {'STB/d' if kind == 'oil' else 'MMscf/d'}")]
+    out = pd.DataFrame(rows, columns=["Result", "Value"])
+    out["Value"] = [f"{v_:,.4g}" if isinstance(v_, (int, float, np.floating)) else str(v_) for v_ in out["Value"]]
+    return out
+
+
+with tabs[5]:
+    st.header("Calculation")
+    st.subheader("System analysis (IPR + VLP)")
+    o = ss.get("options")
+    eqd = ss.get("equipment", {})
+    ipr_curve = ss.get("ipr_curve")
+    blocker = None
+    if o is None or o.errors:
+        blocker = "Fix the configuration in the Options summary first."
+    elif o.is_injector:
+        blocker = "System analysis for injectors is not built yet."
+    elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
+        blocker = "Complete the Equipment Data tab first."
+    elif ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil"):
+        blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
+    if blocker:
+        st.info(blocker)
+    else:
+        kind = "gas" if o.is_gas else "oil"
+        gmd, gt = eqd["geothermal"]
+        tests_ = ss.get("vlp_tests_" + kind)
+        t0_ = None
+        if tests_ is not None:
+            tt_, _ = wvlp.clean_tests(tests_, kind)
+            t0_ = tt_.iloc[0] if len(tt_) else None
+        fluid, fluid_note = vlp_fluid(o, kind, max(float(ipr_curve.pr), 5000.0) * 1.15,
+                                      float(np.min(gt)) - 10, float(np.max(gt)) + 10)
+        if fluid is None:
+            st.warning(fluid_note)
+        else:
+            ms = ss.get("vlp_matches", {}).get("ms", {})
+            sel_c = ss.get("vlp_selected")
+            matched = ms.get(sel_c) if sel_c else None
+            left, right = st.columns([1, 1.5], gap="large")
+            def _copy_test(row):
+                put("sys_whp", float(row["thp"]))
+                if kind == "oil":
+                    put("sys_wc", float(row["wc"] * 100))
+                    put("sys_gor", float(row["gor"]))
+                else:
+                    put("sys_wgr", float(row["wgr"]))
+                    put("sys_sep_gor", float(round(1e6 / row["cgr"])) if row["cgr"] > 0 else 0.0)
+            with left:
+                st.markdown("**Input data**")
+                if tests_ is not None and t0_ is not None:
+                    tt_all, _ = wvlp.clean_tests(tests_, kind)
+                    cc_ = st.columns([2, 1])
+                    tsel_ = cc_[0].selectbox("Copy conditions from test", tt_all["label"].tolist(), key="sys_copy_t")
+                    cc_[1].button("Copy", on_click=_copy_test,
+                                  args=(tt_all[tt_all["label"] == tsel_].iloc[0],), width="stretch",
+                                  help="Wellhead pressure and water/gas ratios from the selected VLP test.")
+                s_items = surface_items(eqd)
+                if s_items is not None:
+                    top_node = sel(st, "Top node", TOP_NODES, "sys_top",
+                                   help="Manifold: the calculation starts at the manifold pressure and works back "
+                                        "through the flowline, fittings and choke to the wellhead. Wellhead: the "
+                                        "surface equipment is ignored.")
+                else:
+                    top_node = "Wellhead"
+                use_surface = top_node == "Manifold"
+                if use_surface:
+                    whp = num(st, "Top node (manifold) pressure (psia)", "sys_pman",
+                              float(round(t0_["thp"] * 0.5)) if t0_ is not None else
+                              (150.0 if kind == "oil" else 800.0), 14.7, 2e4)
+                else:
+                    whp = num(st, "Top node (wellhead) pressure (psia)", "sys_whp",
+                              float(t0_["thp"]) if t0_ is not None else (250.0 if kind == "oil" else 1500.0), 14.7,
+                              2e4)
+                base = {"whp": whp, "u": float(val("eq_u", eqd.get("u_geo", 8.0)))}
+                if kind == "oil":
+                    base["wc"] = num(st, "Water cut (%)", "sys_wc",
+                                     float(t0_["wc"] * 100) if t0_ is not None else float(val("ipr_wc", 0.0)),
+                                     0.0, 99.0)
+                    m_ = blackoil_model(o) if o.method != "eos" else None
+                    base["gor"] = num(st, "Total GOR (scf/STB)", "sys_gor",
+                                      float(t0_["gor"]) if t0_ is not None else
+                                      (float(m_.inp.rsb) if m_ else 500.0), 0.0, 1e6)
+                else:
+                    base["wgr"] = num(st, "Water gas ratio (STB/MMscf)", "sys_wgr",
+                                      float(t0_["wgr"]) if t0_ is not None else 0.0, 0.0, 1e5)
+                    cg_ = float(t0_["cgr"]) if t0_ is not None and t0_["cgr"] > 0 else 0.0
+                    base["sep_gor"] = num(st, "Separator GOR (scf/STB)", "sys_sep_gor",
+                                          round(1e6 / cg_) if cg_ > 0 else 0.0, 0.0, 1e8,
+                                          help="Separator gas per barrel of condensate; 0 = dry gas.")
+                surface = None
+                if use_surface:
+                    s_corr = sel(st, "Surface equipment correlation", SURFACE_CORRELATIONS, "sys_scorr",
+                                 format_func=VLP_LABELS.get,
+                                 help="Pressure loss in the flowline and fittings (fittings as equivalent pipe length).")
+                    choke_method, cd, friction = "Sachdeva", 0.75, 1.0
+                    smat = ss.get("surf_matched")
+                    use_sm = False
+                    if smat is not None:
+                        use_sm = st.toggle("Use matched surface parameters", value=bool(val("sys_use_smatch", True)),
+                                           key=wkey("sys_use_smatch"),
+                                           help="Cd and the flowline friction multiplier from Match Surface (VLP "
+                                                "tab); turn off to enter them by hand.")
+                        ss["_v_sys_use_smatch"] = use_sm
+                    if use_sm:
+                        choke_method, cd, friction = "Sachdeva", float(smat["cd"]), float(smat["friction"])
+                        c3_ = st.columns(3)
+                        c3_[0].text_input("Choke method", "Sachdeva", disabled=True)
+                        c3_[1].text_input("Discharge coeff.", f"{cd:.3f}", disabled=True)
+                        c3_[2].text_input("Friction multiplier", f"{friction:.3f}", disabled=True)
+                        st.caption("Surface parameters from Match Surface.")
+                    elif wsurf.has_choke(s_items):
+                        cc_ = st.columns([2, 1])
+                        choke_method = sel(cc_[0], "Choke method", wsurf.CHOKE_METHODS, "sys_choke",
+                                           help="Sachdeva et al. (1986): critical and subcritical two-phase flow. "
+                                                "Gilbert, Ros, Baxendell and Achong: oil wells, critical flow only - "
+                                                "subcritical points fall back to Sachdeva.")
+                        cd = num(cc_[1], "Discharge coeff.", "sys_cd", 0.75, 0.3, 1.2, None, "%.3f",
+                                 help="Sachdeva discharge coefficient (0.75 typical).")
+                        if choke_method != "Sachdeva" and kind != "oil":
+                            st.caption(f"{choke_method} is for oil wells - Sachdeva will be used.")
+                    if not use_sm:
+                        friction = num(st, "Flowline friction multiplier", "sys_ffric", 1.0, 0.2, 5.0, None, "%.3f",
+                                       help="Multiplies the friction loss in the flowline and fittings (1 = as "
+                                            "calculated). Match Surface in the VLP tab can regress it from tests.")
+                    surface = wsys.SurfaceSetup(s_items, float(eqd.get("t_surround", 60.0)),
+                                                float(eqd.get("u_surface", 8.0)), s_corr, choke_method, cd, friction)
+                else:
+                    st.text_input("Surface equipment correlation",
+                                  "Not used - the top node is the wellhead" if s_items is not None else
+                                  "Not used - no surface equipment entered", disabled=True)
+                corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+                corr = sel(st, "Vertical lift correlation", corr_opts, "sys_corr",
+                           sel_c if sel_c in corr_opts else "hagedorn_brown", format_func=VLP_LABELS.get)
+                m_fit = ms.get(corr)
+                use_fit = st.toggle("Use matched parameters", value=True, key="sys_use_fit",
+                                    disabled=m_fit is None,
+                                    help="Parameter 1 and 2 from Match VLP; turn off to enter them by hand.")
+                c2 = st.columns(2)
+                if m_fit is not None and use_fit:
+                    p1, p2 = float(m_fit.p1), float(m_fit.p2)
+                    c2[0].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True)
+                    c2[1].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True)
+                    st.caption("Parameters from Match VLP.")
+                else:
+                    p1 = num(c2[0], "Parameter 1 (gravity)", f"sys_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
+                    p2 = num(c2[1], "Parameter 2 (friction)", f"sys_p2_{corr}", 1.0, 0.01, 10.0, None, "%.4f")
+                    if m_fit is None:
+                        st.caption("Not matched - run Match VLP in the VLP tab to calibrate this correlation.")
+                node_lab = sel(st, "Solution node", ["Bottom node", "Top node"], "sys_node",
+                               help="Bottom node: IPR against VLP at the bottom of the downhole equipment - the "
+                                    "solution pressure is the flowing bottom-hole pressure. Top node: inflow (IPR, "
+                                    "tubing" + (", surface equipment" if use_surface else "") + ") against the "
+                                    "top-node pressure at the " + ("manifold" if use_surface else "wellhead") +
+                                    ". The solution rate is the same at either node; only the curves change.")
+                node = "top" if node_lab == "Top node" else "bottom"
+                method = sel(st, "Rate method", RATE_METHODS, "sys_rate_method")
+                user_rates = None
+                if method == "User selected":
+                    user_rates = parse_values(st.text_input(
+                        f"Rates ({'STB/d' if kind == 'oil' else 'MMscf/d'}), comma separated", key="sys_rates",
+                        value="100, 500, 1000, 2000, 3000" if kind == "oil" else "1, 5, 10, 20, 30"))
+                lhi = sel(st, "Left-hand intersection", ["DisAllow", "Allow"], "sys_lhi")
+                flags = sel(st, "Stability flags", ["Yes", "No"], "sys_flags")
+                st.caption(f"PVT: {fluid_note}. IPR: {ss.get('ipr_meta', {}).get('model', '')} "
+                           f"(Pr {ipr_curve.pr:,.0f} psia). U = {base['u']:.4g} BTU/h/ft2/F.")
+
+            with right:
+                st.markdown("**Sensitivity**")
+                sens_on = st.toggle("Sensitivity", key="sys_sens_on",
+                                    help="Choose up to three variables; every combination of their values is calculated.")
+                var_defs = dict(wsys.OIL_VARIABLES if kind == "oil" else wsys.GAS_VARIABLES)
+                if ipr_arg("pr") is None:
+                    var_defs.pop("pr", None)
+                if ipr_arg("j") is None:
+                    var_defs.pop("j", None)
+                if ipr_arg("skin") is None:
+                    var_defs.pop("skin", None)
+                if o.flow_type != "tubing":
+                    var_defs.pop("tubing_id", None)
+                if surface is None or not wsurf.has_choke(surface.items):
+                    var_defs.pop("choke", None)
+                if surface is not None:
+                    var_defs["whp"] = "Manifold pressure (psia)"
+                sens = {}
+                if sens_on:
+                    chosen = st.multiselect("Variables (up to 3)", list(var_defs), format_func=var_defs.get,
+                                            max_selections=3, key="sys_vars")
+                    tub_id = float(eqd["downhole"][1].query("Type == 'Tubing'")["Flow ID (in)"].iloc[-1])
+                    cur = {**base, "pr": ipr_arg("pr"), "j": ipr_arg("j"), "skin": ipr_arg("skin"),
+                           "tubing_id": tub_id}
+                    if surface is not None and wsurf.has_choke(surface.items):
+                        cur["choke"] = round(next(i.d_in for i in surface.items if i.kind == "choke") * 64, 2)
+                    for v_ in chosen:
+                        with st.container(border=True):
+                            st.markdown(f"**{var_defs[v_]}** - current {cur.get(v_) if cur.get(v_) is not None else '—'}")
+                            how = st.radio("Values", ["Enter values", "Generate values"], horizontal=True,
+                                           key=f"sys_how_{v_}")
+                            try:
+                                if how == "Enter values":
+                                    vals = parse_values(st.text_input("Values, comma separated (up to 10)",
+                                                                      key=f"sys_vals_{v_}"))
+                                else:
+                                    cc = st.columns(4)
+                                    c0 = float(cur.get(v_) or 1.0)
+                                    first = num(cc[0], "First", f"sys_first_{v_}", round(c0 * 0.5, 4))
+                                    last = num(cc[1], "Last", f"sys_last_{v_}", round(c0 * 1.5 if c0 else 1.0, 4))
+                                    nval = num(cc[2], "Number", f"sys_n_{v_}", 5.0, 1.0, 10.0, 1.0, "%.0f")
+                                    spacing = sel(cc[3], "Spacing", ["Linear", "Geometric"], f"sys_sp_{v_}")
+                                    vals = list(wsys.generate_values(first, last, nval, spacing))
+                                if len(vals) > 10:
+                                    st.warning("Only the first 10 values are used.")
+                                    vals = vals[:10]
+                                if vals:
+                                    st.caption("Values: " + ", ".join(f"{x:.4g}" for x in vals))
+                                    sens[v_] = vals
+                                else:
+                                    st.caption("Enter at least one value.")
+                            except ValueError as e:
+                                st.error(str(e))
+                    n_case = int(np.prod([len(v) for v in sens.values()])) if sens else 1
+                    st.caption(f"{n_case} case(s) will be calculated.")
+
+            go = st.button("Calculate", type="primary")
+            sig = (kind, tuple(sorted(base.items())), corr, p1, p2, method, tuple(user_rates or []), lhi,
+                   tuple((k_, tuple(v_)) for k_, v_ in sens.items()), fluid_note, ipr_curve.pr,
+                   float(ipr_curve.aof), repr(surface), node)
+            if go:
+                try:
+                    combos = wsys.combinations(sens)
+                    path_cache = {}
+
+                    def path_for(tid):
+                        if tid not in path_cache:
+                            top_, secs_, pts_ = eqd["downhole"]
+                            s2 = secs_.copy()
+                            if tid is not None:
+                                s2.loc[s2["Type"] == "Tubing", "Flow ID (in)"] = float(tid)
+                            smd_, stvd_ = eqd["survey"]
+                            path_cache[tid] = wvlp.build_flow_path(top_, s2, pts_, smd_, stvd_, gmd, gt, o.flow_type)
+                        return path_cache[tid]
+
+                    def ipr_for(ch):
+                        return rebuild_ipr(ch) if ch else ipr_curve
+                    with st.spinner(f"Calculating {len(combos)} case(s)..."):
+                        res, paths_ = wsys.solve_cases(path_for, fluid, kind, base, combos, ipr_for, corr, p1, p2,
+                                                       eqd["heat_capacities"], method, 25, user_rates,
+                                                       allow_left=(lhi == "Allow"), surface=surface, node=node)
+                    for r_, c_ in zip(res, combos):
+                        r_.case_label = c_
+                    ss["sys_res"] = {"sig": sig, "res": res, "paths": paths_, "vars": list(sens), "kind": kind,
+                                     "corr": corr, "p1": p1, "p2": p2, "labels": var_defs, "surface": surface}
+                except (ValueError, TypeError, KeyError) as e:
+                    st.error(f"Calculation failed: {e}")
+            out = ss.get("sys_res")
+            if out and out["kind"] == kind:
+                if out["sig"] != sig:
+                    st.info("Inputs have changed since the last calculation - press Calculate to update.")
+                res = out["res"]
+                qcol = "Liquid rate (STB/d)" if kind == "oil" else "Gas rate (MMscf/d)"
+                if len(res) > 1:
+                    rows_ = []
+                    for r_ in res:
+                        d_ = {out["labels"][k_]: v_ for k_, v_ in r_.case_label.items()}
+                        if r_.q is not None:
+                            d_.update(wsys.surface_rates(kind, r_.params, r_.q))
+                            d_.update({"Bottom node pressure (psia)": r_.pwf})
+                            if r_.pwh_q is not None:
+                                d_["Wellhead pressure (psia)"] = r_.pwh_q
+                            d_.update({"Wellhead temperature (°F)": r_.wht_q, "Stable": "Yes" if r_.stable else "No"})
+                        d_["Note"] = r_.note
+                        rows_.append(d_)
+                    tab_ = pd.DataFrame(rows_)
+                    for c_ in ("Stable", "Note"):
+                        if c_ in tab_:
+                            tab_[c_] = tab_[c_].fillna("—")
+                    st.markdown(f"**Sensitivity results** - {len(res)} cases")
+                    st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+                    st.download_button("Download sensitivity results (CSV)", tab_.to_csv(index=False).encode(),
+                                       "system_sensitivity.csv")
+                    cc = st.columns([1.2, 1])
+                    with cc[0]:
+                        st.pyplot(sys_plot(res, kind), clear_figure=True)
+                        if len(res) > 12:
+                            st.caption("IPR/VLP plot shows the first 12 cases.")
+                    with cc[1]:
+                        names_ = [out["labels"][k_] for k_ in out["vars"]]
+                        if qcol in tab_:
+                            st.pyplot(sens_plot(tab_, names_, {n_: n_ for n_ in names_}, qcol), clear_figure=True)
+                    pick = st.selectbox("Case details", range(len(res)), key=f"sys_case_{len(res)}",
+                                        format_func=lambda i: f"Case {i + 1}: " + ", ".join(
+                                            f"{out['labels'][k_].split(' (')[0]} = {v_:g}"
+                                            for k_, v_ in res[i].case_label.items()))
+                    r = res[pick]
+                else:
+                    r = res[0]
+                st.markdown("**Results**")
+                if r.note:
+                    (st.warning if r.q is None or not r.stable else st.info)(r.note)
+                if r.q is not None:
+                    m = st.columns(5 if r.pwh_q is not None else 4)
+                    sr_ = wsys.surface_rates(kind, r.params, r.q)
+                    if kind == "oil":
+                        m[0].metric("Liquid rate", f"{r.q:,.1f} STB/d")
+                        m[1].metric("Oil rate", f"{sr_['Oil rate (STB/d)']:,.1f} STB/d")
+                    else:
+                        m[0].metric("Gas rate", f"{r.q:,.3f} MMscf/d")
+                        m[1].metric("Condensate rate", f"{sr_['Condensate rate (STB/d)']:,.1f} STB/d")
+                    m[2].metric("Bottom node pressure", f"{r.pwf:,.1f} psia")
+                    m[3].metric("Wellhead temperature", f"{r.wht_q:,.1f} °F")
+                    if r.pwh_q is not None:
+                        m[4].metric("Wellhead pressure", f"{r.pwh_q:,.1f} psia")
+                    if r.node == "top" and r.pwh_q is not None and (r.top_in_q is None or not np.isfinite(r.top_in_q)
+                                                                     or r.top_in_q > float(r.params["whp"]) + 1.0):
+                        st.caption("The surface choke is critical at the solution: the inflow at the manifold drops "
+                                   "vertically at this rate, so the manifold pressure does not affect it.")
+                    if flags == "Yes" and not r.stable:
+                        st.error("Stability flag: the solution lies left of the VLP minimum - flow is unstable "
+                                 "(heading / liquid loading).")
+                cc = st.columns([1.25, 1])
+                with cc[0]:
+                    if len(res) == 1:
+                        st.pyplot(sys_plot(res, kind), clear_figure=True)
+                    st.markdown("**IPR / VLP curve data**")
+                    rt_ = wsys.rate_table(kind, r)
+                    rt_show_ = rt_.copy()
+                    for c_ in rt_show_.columns[1:]:
+                        rt_show_[c_] = [f"{v_:,.2f}" if np.isfinite(v_) else "—" for v_ in rt_show_[c_].astype(float)]
+                    st.dataframe(rt_show_, hide_index=True, width="stretch", height=330)
+                    if r.node == "top":
+                        st.caption("Inflow pressure at top node: — where the well cannot lift the rate to the top "
+                                   "node or, with a critical choke, where the bean cannot pass it.")
+                with cc[1]:
+                    if r.q is not None:
+                        det_, reg_, prof_ = wsys.solution_details(out["paths"][r.params.get("tubing_id")], fluid, kind,
+                                                                  r.params, r.q, out["corr"], out["p1"], out["p2"],
+                                                                  eqd["heat_capacities"], surface=out.get("surface"))
+                        surf_tab_ = det_.pop("_surface", None)
+                        st.markdown("**Solution**")
+                        st.dataframe(solution_panel(kind, r, det_, reg_), hide_index=True, width="stretch",
+                                     height=560)
+                        if surf_tab_ is not None:
+                            st.markdown("**Surface equipment at the solution** (wellhead to manifold)")
+                            st.dataframe(surf_tab_.style.format(precision=2), hide_index=True, width="stretch")
+                        with st.expander("Pressure and temperature profile at the solution"):
+                            st.dataframe(prof_.style.format(precision=3), hide_index=True, width="stretch")
+                    st.download_button("Download IPR/VLP table (CSV)", rt_.to_csv(index=False).encode(),
+                                       "system_analysis.csv")
