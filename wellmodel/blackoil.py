@@ -6,7 +6,7 @@ vectorised over pressure.
 Correlation families (bubble point Pb, solution GOR Rs, oil FVF Bo)
 --------------------------------------------------------------------
 Standing (1947), Lasater (1958; Bo from Standing - Lasater published none),
-Vasquez-Beggs (1980), Glaso (1980), Petrosky-Farshad (1993), Al-Marhoun (1988).
+Vasquez-Beggs (1980; gas gravity referred to the 100 psig separator from stock-tank conditions), Glaso (1980), Petrosky-Farshad (1993), Al-Marhoun (1988).
 Above Pb, Bo uses each family's undersaturated compressibility: Petrosky-
 Farshad and Vasquez-Beggs have their own; the others use Vasquez-Beggs.
 
@@ -32,9 +32,12 @@ that do.
 Matching
 --------
 Each property is corrected linearly, corrected = P1 x correlation + P2, and
-P1/P2 are fitted to the lab data by least squares. With fewer points than
-parameters (typically a single bubble point) the minimum-change solution is
-taken, which splits the correction equally between P1 and P2. A correlation
+P1/P2 are fitted to the lab data by least squares. Solution GOR and oil FVF
+also pass through a fixed stock-tank point (GOR 0 at 14.7 psia and 60 degF;
+FVF 1.0 for gas-free oil at 60 degF), as PROSPER does, so one lab point fixes
+both parameters. With fewer points than parameters (a bubble point, or a
+viscosity point) the minimum-change solution is taken, which splits the
+correction equally between P1 and P2. A correlation
 needing P1 close to 1 and P2 close to 0 already describes the fluid well.
 """
 from __future__ import annotations
@@ -134,6 +137,12 @@ def impurity_factor(inp: PVTInputs, t):
 
 
 # ============================================================ Pb, Rs, Bo
+def vb_gas_sg(inp: "PVTInputs", t_sep=60.0, p_sep=14.7):
+    """Vazquez-Beggs gas gravity referred to a 100 psig separator: gg (1 + 5.912e-5 API Tsep log10(psep/114.7)).
+    The entered gravity is taken as stock-tank gas (separator at 14.7 psia, 60 degF), as PROSPER does."""
+    return inp.gas_sg * (1 + 5.912e-5 * inp.api * t_sep * np.log10(p_sep / 114.7))
+
+
 def _vb_coeffs(api):
     if api <= 30:
         return (0.0362, 1.0937, 25.7240), (4.677e-4, 1.751e-5, -1.811e-8)
@@ -159,7 +168,7 @@ def pb_raw(fam: str, inp: PVTInputs, rs, t):
         return pf * tr / gg
     if fam == "vazquez_beggs":
         (c1, c2, c3), _ = _vb_coeffs(api)
-        return (rs / (c1 * gg * np.exp(c3 * api / tr))) ** (1 / c2)
+        return (rs / (c1 * vb_gas_sg(inp) * np.exp(c3 * api / tr))) ** (1 / c2)
     if fam == "glaso":
         x = np.log10((rs / gg) ** 0.816 * t ** 0.172 / api ** 0.989)
         return 10 ** (1.7669 + 1.7447 * x - 0.30218 * x * x)
@@ -187,7 +196,7 @@ def rs_raw(fam: str, inp: PVTInputs, p, t):
         rs = 132755 * go * yg / (_lasater_mo(api) * (1 - yg))
     elif fam == "vazquez_beggs":
         (c1, c2, c3), _ = _vb_coeffs(api)
-        rs = c1 * gg * p ** c2 * np.exp(c3 * api / tr)
+        rs = c1 * vb_gas_sg(inp) * p ** c2 * np.exp(c3 * api / tr)
     elif fam == "glaso":
         arg = np.maximum(14.1811 - 3.3093 * np.log10(p), 0)
         pbs = 10 ** (2.8869 - np.sqrt(arg))
@@ -207,11 +216,12 @@ def bo_sat(fam: str, inp: PVTInputs, rs, t):
     rs = np.maximum(np.asarray(rs, float), 0.0)
     t = np.asarray(t, float)
     gg, api, go = inp.gas_sg, inp.api, inp.gamma_o
-    if fam in ("standing", "lasater"):
-        return 0.9759 + 0.00012 * (rs * np.sqrt(gg / go) + 1.25 * t) ** 1.2
+    if fam in ("standing", "lasater"):      # Standing (1947) original form, as PROSPER uses
+        return 0.972 + 0.000147 * (rs * np.sqrt(gg / go) + 1.25 * t) ** 1.175
     if fam == "vazquez_beggs":
         _, (a1, a2, a3) = _vb_coeffs(api)
-        return 1 + a1 * rs + a2 * (t - 60) * (api / gg) + a3 * rs * (t - 60) * (api / gg)
+        ggs = vb_gas_sg(inp)
+        return 1 + a1 * rs + a2 * (t - 60) * (api / ggs) + a3 * rs * (t - 60) * (api / ggs)
     if fam == "glaso":
         b = np.log10(rs * (gg / go) ** 0.526 + 0.968 * t)
         return 1 + 10 ** (-6.58511 + 2.91329 * b - 0.27683 * b * b)
@@ -232,7 +242,8 @@ def bo_undersat_factor(fam: str, inp: PVTInputs, p, pb, rsb, t):
     if fam == "petrosky":
         a = 4.1646e-7 * rsb ** 0.69357 * inp.gas_sg ** 0.1885 * inp.api ** 0.3272 * t ** 0.6729
         return np.exp(a * (pb ** 0.4094 - pe ** 0.4094))
-    a = (-1433 + 5 * rsb + 17.2 * t - 1180 * inp.gas_sg + 12.61 * inp.api) / 1e5
+    gg = vb_gas_sg(inp) if fam == "vazquez_beggs" else inp.gas_sg
+    a = (-1433 + 5 * rsb + 17.2 * t - 1180 * gg + 12.61 * inp.api) / 1e5
     return (pe / pb) ** (-a)
 
 
@@ -381,27 +392,33 @@ class LinearMatch:
         return self.applied + (0.0 if np.isnan(self.std) else self.std) + self.p1_penalty
 
 
-def fit_linear(x, y, lam: float = 1e-8) -> LinearMatch:
+def fit_linear(x, y, lam: float = 1e-8, anchor=None) -> LinearMatch:
     """Fit y ~ P1*x + P2. Parameters are solved as deviations from (1, 0) with
-    a vanishing ridge, so under-determined cases take the smallest correction."""
+    a vanishing ridge, so under-determined cases take the smallest correction.
+    anchor = (x0, y0): a fixed point added to the lab points (stock-tank conditions for GOR and FVF, as PROSPER
+    does) - it takes part in the fit but is not counted or scored as a lab point."""
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     ok = np.isfinite(x) & np.isfinite(y)
     x, y = x[ok], y[ok]
-    n = x.size
-    if n == 0:
+    n_lab = x.size
+    if n_lab == 0:
         return LinearMatch()
+    xl, yl = x, y
+    if anchor is not None and np.all(np.isfinite(anchor)):
+        x, y = np.append(x, anchor[0]), np.append(y, anchor[1])
+    n = x.size
     s = float(np.mean(np.abs(x))) or 1.0
     a = x / s
     d = (y - x) / s
     M = np.array([[a @ a, a.sum()], [a.sum(), n]]) + lam * n * np.eye(2)
     u, v = np.linalg.solve(M, np.array([a @ d, d.sum()]))
     p1, p2 = 1 + u, v * s
-    fit = p1 * x + p2
-    std = float(np.sqrt(np.sum(((fit - y) / y) ** 2) / (n - 2))) if n >= 3 else np.nan
-    raw = float(np.mean(np.abs(x - y) / np.abs(y)) * 100)
-    applied = float(np.mean(np.abs(fit - x) / np.abs(y)))
-    return LinearMatch(float(p1), float(p2), std, raw, n, float(np.mean(np.abs(y))), applied)
+    fit = p1 * xl + p2
+    std = float(np.sqrt(np.sum(((fit - yl) / yl) ** 2) / (n - 2))) if n >= 3 else np.nan
+    raw = float(np.mean(np.abs(xl - yl) / np.abs(yl)) * 100)
+    applied = float(np.mean(np.abs(fit - xl) / np.abs(yl)))
+    return LinearMatch(float(p1), float(p2), std, raw, n_lab, float(np.mean(np.abs(yl))), applied)
 
 
 # ------------------------------------------------------------ lab data
@@ -509,6 +526,16 @@ def correlation_values(kind, fam, inp: PVTInputs, data: MatchData, vfam_for_rs="
     return out
 
 
+T_STD = 60.0
+
+
+def stock_tank_anchors(fam, inp):
+    """Fixed matching points at stock-tank conditions: no gas in solution at 14.7 psia and 60 degF, and gas-free
+    oil with FVF 1.0 at 60 degF. They keep the corrected GOR and FVF curves pinned at the stock tank."""
+    return {"rs": (float(_rs_corr(fam, inp, P_STD, T_STD)), 0.0),
+            "bo": (float(bo_sat(fam, inp, 0.0, T_STD)), 1.0)}
+
+
 PROPS = {"pb": "Bubble Point", "rs": "Solution GOR", "bo": "Oil FVF", "visc": "Oil Viscosity"}
 
 
@@ -586,9 +613,10 @@ def match_all(inp: PVTInputs, data: MatchData) -> MatchResult:
         if not available("pb", f):
             continue
         vals = correlation_values("pb", f, inp, data)
+        anchors = stock_tank_anchors(f, inp)
         for prop in ("pb", "rs", "bo"):
             x, y = vals[prop]
-            matches[(prop, f)] = fit_linear(x, y)
+            matches[(prop, f)] = fit_linear(x, y, anchor=anchors.get(prop))
     for f in VISC_FAMILIES:
         if not available("visc", f):
             continue

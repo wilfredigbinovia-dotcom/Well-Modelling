@@ -26,7 +26,7 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 98 tests
+pytest -q                       # 100 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
@@ -146,6 +146,15 @@ tests/                pytest suite
 ```
 
 ## Validation so far
+
+**Against PROSPER - PVT matching (real oil, one lab point at the bubble point; API 30, GOR 345 scf/STB).** PROSPER reports pressures in psig, so its bubble-point P2 values sit ~15 psi from the tool's psia values; allowing for that:
+
+- Bubble point: Glaso, Standing, Vazquez-Beggs, Petrosky and Al-Marhoun agree (P1 within 0.001). Vazquez-Beggs agrees after applying the published separator correction of gas gravity (stock-tank gas referred to 100 psig), which PROSPER applies.
+- Solution GOR: P1 within 0.001 for Glaso, Standing, Vazquez-Beggs, Al-Marhoun, within 0.5 % for Petrosky - once the match passes through the stock-tank point (GOR 0 at 14.7 psia and 60 °F) as PROSPER's does.
+- Oil FVF (through FVF 1.0 for gas-free oil at 60 °F): the raw correlation FVF at the lab point agrees with PROSPER to 5 digits for Glaso, Standing, Vazquez-Beggs, Petrosky and Al-Marhoun (Standing uses its original 1947 form 0.972 + 0.000147 F^1.175, as PROSPER does). P1 agrees within 0.1 % for Glaso and ~1.5 % for the others because PROSPER's stock-tank anchor value differs slightly; the matched curves differ by at most 0.2 % (Standing, Vazquez-Beggs, Petrosky) and 3.5 % for Al-Marhoun at low pressure.
+- Oil viscosity: Beal, Beggs and Petrosky identical; Egbogah differs (PROSPER's raw value ~6.2 cp against 1.3 cp here - its Egbogah variant is not the published Egbogah-Jack + Beggs-Robinson pair).
+- Lasater differs (PROSPER's bubble point ~25 % lower than the published Lasater chart fits used here). De Ghetto, Bergman-Sutton and De Ghetto Mod are not implemented.
+
 
 On synthetic data with a known answer (truth: Hagedorn & Brown, gravity 1.04, friction 1.15, PI 2.61):
 

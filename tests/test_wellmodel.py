@@ -1104,3 +1104,27 @@ def test_vfp_table_matches_vlp_and_eclipse_format():
     with pytest.raises(ValueError):
         wlc.vfp_table(path, oil, "oil", "hagedorn_brown", 1, 1, 4.17, np.arange(1, 41), np.arange(1, 41),
                       np.arange(0, 20), np.arange(1, 10))
+
+
+# ----------------------------------------------- PVT behaviour checked against PROSPER
+def test_vazquez_beggs_uses_separator_corrected_gas_gravity_like_prosper():
+    inp = bo.PVTInputs(rsb=345.067, api=30.016, gas_sg=0.595)
+    assert bo.vb_gas_sg(inp) == pytest.approx(0.5385, abs=1e-4)
+    # PROSPER's raw Vazquez-Beggs bubble point for this oil (back-calculated from its match table): 2552.8 psig
+    assert float(bo.pb_raw("vazquez_beggs", inp, 345.067, 152.961)) == pytest.approx(2552.8 + 14.7, abs=1.5)
+
+
+def test_gor_and_fvf_matches_pass_through_stock_tank_point():
+    inp = bo.PVTInputs(rsb=345.067, api=30.016, gas_sg=0.595)
+    tbl = pd.DataFrame({"Pressure": [2552.1], "Gas Oil Ratio": [345.07], "Oil FVF": [1.1932], "Oil Viscosity": [1.23]})
+    res = bo.match_all(inp, bo.MatchData(152.961, 2552.1, tbl))
+    for f in ("glaso", "standing", "petrosky"):
+        a = bo.stock_tank_anchors(f, inp)
+        rs, bo_ = res.matches[("rs", f)], res.matches[("bo", f)]
+        assert rs.p1 * a["rs"][0] + rs.p2 == pytest.approx(0.0, abs=1e-3)     # GOR 0 at the stock tank
+        assert bo_.p1 * a["bo"][0] + bo_.p2 == pytest.approx(1.0, abs=1e-5)   # FVF 1 for gas-free oil
+        assert rs.n == 1 and bo_.n == 1                                       # the anchor is not a lab point
+    # PROSPER's P1 for these (same oil): GOR Glaso 0.98264, Standing 0.77787; FVF Glaso 1.36126
+    assert res.matches[("rs", "glaso")].p1 == pytest.approx(0.98264, abs=2e-3)
+    assert res.matches[("rs", "standing")].p1 == pytest.approx(0.77787, abs=2e-3)
+    assert res.matches[("bo", "glaso")].p1 == pytest.approx(1.36126, abs=5e-3)
