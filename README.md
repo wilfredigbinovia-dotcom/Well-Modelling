@@ -26,7 +26,7 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 94 tests
+pytest -q                       # 98 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
@@ -80,6 +80,12 @@ The app is being rebuilt tab by tab. It currently has six tabs:
 
    **Sensitivity** - pick up to three variables (top node pressure, water cut / WGR, GOR / separator GOR, reservoir pressure, PI, skin, tubing ID, U value, choke size in 64ths when the manifold is the top node - only those the current IPR supports), enter up to 10 values each or generate them with linear or geometric spacing; every combination is calculated (limit 500). Shows a results table (CSV download), IPR/VLP curves for the cases, a solution-rate sensitivity plot and full details for any chosen case. Cases that do not flow or only intersect left of the VLP minimum are flagged.
 
+   **Gradient traverse** - the same inputs (top node, pressures, ratios, correlation with its matched parameters, surface equipment) at up to six rates: a summary per rate (manifold, wellhead and bottom-node pressure, wellhead temperature, gravity, friction and choke losses, velocity/erosional ratio), plots of pressure, temperature, liquid holdup (with no-slip holdup) and mixture v erosional velocity against TVD, the surface equipment item by item, and the full profile at every node (superficial velocities, in-situ density, elevation and friction gradients) with a CSV of all rates. No IPR is needed.
+
+   **Lift curves (VFP tables)** - bottom-node pressure for every combination of rate (generated, linear or geometric), top-node pressure, water cut / WGR and GOR / CGR, in one vectorised calculation (up to 20,000 points; ~3,000 in a few seconds). With the manifold as top node each point is worked back through the surface equipment first. Plots the curves for any water/gas fraction, flags points where BHP falls as THP rises or exceeds 30,000 psia, and exports an **Eclipse VFPPROD** include file (FIELD units: FLO = LIQ in STB/d with WCT and GOR in Mscf/STB for oil; FLO = GAS in Mscf/d with WGR and OGR in STB/Mscf for gas; datum = bottom-node TVD; ALQ 0) and a flat CSV. No IPR is needed.
+
+**Project files (sidebar).** *Save project* downloads one `.wellmodel.json` file with every input on every tab, all tables (lab PVT, IPR test and layer tables, survey, surface and downhole equipment, geothermal gradient, well tests), the PRP file, the accepted U value and IPR adjustments, and the VLP and surface matches. *Open project* replaces the current model with a saved one (the PVT match is repeated automatically); *New project* clears everything. The file is plain JSON - opening it never runs code - and calculation results are not stored: press Calculate after opening.
+
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
 
 ```python
@@ -123,6 +129,8 @@ wellmodel/
   eos.py            PRP import, PR/SRK equation of state, flash, envelope, separators
   inflow.py         IPR models (oil, gas/condensate), multi-rate fitting, pseudo-pressure
   inflow_adv.py     fractured, horizontal, dual-porosity, multilayer, friction, modified isochronal
+  liftcurves.py     lift-curve (VFP) tables and the Eclipse VFPPROD writer
+  project.py        project files: JSON save/open of inputs, tables and accepted matches
   surface.py        surface equipment: flowline/fittings march, Sachdeva and Gilbert-type chokes, line cooling
   system.py         system analysis: multi-case VLP/IPR solve, sensitivity combinations, solution details
   vlp.py            VLP engine: flow path, fluids (black oil, wet gas, EOS grid), heat loss, U estimate, comparison, P1/P2 match, VLP/IPR

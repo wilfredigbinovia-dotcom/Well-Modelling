@@ -417,9 +417,13 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         transit += L / max(vm, 1e-9)
         vms.append(vm)
         ves.append(ve)
+        hl0 = float(hl[0])
         rows.append({"MD (ft)": path.md[i + 1], "TVD (ft)": path.tvd[i + 1], "Pressure (psia)": P[i + 1],
-                     "Temperature (°F)": T[i + 1], "Liquid holdup": float(hl[0]), "No-slip holdup": lam,
-                     "Mixture velocity (ft/s)": vm, "Erosional velocity (ft/s)": ve})
+                     "Temperature (°F)": T[i + 1], "Liquid holdup": hl0, "No-slip holdup": lam,
+                     "Superficial liquid velocity (ft/s)": vsl, "Superficial gas velocity (ft/s)": vsg,
+                     "Mixture velocity (ft/s)": vm, "Erosional velocity (ft/s)": ve,
+                     "In-situ density (lb/ft3)": hl0 * float(s["rho_l"][0]) + (1 - hl0) * float(s["rho_g"][0]),
+                     "Elevation gradient (psi/ft)": p1 * float(e[0]), "Friction gradient (psi/ft)": p2 * float(f[0])})
     regimes = {}
     for r in surf_rows or []:
         if r["Type"] == "Choke":
@@ -444,7 +448,9 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
     }
     if surf_rows:
         det["_surface"] = surface_table(surf_rows)
-    return det, regimes, pd.DataFrame(rows)
+    top = {k: np.nan for k in rows[0]} if rows else {}
+    top.update({"MD (ft)": path.md[0], "TVD (ft)": path.tvd[0], "Pressure (psia)": P[0], "Temperature (°F)": T[0]})
+    return det, regimes, pd.DataFrame([top] + rows)
 
 
 def surface_table(rows) -> pd.DataFrame:

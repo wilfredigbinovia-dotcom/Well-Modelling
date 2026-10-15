@@ -1024,3 +1024,83 @@ def test_surface_match_recovers_cd_and_friction():
     assert m2.fitted == ("cd",) and m2.friction == 1.0 and m2.cd == pytest.approx(0.85, abs=0.01)
     with pytest.raises(ValueError):
         wsurf.match_surface(items, oil, "oil", tests.assign(pman=np.nan), twh)
+
+
+# ------------------------------------------------------------------ project files
+from wellmodel import project as wproj
+
+
+def test_project_file_round_trip_keeps_tables_types_and_values():
+    df = pd.DataFrame({"Label": ["Manifold", None, "Choke"], "Type": ["Manifold", None, "Choke"],
+                       "Pipe Length (ft)": [np.nan, 3000.0, np.nan]}, index=pd.RangeIndex(1, 4, name="Point"))
+    df["Label"] = df["Label"].astype(object)
+    state = {"inputs": {"ipr_pr": 3100.0, "pvt_sel_pb": "standing", "sys_vars": ["whp", "wc"], "flag": True},
+             "widgets": {"opt_fluid_type": "oil"}, "tables": {"eq_surface": df},
+             "extras": {"vlp_matches": [{"correlation": "hagedorn_brown", "p1": np.float64(1.04),
+                                         "residuals": np.array([1.0, np.nan]), "n": np.int64(4)}],
+                        "prp_text": "COMPONENTS\nC1 ..."}}
+    text = wproj.dumps(state, "Well A-1")
+    back = wproj.loads(text)
+    assert back["name"] == "Well A-1" and back["inputs"] == state["inputs"] and back["widgets"] == state["widgets"]
+    t = back["tables"]["eq_surface"]
+    assert t.index.name == "Point" and list(t.index) == [1, 2, 3] and t["Label"].dtype == object
+    assert t["Label"].tolist() == ["Manifold", None, "Choke"] and t["Pipe Length (ft)"].dtype == float
+    assert np.isnan(t.iloc[0, 2]) and t.iloc[1, 2] == 3000.0
+    m = back["extras"]["vlp_matches"][0]
+    assert m["p1"] == 1.04 and m["n"] == 4 and np.isnan(m["residuals"][1])
+    assert back["extras"]["prp_text"].startswith("COMPONENTS")
+
+
+def test_project_file_rejects_foreign_and_newer_files():
+    with pytest.raises(ValueError):
+        wproj.loads(b'{"hello": 1}')
+    with pytest.raises(ValueError):
+        wproj.loads(b"not json")
+    with pytest.raises(ValueError):
+        wproj.loads('{"format": "wellmodel-project", "version": 99}')
+    with pytest.raises(TypeError):
+        wproj.dumps({"inputs": {"x": object()}})
+
+
+# ------------------------------------------------------------- gradient traverse and lift curves
+from wellmodel import liftcurves as wlc
+
+
+def test_traverse_profile_has_wellhead_row_and_gradients():
+    *_, path, oil = _vlp_setup()
+    det, reg, prof = wsys.solution_details(path, oil, "oil", {"whp": 250.0, "u": 4.17, "wc": 20.0, "gor": 750.0},
+                                           1000.0, "hagedorn_brown", 1.04, 1.15)
+    assert len(prof) == len(path.md) and prof["Pressure (psia)"].iloc[0] == pytest.approx(250.0)
+    assert prof["Pressure (psia)"].iloc[-1] == pytest.approx(det["Bottom node pressure (psia)"])
+    g = prof.iloc[1:]
+    assert (g["Elevation gradient (psi/ft)"] > 0).all() and (g["Friction gradient (psi/ft)"] >= 0).all()
+    assert ((g["In-situ density (lb/ft3)"] > 0) & (g["In-situ density (lb/ft3)"] < 70)).all()
+
+
+def test_vfp_table_matches_vlp_and_eclipse_format():
+    *_, path, oil = _vlp_setup()
+    flo = np.geomspace(50, 4000, 11)
+    axes, bhp, _ = wlc.vfp_table(path, oil, "oil", "hagedorn_brown", 1.04, 1.15, 4.17, flo, [300, 100], [0, 30],
+                                 [750, 400], weq.HeatCapacities())
+    assert bhp.shape == (2, 2, 2, 11) and list(axes[0]) == [100.0, 300.0] and list(axes[2]) == [400.0, 750.0]
+    ref = wvlp.vlp_curve(path, oil, pd.Series({"thp": 300.0, "q": 1.0, "wc": 0.3, "gor": 750.0}), axes[3],
+                         "hagedorn_brown", 1.04, 1.15, 4.17)
+    assert np.allclose(bhp[1, 1, 1], ref, atol=1e-6)
+    txt = wlc.eclipse_vfpprod("oil", axes, bhp, 3, float(path.tvd[-1]))
+    lines = [l for l in txt.splitlines() if not l.startswith("--")]
+    assert lines[0] == "VFPPROD" and lines[1].split()[:2] == ["3", f"{path.tvd[-1]:.2f}"]
+    assert "'LIQ'" in lines[1] and "'WCT'" in lines[1] and "'GOR'" in lines[1]
+    assert max(len(l) for l in txt.splitlines()) <= 132
+    body = " ".join(lines[2:])
+    recs = [r.split() for r in body.split("/") if r.strip()]
+    assert len(recs) == 5 + 2 * 2 * 2                                  # FLO THP WFR GFR ALQ + data records
+    assert [float(x) for x in recs[2]] == [0.0, 0.3] and [float(x) for x in recs[3]] == [0.4, 0.75]   # WCT, Mscf/STB
+    assert all(len(r) == 4 + 11 for r in recs[5:])
+    assert float(recs[5][4]) == pytest.approx(bhp[0, 0, 0, 0], abs=0.01)
+    gas_txt = wlc.eclipse_vfpprod("gas", ([500.0], [10.0], [20.0], np.array([1.0, 5.0])), np.ones((1, 1, 1, 2)))
+    g_lines = [l for l in gas_txt.splitlines() if not l.startswith("--")]
+    assert "'GAS'" in g_lines[1] and g_lines[2].split()[:2] == ["1000", "5000"]                 # Mscf/d
+    assert g_lines[4].split()[0] == "0.01" and g_lines[5].split()[0] == "0.02"                # STB/Mscf
+    with pytest.raises(ValueError):
+        wlc.vfp_table(path, oil, "oil", "hagedorn_brown", 1, 1, 4.17, np.arange(1, 41), np.arange(1, 41),
+                      np.arange(0, 20), np.arange(1, 10))
