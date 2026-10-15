@@ -267,8 +267,9 @@ def test_matched_model_honours_measured_bubble_point():
 def test_unverified_correlations_not_calculated():
     inp, data = bo.example_data()
     r = bo.match_all(inp, data)
-    assert ("pb", "de_ghetto") not in r.matches
-    assert ("visc", "bergman_sutton") not in r.matches
+    assert ("pb", "de_ghetto") in r.matches                 # verified against PROSPER (heavy-oil form)
+    assert ("visc", "bergman_sutton") in r.matches and ("visc", "de_ghetto") in r.matches
+    assert r.table("visc")["Bergman-Sutton"].notna().all()
     assert r.table("visc")["De Ghetto Mod"].isna().all()
 
 
@@ -1128,3 +1129,48 @@ def test_gor_and_fvf_matches_pass_through_stock_tank_point():
     assert res.matches[("rs", "glaso")].p1 == pytest.approx(0.98264, abs=2e-3)
     assert res.matches[("rs", "standing")].p1 == pytest.approx(0.77787, abs=2e-3)
     assert res.matches[("bo", "glaso")].p1 == pytest.approx(1.36126, abs=5e-3)
+
+
+def test_de_ghetto_heavy_oil_pb_rs_fvf_match_prosper():
+    """PROSPER 'De Ghetto et al (Heavy oil)' on a real oil (API 30.03, GOR 345, gas gravity 0.595, 153 degF):
+    raw values recovered from PROSPER's matched table and match parameters."""
+    inp = bo.PVTInputs(rsb=345, api=30.03, gas_sg=0.595, salinity_ppm=3000, co2=0.28, n2=0.1)
+    assert float(bo._pb_corr("de_ghetto", inp, 153.0)) == pytest.approx(2170.7, rel=2e-3)
+    p = np.array([2044.54, 2304.78, 2538.99])
+    assert np.allclose(bo._rs_corr("de_ghetto", inp, p, 153.0), [320.975, 370.860, 416.761], rtol=1e-3)
+    data = bo.MatchData(153.0, 2552.0, pd.DataFrame({"Pressure": [2552.0], "Gas Oil Ratio": [345.0],
+                                                     "Oil FVF": [1.193], "Oil Viscosity": [1.23]}))
+    res = bo.match_all(inp, data)
+    m = bo.BlackOilModel(inp, "de_ghetto", "beal", {k: res.matches[(k, "de_ghetto")] for k in ("pb", "rs", "bo")})
+    t = m.table(153.0, [2044.54, 2304.78, 2538.99, 3059.46])
+    assert np.allclose(t["Solution GOR (scf/STB)"], [263.857, 305.009, 342.875, 345.0], rtol=1e-3)
+    assert np.allclose(t["Oil FVF (RB/STB)"], [1.15894, 1.17621, 1.19211, 1.1877], rtol=1e-3)
+
+
+def test_heavy_oil_viscosities_match_prosper_unmatched_table():
+    """PROSPER unmatched viscosity on the real oil (API 30.03, 153 degF). PROSPER's table pairs each viscosity
+    correlation with a bubble-point correlation: Egbogah (Heavy oil) with Vazquez-Beggs, De Ghetto with Al-Marhoun,
+    Petrosky with (PROSPER's) Lasater - bubble point 1838.93 psia."""
+    inp = bo.PVTInputs(rsb=345, api=30.03, gas_sg=0.595, salinity_ppm=3000, co2=0.28, n2=0.1)
+    p = np.array([2044.54, 2434.89, 3059.46])
+    eg = bo.BlackOilModel(inp, "vazquez_beggs", "egbogah").table(153.0, p)["Oil viscosity (cp)"]
+    assert np.allclose(eg, [7.98023, 6.59778, 6.30390], rtol=1e-3)
+    dg = bo.BlackOilModel(inp, "al_marhoun", "de_ghetto").table(153.0, p)["Oil viscosity (cp)"]
+    assert np.allclose(dg, [3.61410, 3.06842, 2.34818], rtol=2e-3)
+    mob = bo.visc_live("petrosky", bo.visc_dead("petrosky", inp, 153.0), 345.0)
+    assert np.allclose(bo.visc_undersat("petrosky", mob, p, 1838.93), [1.52458, 1.60643, 1.73739], rtol=1e-3)
+    for fam, pb in (("glaso", 2476.49), ("standing", 2051.66), ("petrosky", 2662.09), ("al_marhoun", 3060.0)):
+        assert float(bo._pb_corr(fam, inp, 153.0)) == pytest.approx(pb, rel=3e-4)     # no impurity correction
+
+
+def test_bergman_sutton_matches_prosper_at_and_above_bubble_point():
+    """Bergman-Sutton as published (SPE 110194 dead oil with Watson K 12.1, SPE 110195 saturated, SPE 103144
+    undersaturated) against PROSPER, paired with Petrosky's bubble point as in PROSPER's table."""
+    inp = bo.PVTInputs(rsb=345, api=30.03, gas_sg=0.595, salinity_ppm=3000, co2=0.28, n2=0.1, watson_k=12.1)
+    p = np.array([2747.18, 2903.32, 3059.46])
+    v = bo.BlackOilModel(inp, "petrosky", "bergman_sutton").table(153.0, p)["Oil viscosity (cp)"]
+    assert np.allclose(v, [1.92805, 1.96147, 1.99286], rtol=3e-3)
+    data = bo.MatchData(153.0, 2552.0, pd.DataFrame({"Pressure": [2552.0], "Gas Oil Ratio": [345.0],
+                                                     "Oil FVF": [1.193], "Oil Viscosity": [1.23]}))
+    m = bo.match_all(inp, data).matches[("visc", "bergman_sutton")]
+    assert m.p1 == pytest.approx(0.82253, abs=2e-3) and m.p2 == pytest.approx(-0.33829, abs=5e-3)

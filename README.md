@@ -26,7 +26,7 @@ Oilfield units throughout: psia, °F, STB/d, scf/STB, ft, in, cp.
 ```bash
 pip install -e ".[app]"
 streamlit run app.py            # point-and-click app in your browser
-pytest -q                       # 100 tests
+pytest -q                       # 103 tests
 jupyter notebook notebooks/demo.ipynb
 ```
 
@@ -147,13 +147,14 @@ tests/                pytest suite
 
 ## Validation so far
 
-**Against PROSPER - PVT matching (real oil, one lab point at the bubble point; API 30, GOR 345 scf/STB).** PROSPER reports pressures in psig, so its bubble-point P2 values sit ~15 psi from the tool's psia values; allowing for that:
+**Against PROSPER - PVT (real oil: API 30.03, GOR 345 scf/STB, gas gravity 0.595, CO2 0.28 %, N2 0.1 %; one lab point at the 2552 psia bubble point, 153 °F).** Compared on PROSPER's match parameters and on its calculated PVT tables, matched and unmatched, 2045-3060 psia:
 
-- Bubble point: Glaso, Standing, Vazquez-Beggs, Petrosky and Al-Marhoun agree (P1 within 0.001). Vazquez-Beggs agrees after applying the published separator correction of gas gravity (stock-tank gas referred to 100 psig), which PROSPER applies.
-- Solution GOR: P1 within 0.001 for Glaso, Standing, Vazquez-Beggs, Al-Marhoun, within 0.5 % for Petrosky - once the match passes through the stock-tank point (GOR 0 at 14.7 psia and 60 °F) as PROSPER's does.
-- Oil FVF (through FVF 1.0 for gas-free oil at 60 °F): the raw correlation FVF at the lab point agrees with PROSPER to 5 digits for Glaso, Standing, Vazquez-Beggs, Petrosky and Al-Marhoun (Standing uses its original 1947 form 0.972 + 0.000147 F^1.175, as PROSPER does). P1 agrees within 0.1 % for Glaso and ~1.5 % for the others because PROSPER's stock-tank anchor value differs slightly; the matched curves differ by at most 0.2 % (Standing, Vazquez-Beggs, Petrosky) and 3.5 % for Al-Marhoun at low pressure.
-- Oil viscosity: Beal, Beggs and Petrosky identical; Egbogah differs (PROSPER's raw value ~6.2 cp against 1.3 cp here - its Egbogah variant is not the published Egbogah-Jack + Beggs-Robinson pair).
-- Lasater differs (PROSPER's bubble point ~25 % lower than the published Lasater chart fits used here). De Ghetto, Bergman-Sutton and De Ghetto Mod are not implemented.
+- Unmatched bubble point: Glaso, Standing, Petrosky and Al-Marhoun within 0.02 % once the Glaso N2/CO2/H2S correction is off (PROSPER does not apply it - now the default); Vazquez-Beggs and De Ghetto within 0.06 %.
+- Solution GOR and oil FVF, unmatched and matched: within 0.25 % for Glaso, Standing, Vazquez-Beggs, Petrosky, Al-Marhoun and De Ghetto (Standing FVF uses its original 1947 form, as PROSPER). Exception: Al-Marhoun matched FVF 0.7 % - PROSPER's stock-tank anchor value differs.
+- Oil viscosity: Beal, Beggs and Petrosky within 0.07 %; De Ghetto (heavy oil: modified Egbogah-Jack A-7, modified Kartoatmodjo A-9/A-11, SPE 30316) within 0.1 %; PROSPER's "Egbogah et al (Heavy oil)" - De Ghetto's modified Egbogah-Jack dead oil (A-6) with Petrosky live and undersaturated viscosity - within 0.06 %. Match parameters agree to 4-5 digits. PROSPER's PVT table pairs each viscosity column with the bubble-point correlation in the same position (Beal-Glaso, Beggs-Standing, Petrosky-Lasater, Egbogah-Vazquez-Beggs, Bergman-Sutton-Petrosky, De Ghetto-Al-Marhoun), which must be allowed for when comparing.
+- De Ghetto bubble point and GOR are De Ghetto's heavy-oil modified Vazquez-Beggs (gas gravity referred to 100 psig) and its FVF is Vazquez-Beggs, as in PROSPER.
+- Bergman-Sutton is implemented as published: dead oil SPE 110194 (modified Twu with a Watson K input, default 12.1), saturated SPE 110195 (eqs 4-6 as corrected in 2009), undersaturated SPE 103144. With K = 12.1 it matches PROSPER above the bubble point within 0.2 % and the match parameters within 0.06 %; below the bubble point PROSPER's curve is steeper and the tool is up to 7 % lower at 2045 psia (PROSPER's saturated form evidently differs from the published equations; PROSPER does not show the Watson K it uses).
+- Not reproduced: Lasater (PROSPER's chart fit differs in shape - its raw bubble point is 1839 psia against 2440 from the published fits) and De Ghetto Mod (PROSPER's own, unpublished; unavailable in the tool).
 
 
 On synthetic data with a known answer (truth: Hagedorn & Brown, gravity 1.04, friction 1.15, PI 2.61):

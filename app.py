@@ -333,7 +333,8 @@ UNITS = {"Pressure": "psia", "Gas Oil Ratio": "scf/STB", "Oil FVF": "RB/STB",
          "Oil Viscosity": "centipoise"}
 N_ROWS = 15
 INPUT_DEFAULTS = {"pvt_rsb": 500.0, "pvt_api": 35.0, "pvt_gg": 0.75, "pvt_sal": 50000.0,
-                  "pvt_h2s": 0.0, "pvt_co2": 0.0, "pvt_n2": 0.0, "pvt_t": 200.0, "pvt_pb": 0.0}
+                  "pvt_h2s": 0.0, "pvt_co2": 0.0, "pvt_n2": 0.0, "pvt_t": 200.0, "pvt_pb": 0.0,
+                  "pvt_kw": 12.1}
 
 
 def empty_table(n=N_ROWS) -> pd.DataFrame:
@@ -371,7 +372,7 @@ def current_inputs() -> tuple[bo.PVTInputs, bo.MatchData]:
     g = lambda k: float(val(k, INPUT_DEFAULTS[k]))
     inp = bo.PVTInputs(rsb=g("pvt_rsb"), api=g("pvt_api"), gas_sg=g("pvt_gg"), salinity_ppm=g("pvt_sal"),
                        h2s=g("pvt_h2s"), co2=g("pvt_co2"), n2=g("pvt_n2"),
-                       correct_impurities=bool(val("pvt_impurity_corr", True)))
+                       correct_impurities=bool(val("pvt_impurity_corr", False)), watson_k=g("pvt_kw"))
     data = bo.MatchData(temperature=g("pvt_t"), bubble_point=g("pvt_pb") if g("pvt_pb") > 0 else None,
                         table=ss.get("pvt_table_current", ss["pvt_table"]))
     return inp, data
@@ -689,10 +690,15 @@ with tabs[1]:
         num(c[0], "Mole Percent H2S (percent)", "pvt_h2s", 0.0, 0.0, 100.0, 0.1)
         num(c[1], "Mole Percent CO2 (percent)", "pvt_co2", 0.0, 0.0, 100.0, 0.1)
         num(c[2], "Mole Percent N2 (percent)", "pvt_n2", 0.0, 0.0, 100.0, 0.1)
-        flag(c[3].checkbox, "Correct bubble point for N2, CO2, H2S", "pvt_impurity_corr",
-                      help="Glaso (1980) non-hydrocarbon correction factors, applied to every "
-                           "bubble-point correlation. Impurities also correct the gas Z-factor "
-                           "(Wichert-Aziz).")
+        flag(c[3].checkbox, "Correct bubble point for N2, CO2, H2S", "pvt_impurity_corr", False,
+                      help="Glaso (1980) non-hydrocarbon correction factors on every bubble-point correlation. "
+                           "Off by default - PROSPER does not apply them. Impurities always correct the gas "
+                           "Z-factor (Wichert-Aziz).")
+        c = st.columns(4)
+        num(c[0], "Watson K factor (Bergman-Sutton only)", "pvt_kw", INPUT_DEFAULTS["pvt_kw"], 10.0, 13.5, 0.05,
+            help="Characterises the oil for the Bergman-Sutton dead-oil viscosity (SPE 110194). Paraffinic 12.2-12.9, "
+                 "intermediate 11.5-12.2, naphthenic 10.5-11.5. 12.1 reproduces PROSPER's Bergman-Sutton values "
+                 "on the test oil.")
 
         # ---------------------------------------------------------- lab data
         st.subheader("Match data")

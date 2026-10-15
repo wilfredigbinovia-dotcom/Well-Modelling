@@ -63,15 +63,12 @@ VISC_FAMILIES = {
     "beal": "Beal et al",
     "beggs": "Beggs et al",
     "petrosky": "Petrosky et al",
-    "egbogah": "Egbogah et al",
+    "egbogah": "Egbogah et al (Heavy oil)",
     "bergman_sutton": "Bergman-Sutton",
-    "de_ghetto": "De Ghetto et al",
+    "de_ghetto": "De Ghetto et al (Heavy oil)",
     "de_ghetto_mod": "De Ghetto Mod",
 }
 UNAVAILABLE = {
-    ("pb", "de_ghetto"): "De Ghetto et al. (1995, SPE 30316) coefficients not verified",
-    ("visc", "bergman_sutton"): "Bergman-Sutton (2007, SPE 110194/110195) coefficients not verified",
-    ("visc", "de_ghetto"): "De Ghetto et al. (1995, SPE 30316) dead/saturated coefficients not verified",
     ("visc", "de_ghetto_mod"): "PROSPER's proprietary modification - formulation not published",
 }
 # Approximate API and temperature (degF) ranges of each correlation's dataset.
@@ -82,10 +79,12 @@ RANGES = {
     ("pb", "glaso"): ((22.3, 48.1), (80, 280)),
     ("pb", "petrosky"): ((16.3, 45.0), (114, 288)),
     ("pb", "al_marhoun"): ((19.4, 44.6), (74, 240)),
+    ("pb", "de_ghetto"): ((10.0, 22.3), (131, 250)),
     ("visc", "beal"): ((10.1, 52.5), (98, 250)),
     ("visc", "beggs"): ((16.0, 58.0), (70, 295)),
     ("visc", "petrosky"): ((25.4, 46.1), (114, 288)),
-    ("visc", "egbogah"): ((5.0, 58.0), (59, 176)),
+    ("visc", "egbogah"): ((0.0, 22.3), (59, 250)),
+    ("visc", "de_ghetto"): ((10.0, 22.3), (131, 250)),
 }
 
 
@@ -103,7 +102,8 @@ class PVTInputs:
     h2s: float = 0.0           # mole percent
     co2: float = 0.0
     n2: float = 0.0
-    correct_impurities: bool = True   # Glaso non-hydrocarbon correction on Pb
+    correct_impurities: bool = False  # Glaso non-hydrocarbon correction on Pb (PROSPER does not apply it)
+    watson_k: float = 12.1            # Watson characterisation factor (Bergman-Sutton dead-oil viscosity only)
 
     @property
     def gamma_o(self) -> float:
@@ -177,6 +177,8 @@ def pb_raw(fam: str, inp: PVTInputs, rs, t):
         return 112.727 * (rs ** 0.577421 / (gg ** 0.8439 * 10 ** x) - 12.340)
     if fam == "al_marhoun":
         return 5.38088e-3 * rs ** 0.715082 * gg ** -1.87784 * go ** 3.1437 * tr ** 1.32657
+    if fam == "de_ghetto":         # heavy-oil modified Vazquez-Beggs (De Ghetto et al. 1995), as PROSPER
+        return (56.434 * rs / (vb_gas_sg(inp) * 10 ** (10.9267 * api / tr))) ** (1 / 1.2057)
     raise KeyError(fam)
 
 
@@ -206,6 +208,8 @@ def rs_raw(fam: str, inp: PVTInputs, p, t):
         rs = ((p / 112.727 + 12.340) * gg ** 0.8439 * 10 ** x) ** 1.73184
     elif fam == "al_marhoun":
         rs = (185.843208 * p * gg ** 1.87784 * go ** -3.1437 * tr ** -1.32657) ** 1.398441
+    elif fam == "de_ghetto":
+        rs = vb_gas_sg(inp) * p ** 1.2057 / 56.434 * 10 ** (10.9267 * api / tr)
     else:
         raise KeyError(fam)
     return np.maximum(rs, 0.0)
@@ -218,7 +222,7 @@ def bo_sat(fam: str, inp: PVTInputs, rs, t):
     gg, api, go = inp.gas_sg, inp.api, inp.gamma_o
     if fam in ("standing", "lasater"):      # Standing (1947) original form, as PROSPER uses
         return 0.972 + 0.000147 * (rs * np.sqrt(gg / go) + 1.25 * t) ** 1.175
-    if fam == "vazquez_beggs":
+    if fam in ("vazquez_beggs", "de_ghetto"):         # De Ghetto keeps the Vazquez-Beggs FVF
         _, (a1, a2, a3) = _vb_coeffs(api)
         ggs = vb_gas_sg(inp)
         return 1 + a1 * rs + a2 * (t - 60) * (api / ggs) + a3 * rs * (t - 60) * (api / ggs)
@@ -242,12 +246,45 @@ def bo_undersat_factor(fam: str, inp: PVTInputs, p, pb, rsb, t):
     if fam == "petrosky":
         a = 4.1646e-7 * rsb ** 0.69357 * inp.gas_sg ** 0.1885 * inp.api ** 0.3272 * t ** 0.6729
         return np.exp(a * (pb ** 0.4094 - pe ** 0.4094))
-    gg = vb_gas_sg(inp) if fam == "vazquez_beggs" else inp.gas_sg
+    gg = vb_gas_sg(inp) if fam in ("vazquez_beggs", "de_ghetto") else inp.gas_sg
     a = (-1433 + 5 * rsb + 17.2 * t - 1180 * gg + 12.61 * inp.api) / 1e5
     return (pe / pb) ** (-a)
 
 
 # ============================================================ viscosity
+def _bs_vcf(go, t):
+    """ASTM volume correction factor with the Bergman-Sutton coefficients for crude oil (SPE 110194 eq. 11)."""
+    rho60 = 0.999012 * go
+    a = (2.5042e-4 + 8.302e-5 * rho60) / rho60 ** 2
+    dt = t - 60.0
+    return np.exp(-a * dt * (1 + 0.8 * a * dt))
+
+
+def bergman_sutton_dead(api, t, kw):
+    """Bergman & Sutton (2007, SPE 110194): modified Twu kinematic viscosity at 100 and 210 degF from Watson K and
+    gravity, converted to absolute viscosity, then Bergman's double-log temperature line (eq. 8)."""
+    go = 141.5 / (131.5 + api)
+    tb = (go * kw) ** 3                                                    # degR
+    tc = tb / (0.533272 + 1.91017e-4 * tb + 7.79681e-8 * tb ** 2 - 2.84376e-11 * tb ** 3 + 9.59468e27 / tb ** 13)
+    al = 1 - tb / tc
+    nu2 = np.exp(2.40219 - 9.59688 * al + 3.45656 * al ** 2 - 143.632 * al ** 4) + 0.152995
+    l2 = np.log(nu2)
+    nu1 = np.exp(0.701254 + 1.38359 * l2 + 0.103604 * l2 ** 2)
+    dg = go - (0.843593 - 0.128624 * al - 3.36159 * al ** 3 - 13749.5 * al ** 12)
+    x = abs(2.68316 - 62.0863 / tb ** 0.5)
+    f2 = x * dg - 47.6033 * dg ** 2 / tb ** 0.5
+    f1 = 0.980633 * x * dg - 47.6033 * dg ** 2 / tb ** 0.5
+    k = 232.442 / tb
+    nu210 = np.exp(np.log(nu2 + k) * ((1 + 2 * f2) / (1 - 2 * f2)) ** 2) - k
+    nu100 = np.exp(np.log(nu1 + k) * ((1 + 2 * f1) / (1 - 2 * f1)) ** 2) - k
+    mu100 = nu100 * 0.999012 * go * _bs_vcf(go, 100.0)
+    mu210 = nu210 * 0.999012 * go * _bs_vcf(go, 210.0)
+    y1, y2 = np.log(np.log(mu100 + 1)), np.log(np.log(mu210 + 1))
+    x1, x2 = np.log(410.0), np.log(520.0)
+    b = (y2 - y1) / (x2 - x1)
+    return np.exp(np.exp(y1 + b * (np.log(np.asarray(t, float) + 310) - x1))) - 1
+
+
 def visc_dead(fam: str, inp: PVTInputs, t):
     t = np.asarray(t, float)
     api = inp.api
@@ -259,8 +296,12 @@ def visc_dead(fam: str, inp: PVTInputs, t):
     if fam == "petrosky":
         x = 4.59388 * np.log10(t) - 22.82792
         return 2.3511e7 * t ** -2.10255 * np.log10(api) ** x
-    if fam == "egbogah":
-        return 10 ** (10 ** (1.8653 - 0.025086 * api - 0.5644 * np.log10(t))) - 1
+    if fam == "bergman_sutton":
+        return bergman_sutton_dead(api, t, inp.watson_k)
+    if fam == "egbogah":           # PROSPER "Egbogah (Heavy oil)": De Ghetto's modified Egbogah-Jack (A-6)
+        return 10 ** (10 ** (1.90296 - 0.012619 * api - 0.61748 * np.log10(t))) - 1
+    if fam == "de_ghetto":         # De Ghetto et al. (1995) heavy oil, modified Egbogah-Jack (A-7)
+        return 10 ** (10 ** (2.06492 - 0.0179 * api - 0.70226 * np.log10(t))) - 1
     raise KeyError(fam)
 
 
@@ -270,9 +311,17 @@ def visc_live(fam: str, mu_od, rs):
         a = 10 ** (rs * (2.2e-7 * rs - 7.4e-4))
         b = 0.68 / 10 ** (8.62e-5 * rs) + 0.25 / 10 ** (1.1e-3 * rs) + 0.062 / 10 ** (3.74e-3 * rs)
         return a * mu_od ** b
-    if fam in ("beggs", "egbogah"):
+    if fam == "beggs":
         return 10.715 * (rs + 100) ** -0.515 * mu_od ** (5.44 * (rs + 150) ** -0.338)
-    if fam == "petrosky":
+    if fam == "bergman_sutton":    # SPE 110195, eqs 4-6 (as corrected April 2009)
+        a = 1 / (1 + (rs / 344.198) ** 0.855344)
+        b = 0.382323 + (1 - 0.382323) / (1 + (rs / 567.953) ** 0.819326)
+        return a * mu_od ** b
+    if fam == "de_ghetto":         # modified Kartoatmodjo, heavy oil (A-9)
+        y = 10 ** (-0.00081 * rs)
+        f = (0.2478 + 0.6114 * 10 ** (-0.000845 * rs)) * mu_od ** (0.4731 + 0.5158 * y)
+        return -0.6311 + 1.078 * f - 0.003653 * f * f
+    if fam in ("petrosky", "egbogah"):
         a = 0.1651 + 0.6165 * 10 ** (-6.0866e-4 * rs)
         b = 0.5131 + 0.5109 * 10 ** (-1.1831e-3 * rs)
         return a * mu_od ** b
@@ -284,11 +333,18 @@ def visc_undersat(fam: str, mu_ob, p, pb):
     dp = np.maximum(p - pb, 0.0)
     if fam == "beal":
         return mu_ob + 0.001 * dp * (0.024 * mu_ob ** 1.6 + 0.038 * mu_ob ** 0.56)
-    if fam in ("beggs", "egbogah"):
+    if fam == "bergman_sutton":    # SPE 103144, eqs 7-9
+        lm = np.log(mu_ob)
+        a = 6.5698e-7 * lm ** 2 - 1.48211e-5 * lm + 2.27877e-4
+        b = 2.24623e-2 * lm + 0.873204
+        return mu_ob * np.exp(a * dp ** b)
+    if fam == "de_ghetto":         # modified Kartoatmodjo, heavy oil (A-11)
+        return 0.9886 * mu_ob + 0.002763 * dp * (-0.01153 * mu_ob ** 1.7933 + 0.0316 * mu_ob ** 1.5939)
+    if fam == "beggs":
         pe = np.maximum(p, pb)
         m = 2.6 * pe ** 1.187 * np.exp(-11.513 - 8.98e-5 * pe)
         return mu_ob * (pe / pb) ** m
-    if fam == "petrosky":
+    if fam in ("petrosky", "egbogah"):
         x = np.log10(mu_ob)
         a = -1.0146 + 1.3322 * x - 0.4876 * x * x - 1.15036 * x ** 3
         return mu_ob + 1.3449e-3 * dp * 10 ** a
@@ -516,6 +572,8 @@ def correlation_values(kind, fam, inp: PVTInputs, data: MatchData, vfam_for_rs="
     else:
         p = tbl["Pressure"].to_numpy(float)
         rs_pt, above = _point_rs(inp, tbl, pb, vfam_for_rs, t)
+        if pb is not None:
+            above = p > pb               # at the bubble point itself viscosity is the saturated value (as PROSPER)
         mod = visc_dead(fam, inp, t)
         x = visc_live(fam, mod, rs_pt)
         if pb is not None:
@@ -691,7 +749,7 @@ class BlackOilModel:
         bo = self._m("bo").apply(bo)
         mod = visc_dead(vf, inp, t)
         mu = visc_live(vf, mod, rs)
-        mu = np.where(above, visc_undersat(vf, visc_live(vf, mod, inp.rsb), p, pb), mu)
+        mu = np.where(p > pb, visc_undersat(vf, visc_live(vf, mod, inp.rsb), p, pb), mu)
         mu = self._m("visc").apply(mu)
         rho_o = (62.428 * inp.gamma_o + 0.0136 * rs * inp.gas_sg) / bo
         z, bg, rho_g, mu_g = gas_props(inp, p, t)
