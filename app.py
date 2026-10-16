@@ -35,6 +35,11 @@ from wellmodel import system as wsys
 from wellmodel import surface as wsurf
 from wellmodel import project as wproj
 from wellmodel import liftcurves as wlc
+try:                                    # PROSPER-style grids with per-cell locking; optional dependency
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
+    HAVE_AGGRID = True
+except ImportError:                     # falls back to st.data_editor
+    HAVE_AGGRID = False
 from wellmodel.correlations import LABELS as VLP_LABELS
 from wellmodel import equipment as weq
 from wellmodel import schematic as wsch
@@ -1607,6 +1612,65 @@ def set_grid(name, df):
     ss["_ver_eq_" + name] = ss.get("_ver_eq_" + name, 0) + 1
 
 
+LOCKED_CELL = "#b9dcef"          # PROSPER's light blue for cells that take no input
+
+
+def type_grid(name, types, active, numeric_cols, select_cols=None, height=None):
+    """Equipment table where each row's Type decides which cells accept input, as in PROSPER: locked cells are
+    shaded and cannot be edited. active: {type: [open columns]}; select_cols: {column: options}.
+    Returns the edited table (index 'Point'). Uses AG Grid when available, otherwise st.data_editor."""
+    import json as _json
+    select_cols = select_cols or {}
+    base = ss["eq_" + name]
+    ver = ss.get("_ver_eq_" + name, 0)
+    if not HAVE_AGGRID:
+        cfg = {"Type": st.column_config.SelectboxColumn(options=types),
+               **{c_: st.column_config.SelectboxColumn(options=o_, width="medium") for c_, o_ in select_cols.items()},
+               **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in numeric_cols}}
+        return track("eq_" + name, st.data_editor(base, key=f"eq_{name}_ed_{ver}", num_rows="fixed",
+                                                  width="stretch", column_config=cfg))
+    df = base.reset_index()
+    idx = df.columns[0]
+    for c_ in numeric_cols:
+        df[c_] = pd.to_numeric(df[c_], errors="coerce").astype(float)
+    act = _json.dumps({t_: sorted(v_) for t_, v_ in active.items()})
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_default_column(resizable=True, sortable=False, filter=False, suppressMovable=True,
+                                wrapHeaderText=True, autoHeaderHeight=True, flex=1, minWidth=88)
+    gb.configure_column(idx, editable=False, width=62, flex=0, pinned="left",
+                        cellStyle={"color": "#6b7280", "textAlign": "center"})
+    gb.configure_column("Label", editable=True, minWidth=110, flex=1.3)
+    gb.configure_column("Type", editable=True, minWidth=120, flex=1.3, cellEditor="agSelectCellEditor",
+                        cellEditorParams={"values": [""] + list(types)})
+
+    def is_open(col):
+        return f"const a={act}; const t=p.data['Type']; return !!(t && a[t] && a[t].includes({_json.dumps(col)}));"
+    for c_ in [c_ for c_ in df.columns if c_ not in (idx, "Label", "Type")]:
+        kw = dict(editable=JsCode(f"function(p){{{is_open(c_)}}}"),
+                  cellStyle=JsCode(f"function(p){{const ok=(function(){{{is_open(c_)}}})(); "
+                                   f"return ok ? {{'backgroundColor': ''}} : {{'backgroundColor': '{LOCKED_CELL}'}};}}"))
+        if c_ in select_cols:
+            gb.configure_column(c_, minWidth=150, flex=1.8, cellEditor="agSelectCellEditor",
+                                cellEditorParams={"values": [""] + list(select_cols[c_])}, **kw)
+        else:
+            gb.configure_column(c_, type=["numericColumn"],
+                                valueParser=JsCode("function(p){const v=String(p.newValue).trim(); "
+                                                   "if(v==='') return null; const x=Number(v); "
+                                                   "return isNaN(x) ? p.oldValue : x;}"), **kw)
+    gb.configure_grid_options(singleClickEdit=True, stopEditingWhenCellsLoseFocus=True, rowHeight=32,
+                              suppressColumnVirtualisation=True)
+    r = AgGrid(df, gridOptions=gb.build(), allow_unsafe_jscode=True, update_on=["cellValueChanged"],
+               key=f"eq_{name}_ag_{ver}", height=height or 36 + 32 * min(len(df), 14), theme="streamlit")
+    out = r["data"] if r is not None and r.get("data") is not None else df
+    out = pd.DataFrame(out).reindex(columns=df.columns).set_index(idx)
+    out.index = base.index
+    for c_ in numeric_cols:
+        out[c_] = pd.to_numeric(out[c_], errors="coerce").astype(float)
+    for c_ in [c_ for c_ in out.columns if c_ not in numeric_cols]:
+        out[c_] = [v_ if isinstance(v_, str) and v_.strip() else None for v_ in out[c_]]
+    return track("eq_" + name, out)
+
+
 def grid(name, column_config, height="auto"):
     ed_key = f"eq_{name}_ed_{ss.get('_ver_eq_' + name, 0)}"
     return track("eq_" + name, st.data_editor(ss["eq_" + name], key=ed_key, num_rows="fixed", width="stretch",
@@ -1805,21 +1869,23 @@ with tabs[3]:
         t_sur = num(c[0], "Surrounding temperature (deg F)", "eq_tsur", 60.0, -60.0, 200.0)
         u_sur = num(c[1], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_usur", 8.0, 0.0, 1000.0,
                     help="Flowline to surroundings: roughly 1-2 buried, 5-10 bare pipe in air, higher in water.")
-        st.caption("Cells open according to the type in each row, as in PROSPER: a value typed into a locked cell is "
-                   "cleared. Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed.")
-        with st.expander("Which cells each type opens", expanded=False):
-            s_cols = ["Fitting"] + weq.SURFACE_NUMERIC
-            s_short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Pipe Inside ", "Pipe ") for c_ in s_cols}
-            s_guide = pd.DataFrame([{s_short[c_]: ("open" if c_ in weq.surface_active_columns(t_) else "")
-                                     for c_ in s_cols} for t_ in weq.SURFACE_TYPES], index=weq.SURFACE_TYPES)
-            st.dataframe(s_guide.style.apply(lambda d: np.where(d == "", "background-color: rgba(120, 170, 215, 0.35)",
-                                                                "background-color: rgba(120, 200, 140, 0.25)"),
-                                             axis=None), width="stretch")
-            st.caption("Green: accepts input. Blue: locked for that type (anything typed there is cleared).")
-        ed_s = grid("surface", {
-            "Type": st.column_config.SelectboxColumn(options=weq.SURFACE_TYPES),
-            "Fitting": st.column_config.SelectboxColumn(options=list(weq.FITTINGS), width="medium"),
-            **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.SURFACE_COLUMNS[3:]}})
+        st.caption(("Cells open according to the type in each row, as in PROSPER: shaded cells take no input. "
+                    if HAVE_AGGRID else "Cells open according to the type in each row, as in PROSPER: a value typed "
+                    "into a locked cell is cleared. ")
+                   + "Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed.")
+        if not HAVE_AGGRID:
+            with st.expander("Which cells each type opens", expanded=True):
+                s_cols = ["Fitting"] + weq.SURFACE_NUMERIC
+                s_short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Pipe Inside ", "Pipe ") for c_ in s_cols}
+                s_guide = pd.DataFrame([{s_short[c_]: ("open" if c_ in weq.surface_active_columns(t_) else "")
+                                         for c_ in s_cols} for t_ in weq.SURFACE_TYPES], index=weq.SURFACE_TYPES)
+                st.dataframe(s_guide.style.apply(lambda d: np.where(d == "", "background-color: rgba(120, 170, 215, 0.35)",
+                                                                    "background-color: rgba(120, 200, 140, 0.25)"),
+                                                 axis=None), width="stretch")
+                st.caption("Green: accepts input. Blue: locked for that type (anything typed there is cleared).")
+        ed_s = type_grid("surface", weq.SURFACE_TYPES,
+                         {t_: weq.surface_active_columns(t_) for t_ in weq.SURFACE_TYPES},
+                         weq.SURFACE_NUMERIC, {"Fitting": list(weq.FITTINGS)})
         s_clean = weq.apply_surface_rules(ed_s)
         if not weq.same_table(s_clean, ed_s):            # entry in a locked cell, or a new type needing defaults
             set_grid("surface", s_clean)
@@ -1842,25 +1908,24 @@ with tabs[3]:
                                     "every tubing row." if ft != "tubing" else ""))
         with st.expander("Equipment types"):
             st.markdown("\n".join(f"- **{k}** - {v}" for k, v in weq.TYPE_HELP.items()))
-        st.caption("Cells open according to the type in each row, as in PROSPER: a value typed into a locked cell is "
-                   "cleared. "
-                   "Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed."
+        st.caption(("Cells open according to the type in each row, as in PROSPER: shaded cells take no input. "
+                    if HAVE_AGGRID else "Cells open according to the type in each row, as in PROSPER: a value typed "
+                    "into a locked cell is cleared. ")
+                   + "Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed."
                    + (" Annular flow also opens tubing OD/outside roughness and casing ID/roughness on tubing "
                       "rows." if ft != "tubing" else ""))
-        with st.expander("Which cells each type opens", expanded=False):
-            short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Tubing ", "Tbg ").replace(
-                "Casing ", "Csg ").replace("Inside ", "In. ").replace("Outside ", "Out. ") for c_ in weq.DH_NUMERIC}
-            guide = pd.DataFrame([{short[c_]: ("open" if c_ in weq.active_columns(t_, ft) else "")
-                                   for c_ in weq.DH_NUMERIC} for t_ in weq.DOWNHOLE_TYPES], index=weq.DOWNHOLE_TYPES)
-            st.dataframe(guide.style.apply(lambda d: np.where(d == "", "background-color: rgba(120, 170, 215, 0.35)",
-                                                              "background-color: rgba(120, 200, 140, 0.25)"), axis=None),
-                         width="stretch")
-            st.caption("Green: accepts input. Blue: locked for that type (anything typed there is cleared).")
-        dh_base = ss["eq_downhole"]
-        ed_d = track("eq_downhole", st.data_editor(
-            dh_base, key=f"eq_downhole_ed_{ss.get('_ver_eq_downhole', 0)}", num_rows="fixed", width="stretch",
-            column_config={"Type": st.column_config.SelectboxColumn(options=weq.DOWNHOLE_TYPES),
-                           **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.DOWNHOLE_COLUMNS[2:]}}))
+        if not HAVE_AGGRID:
+            with st.expander("Which cells each type opens", expanded=True):
+                short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Tubing ", "Tbg ").replace(
+                    "Casing ", "Csg ").replace("Inside ", "In. ").replace("Outside ", "Out. ") for c_ in weq.DH_NUMERIC}
+                guide = pd.DataFrame([{short[c_]: ("open" if c_ in weq.active_columns(t_, ft) else "")
+                                       for c_ in weq.DH_NUMERIC} for t_ in weq.DOWNHOLE_TYPES], index=weq.DOWNHOLE_TYPES)
+                st.dataframe(guide.style.apply(lambda d: np.where(d == "", "background-color: rgba(120, 170, 215, 0.35)",
+                                                                  "background-color: rgba(120, 200, 140, 0.25)"), axis=None),
+                             width="stretch")
+                st.caption("Green: accepts input. Blue: locked for that type (anything typed there is cleared).")
+        ed_d = type_grid("downhole", weq.DOWNHOLE_TYPES,
+                         {t_: weq.active_columns(t_, ft) for t_ in weq.DOWNHOLE_TYPES}, weq.DH_NUMERIC)
         dh_clean = weq.apply_cell_rules(ed_d, ft)
         if not weq.same_table(dh_clean, ed_d):          # entry in a locked cell, or a new type needing defaults
             set_grid("downhole", dh_clean)
