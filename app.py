@@ -2306,8 +2306,12 @@ def accept_surface(cd, friction, corr):
 
 
 def accept_ipr(key, value, label):
+    """Write the adjusted value to the IPR Data tab and go straight to VLP/IPR: the IPR tab runs before this
+    one, so the rerun rebuilds the IPR with the new value and VLP/IPR is recalculated against it."""
     put(key, float(value))
     ss["vlp_adj_accepted"] = label
+    ss["vlp_adj_just"] = label
+    ss["vlp_action"] = "VLP/IPR"
     ss.pop("vlp_vi", None)
 
 
@@ -2660,6 +2664,10 @@ with tabs[4]:
                         vi = pd.DataFrame(rows_)
                         ss["vlp_vi"] = vi
                         if action == "VLP/IPR":
+                            just_ = ss.pop("vlp_adj_just", None)
+                            if just_:
+                                st.success(f"Adjust IPR accepted: {just_} written to the IPR Data tab. The IPR has "
+                                           "been rebuilt and VLP/IPR recalculated with it.")
                             st.caption(f"VLP: {mm.label} matched (P1 {mm.p1:.3f}, P2 {mm.p2:.3f}) at each test's "
                                        f"THP and ratios. IPR: {ss.get('ipr_meta', {}).get('model', '')} from the IPR "
                                        "tab, rebuilt at each test's reservoir pressure where possible. A good IPR "
@@ -2715,12 +2723,27 @@ with tabs[4]:
                                 st.info("This IPR model has no adjustable PI, hand-entered skin or reservoir pressure.")
                             else:
                                 how = st.radio("Parameter", avail, horizontal=True, key="vlp_adj_how")
-                                if bhp_t <= 0 or (np.isfinite(t["pr"]) and bhp_t >= t["pr"] and how != "Adjust pressure"):
-                                    st.warning("The VLP bottomhole pressure at the test rate is not below the reservoir "
-                                               "pressure - adjust the reservoir pressure, or check the test.")
                                 res_txt, accept = None, None
+                                pr_t = float(t["pr"]) if np.isfinite(t["pr"]) else float(ipr_curve.pr)
+                                no_drawdown = how != "Adjust pressure" and bhp_t >= pr_t
+                                if bhp_t <= 0:
+                                    st.warning("The VLP gives no bottomhole pressure at the test rate - check the test.")
+                                elif no_drawdown:
+                                    dd_ = (f" At the current PI ({float(ipr_arg('j')):.4g} STB/d/psi) the drawdown for "
+                                           f"{t['q']:,.0f} STB/d is only {q_t / float(ipr_arg('j')):,.1f} psi, so a VLP "
+                                           "difference of a few tens of psi is enough to cause this."
+                                           if meta.get("model") == "P.I. Entry" and ipr_arg("j")
+                                           and q_t / float(ipr_arg("j")) < 100 else "")
+                                    st.warning(
+                                        f"The matched VLP gives {bhp_t:,.1f} psia at the test rate, {bhp_t - pr_t:,.1f} psi "
+                                        f"above the reservoir pressure ({pr_t:,.1f} psia). No "
+                                        f"{'PI' if how == 'Adjust PI' else 'skin'} can make the well flow at this "
+                                        f"bottomhole pressure.{dd_} Options: **Adjust pressure** (the reservoir pressure "
+                                        "that makes the IPR pass through the test point), or check the test's THP, "
+                                        "reservoir pressure and gauge data and the VLP match.")
                                 try:
-                                    pr_t = float(t["pr"]) if np.isfinite(t["pr"]) else float(ipr_curve.pr)
+                                    if bhp_t <= 0 or no_drawdown:
+                                        raise StopIteration
                                     base = {"pr": pr_t} if ipr_arg("pr") is not None and how != "Adjust pressure" else {}
                                     if how == "Adjust PI":
                                         j0 = float(ipr_arg("j"))
@@ -2742,12 +2765,16 @@ with tabs[4]:
                                         accept = ("ipr_skin", new_entered, f"skin = {new_entered:.3g}")
                                     else:
                                         f_ = lambda p_: float(rebuild_ipr({"pr": p_}).rate(bhp_t)) - q_t
-                                        p_new = brentq(f_, bhp_t + 1.0, max(bhp_t * 4, bhp_t + 8000), xtol=0.01)
+                                        p_new = brentq(f_, bhp_t + 1e-3, max(bhp_t * 4, bhp_t + 8000), xtol=0.01)
                                         p0 = float(ipr_curve.pr)
                                         res_txt = f"Reservoir pressure {p0:,.0f} → **{p_new:,.1f} psia**"
                                         accept = ("ipr_pr", p_new, f"reservoir pressure = {p_new:,.1f} psia")
+                                except StopIteration:
+                                    pass
                                 except (ValueError, RuntimeError, TypeError) as e:
-                                    st.error(f"No solution found: {e}")
+                                    st.error("No value of this parameter makes the IPR pass through the test point "
+                                             "(rate at the VLP bottomhole pressure)." if "different signs" in str(e)
+                                             else f"No solution found: {e}")
                                 if res_txt:
                                     st.success(res_txt)
                                     if accept[0] == "ipr_pr" and np.isfinite(t["pr"]) and abs(accept[1] - t["pr"]) > 50:
