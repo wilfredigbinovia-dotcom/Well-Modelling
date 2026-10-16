@@ -75,6 +75,7 @@ ipr, ipr2, wmpp = _RecordIPR(_ipr_mod), _RecordIPR(_ipr2_mod), _RecordIPR(_mpp_m
 st.markdown("""<style>
 [data-testid="stNumberInputStepDown"], [data-testid="stNumberInputStepUp"] {display: none !important;}
 [data-testid="stNumberInputContainer"] input {padding-right: 0.75rem;}
+section[data-testid="stSidebar"][aria-expanded="true"] {min-width: 380px;}
 </style>""", unsafe_allow_html=True)
 
 
@@ -169,7 +170,7 @@ def track(store_key, edited):
     return edited
 
 
-# ================================================================ project files (sidebar)
+# ================================================================ project files
 PROJECT_WIDGETS = ("eq_filter_on", "sys_sens_on", "sys_vars", "sys_rates", "vlp_cmp_corrs", "vlp_match_corrs",
                    "vlp_sfit")
 PROJECT_WIDGET_PREFIXES = ("opt_", "sys_how_", "sys_vals_", "trav_rates_", "vfp_thp_", "vfp_wfr_", "vfp_gfr_")
@@ -260,13 +261,30 @@ def apply_project(data, fname):
 
 def new_project():
     _clear_session()
+    ss["proj_name"] = "my_well"
     ss["_proj_msg"] = ("success", "New project - all inputs cleared.")
 
 
 if "_proj_pending" in ss:
     apply_project(*ss.pop("_proj_pending"))
 
-st.title("🛢️ wellmodel")
+hdr = st.columns([5, 2.4, 0.42, 0.42, 0.42], vertical_alignment="bottom", gap="small")
+hdr[0].title("🛢️ wellmodel")
+pname = hdr[1].text_input("Project name", key="proj_name", **dflt("proj_name", value="my_well"),
+                          help="Press Enter after typing - the save button then writes <name>.wellmodel.json.")
+save_slot = hdr[2]                                          # filled at the end, once every tab has run
+with hdr[3].popover("", icon=":material/folder_open:", help="Open project"):
+    st.file_uploader("Open project", type=["json"], key=_uploader_key(), on_change=queue_project,
+                     args=(_uploader_key(),),
+                     help="A .wellmodel.json file saved from this tool. Replaces the current model.")
+    st.caption("Replaces the current model; the PVT match is repeated automatically. Calculation results are "
+               "not saved - press Calculate after opening.")
+hdr[4].button("", icon=":material/note_add:", on_click=new_project, help="New project - clears every input",
+              key="proj_new")
+_msg = ss.pop("_proj_msg", None)
+if _msg:
+    getattr(st, _msg[0])(_msg[1])
+schematic_svg = None
 
 TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP", "6 · Calculation"]
 tabs = st.tabs(TAB_NAMES)
@@ -1942,7 +1960,7 @@ with tabs[3]:
             if len(pts):
                 st.markdown("**Components**")
                 st.dataframe(pts.style.format(precision=3, na_rep="—"), hide_index=True, width="stretch")
-            st.caption("The well schematic is shown below the equipment sections once every section is complete.")
+            st.caption("The well schematic is shown in the sidebar once every section is complete.")
     bottom_md = float(secs["MD bottom (ft)"].max()) if len(secs) else None
 
     # ----------------------------------------------------- geothermal gradient
@@ -1990,40 +2008,36 @@ with tabs[3]:
                      hide_index=True, width="stretch")
     all_ok = all(not any(l == "error" for l, _ in v) for v in status.values())
     st.divider()
-    st.subheader("Well schematic")
+    st.subheader("String summary")
     if all_ok and len(secs):
         has_choke = "Choke" in set(weq.surface_summary(ed_s).get("Type", pd.Series(dtype=str)))
         svg = wsch.well_schematic_svg(top_md, secs, pts, o.completion if o else "cased_hole",
                                       o.sand_control if o else "none", has_choke)
-        cc = st.columns([1, 1.25])
-        with cc[0]:
-            st.image(svg, width="content")
-        with cc[1]:
-            st.markdown("**String summary**")
-            rows_ = [{"Item": "Xmas tree", "MD (ft)": top_md, "ID (in)": np.nan}]
-            rows_ += [{"Item": (f'{r["Type"]} shoe' if r["Type"] == "Casing" else "End of tubing")
-                       if r["Label"] == r["Type"] else f'{r["Label"]} ({r["Type"].lower()})',
-                       "MD (ft)": r["MD bottom (ft)"], "ID (in)": r["Flow ID (in)"]}
-                      for i_, (_, r) in enumerate(secs.iterrows())
-                      if r["Type"] == "Casing" or i_ == len(secs) - 1 or secs.iloc[i_ + 1]["Type"] != "Tubing"
-                      or secs.iloc[i_ + 1]["Flow ID (in)"] != r["Flow ID (in)"]]
-            rows_ += [{"Item": r["Label"] if r["Label"] == r["Type"] else f'{r["Label"]} ({r["Type"]})',
-                       "MD (ft)": r["MD (ft)"], "ID (in)": r["ID (in)"]} for _, r in pts.iterrows()]
-            summ_ = pd.DataFrame(rows_).sort_values("MD (ft)", kind="stable")
-            if survey_ok:
-                summ_["TVD (ft)"] = weq.tvd_at(md_s, tvd_s, summ_["MD (ft)"])
-            if len(gmd) >= 2:
-                summ_["Formation temperature (°F)"] = weq.temperature_at(gmd, gtemp, summ_["MD (ft)"])
-            fmt_ = {c_: "{:,.1f}" for c_ in summ_.columns if c_ not in ("Item", "ID (in)")}
-            fmt_["ID (in)"] = "{:.3f}"
-            st.dataframe(summ_.style.format(fmt_, na_rep="—"),
-                         hide_index=True, width="stretch")
-            st.caption(f"Completion: {o.label('completion').lower() if o else 'cased hole'}; sand control: "
-                       f"{o.label('sand_control').lower() if o else 'none'} (from the Options summary). "
-                       "Depth spacing is stretched so every component stays readable.")
-            st.download_button("Download schematic (SVG)", svg.encode(), "well_schematic.svg", "image/svg+xml")
+        schematic_svg = svg
+        rows_ = [{"Item": "Xmas tree", "MD (ft)": top_md, "ID (in)": np.nan}]
+        rows_ += [{"Item": (f'{r["Type"]} shoe' if r["Type"] == "Casing" else "End of tubing")
+                   if r["Label"] == r["Type"] else f'{r["Label"]} ({r["Type"].lower()})',
+                   "MD (ft)": r["MD bottom (ft)"], "ID (in)": r["Flow ID (in)"]}
+                  for i_, (_, r) in enumerate(secs.iterrows())
+                  if r["Type"] == "Casing" or i_ == len(secs) - 1 or secs.iloc[i_ + 1]["Type"] != "Tubing"
+                  or secs.iloc[i_ + 1]["Flow ID (in)"] != r["Flow ID (in)"]]
+        rows_ += [{"Item": r["Label"] if r["Label"] == r["Type"] else f'{r["Label"]} ({r["Type"]})',
+                   "MD (ft)": r["MD (ft)"], "ID (in)": r["ID (in)"]} for _, r in pts.iterrows()]
+        summ_ = pd.DataFrame(rows_).sort_values("MD (ft)", kind="stable")
+        if survey_ok:
+            summ_["TVD (ft)"] = weq.tvd_at(md_s, tvd_s, summ_["MD (ft)"])
+        if len(gmd) >= 2:
+            summ_["Formation temperature (°F)"] = weq.temperature_at(gmd, gtemp, summ_["MD (ft)"])
+        fmt_ = {c_: "{:,.1f}" for c_ in summ_.columns if c_ not in ("Item", "ID (in)")}
+        fmt_["ID (in)"] = "{:.3f}"
+        st.dataframe(summ_.style.format(fmt_, na_rep="—"),
+                     hide_index=True, width="stretch")
+        st.caption(f"Completion: {o.label('completion').lower() if o else 'cased hole'}; sand control: "
+                   f"{o.label('sand_control').lower() if o else 'none'} (from the Options summary). "
+                   "The well schematic is in the sidebar.")
     else:
-        st.info("The schematic appears once every equipment section above is complete (no ❌ in the status table).")
+        st.info("The string summary and well schematic appear once every equipment section above is complete "
+                "(no ❌ in the status table).")
     ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": ed_s, "t_surround": t_sur,
                        "u_surface": u_sur, "downhole": (top_md, secs, pts), "geothermal": (gmd, gtemp),
                        "u_geo": u_geo, "heat_capacities": hc,
@@ -3433,26 +3447,24 @@ with tabs[5]:
                 vfp_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface)
 
 
-# ================================================================ project files (sidebar)
-with st.sidebar:
-    st.header("Project")
-    pname = st.text_input("Project name", key="proj_name", **dflt("proj_name", value="my_well"))
+# ================================================================ save button (top bar) and schematic (sidebar)
+with save_slot:
     try:
         payload = wproj.dumps(project_state(), pname)
         ss["_proj_payload"] = payload
         fname = _file_stem(pname)
-        st.download_button(f"💾 Save as {fname}.wellmodel.json", payload.encode(), f"{fname}.wellmodel.json",
-                           "application/json", width="stretch",
-                           help="Downloads every input, table and accepted match as one file.")
-        st.caption("Press Enter after typing the name - the button shows the file name that will be saved.")
+        st.download_button("", payload.encode(), f"{fname}.wellmodel.json", "application/json",
+                           icon=":material/save:", key="proj_save", on_click="ignore",
+                           help=f"Save project as {fname}.wellmodel.json - every input, table and accepted match.")
     except TypeError as e:
-        st.error(f"Project cannot be saved: {e}")
-    st.file_uploader("Open project", type=["json"], key=_uploader_key(), on_change=queue_project,
-                     args=(_uploader_key(),),
-                     help="A .wellmodel.json file saved from this tool. Replaces the current model.")
-    st.button("New project", on_click=new_project, width="stretch")
-    msg = ss.pop("_proj_msg", None)
-    if msg:
-        getattr(st, msg[0])(msg[1])
-    st.caption("Saved: inputs on every tab, all tables, the PRP file, accepted U, IPR adjustments, VLP and surface "
-               "matches. Calculation results are not saved - press Calculate after opening.")
+        st.button("", icon=":material/error:", disabled=True, help=f"Project cannot be saved: {e}", key="proj_save")
+
+with st.sidebar:
+    st.header("Well schematic")
+    if schematic_svg is not None:
+        st.image(schematic_svg, width="stretch")
+        st.caption("Depth spacing is stretched so every component stays readable.")
+        st.download_button("Download schematic (SVG)", schematic_svg.encode(), "well_schematic.svg",
+                           "image/svg+xml", width="stretch")
+    else:
+        st.info("The schematic appears once every section of the Equipment Data tab is complete.")
