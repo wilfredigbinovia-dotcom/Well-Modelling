@@ -109,6 +109,44 @@ def _f(v):
     return v
 
 
+# Cells each surface type unlocks, as in PROSPER's surface equipment screen.
+SURFACE_NUMERIC = SURFACE_COLUMNS[3:]
+SURFACE_DEFAULTS = {"Pipe Inside Roughness (in)": 0.0006, "Rate Multiplier": 1.0}
+
+
+def surface_active_columns(row_type):
+    """Input columns (numeric and the Fitting name) open for a surface row of this type."""
+    ln, tvd, d, e, rm = SURFACE_NUMERIC
+    if row_type == "Manifold":
+        return {tvd}
+    if row_type == "Line Pipe":
+        return {ln, tvd, d, e, rm}
+    if row_type == "Choke":
+        return {d, rm}
+    if row_type == "Fitting":
+        return {"Fitting", d, rm}
+    return set()
+
+
+def apply_surface_rules(df):
+    """Clear locked surface cells and fill empty roughness / rate multiplier cells with 0.0006 in and 1."""
+    out = df.copy()
+    for c in SURFACE_NUMERIC:
+        out[c] = pd.to_numeric(out[c], errors="coerce").astype(float)
+    out["Fitting"] = out["Fitting"].astype(object)
+    for i, r in out.iterrows():
+        t = r.get("Type")
+        act = surface_active_columns(t if isinstance(t, str) else "")
+        if "Fitting" not in act:
+            out.at[i, "Fitting"] = None
+        for c in SURFACE_NUMERIC:
+            if c not in act:
+                out.at[i, c] = np.nan
+            elif c in SURFACE_DEFAULTS and np.isnan(out.at[i, c]):
+                out.at[i, c] = SURFACE_DEFAULTS[c]
+    return out
+
+
 def surface_rows(df):
     return [r for _, r in df.iterrows() if isinstance(r.get("Type"), str) and r["Type"]]
 
@@ -199,6 +237,77 @@ TYPE_HELP = {
     "SSD": "Sliding side door (MD required). ID defaults to the tubing ID.",
     "Casing": "Casing or liner from the previous depth down to this MD (flow below the tubing shoe).",
 }
+
+
+# Cells each type unlocks, as in PROSPER's downhole equipment screen (natural flow up the tubing). Annular flow
+# also opens the tubing outside diameter/roughness and the casing ID/roughness on tubing rows.
+DH_NUMERIC = DOWNHOLE_COLUMNS[2:]
+DH_DEFAULTS = {"Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Roughness (in)": 0.0006,
+               "Casing Inside Roughness (in)": 0.0006, "Rate Multiplier": 1.0}
+
+
+def active_columns(row_type, flow_type="tubing"):
+    """Numeric columns that accept input for a row of this type."""
+    md, tid, te, tod, toe, cid, ce, rm = DH_NUMERIC
+    annulus = flow_type in ("annular", "tubing_annular")
+    if row_type == "Xmas Tree":
+        return {md}
+    if row_type == "Tubing":
+        return {md, tid, te, rm} | ({tod, toe, cid, ce} if annulus else set())
+    if row_type == "SSSV":
+        return {tid}
+    if row_type == "Restriction":
+        return {tid, rm}
+    if row_type in ("Gas Lift Mandrel", "SSD"):
+        return {md, tid, rm}
+    if row_type == "Casing":
+        return {md, cid, ce, rm}
+    return set()
+
+
+def blocked_mask(df, flow_type="tubing"):
+    """Boolean frame: True where a cell is locked for its row's type (Label and Type are always open)."""
+    m = pd.DataFrame(False, index=df.index, columns=df.columns)
+    for i, r in df.iterrows():
+        t = r.get("Type")
+        act = active_columns(t if isinstance(t, str) else "", flow_type)
+        for c in DH_NUMERIC:
+            if c in m.columns:
+                m.at[i, c] = c not in act
+    return m
+
+
+def apply_cell_rules(df, flow_type="tubing"):
+    """Clear locked cells and fill empty unlocked roughness / rate-multiplier cells with their defaults
+    (0.0006 in and 1), which stay editable."""
+    out = df.copy()
+    for c in DH_NUMERIC:
+        out[c] = pd.to_numeric(out[c], errors="coerce").astype(float)
+    for i, r in out.iterrows():
+        t = r.get("Type")
+        act = active_columns(t if isinstance(t, str) else "", flow_type)
+        for c in DH_NUMERIC:
+            if c not in act:
+                out.at[i, c] = np.nan
+            elif c in DH_DEFAULTS and np.isnan(out.at[i, c]):
+                out.at[i, c] = DH_DEFAULTS[c]
+    return out
+
+
+def same_table(a, b):
+    """True when two equipment tables hold the same values (NaN = NaN, empty text = None)."""
+    if list(a.columns) != list(b.columns) or len(a) != len(b):
+        return False
+    for c in a.columns:
+        x, y = a[c].to_numpy(), b[c].to_numpy()
+        if c in DH_NUMERIC or c in SURFACE_NUMERIC or c in SURVEY_COLUMNS or c in GEO_COLUMNS:
+            x, y = pd.to_numeric(a[c], errors="coerce").to_numpy(float), pd.to_numeric(b[c], errors="coerce").to_numpy(float)
+            if not np.allclose(x, y, equal_nan=True, rtol=0, atol=0):
+                return False
+        elif [("" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)) for v in x] != \
+                [("" if v is None or (isinstance(v, float) and np.isnan(v)) else str(v)) for v in y]:
+            return False
+    return True
 
 
 def downhole_rows(df):
@@ -295,7 +404,7 @@ def downhole_sections(df, md_survey=None, tvd_survey=None):
             continue
         if t in ("Tubing", "Casing"):
             start = secs[-1]["MD bottom (ft)"] if secs else top
-            rec = {"Type": t, "Label": r["Label"] or t, "MD top (ft)": start, "MD bottom (ft)": md,
+            rec = {"Type": t, "Label": r["Label"] if isinstance(r["Label"], str) and r["Label"].strip() else t, "MD top (ft)": start, "MD bottom (ft)": md,
                    "Length (ft)": md - start,
                    "Flow ID (in)": _f(r["Tubing Inside Diameter (in)"]) if t == "Tubing"
                    else _f(r["Casing Inside Diameter (in)"]),
@@ -312,7 +421,7 @@ def downhole_sections(df, md_survey=None, tvd_survey=None):
             d = _f(r["Tubing Inside Diameter (in)"])
             if np.isnan(d) and last_tub is not None:
                 d = last_tub["Flow ID (in)"]
-            points.append({"Type": t, "Label": r["Label"] or t, "MD (ft)": at, "ID (in)": d})
+            points.append({"Type": t, "Label": r["Label"] if isinstance(r["Label"], str) and r["Label"].strip() else t, "MD (ft)": at, "ID (in)": d})
     secs, points = pd.DataFrame(secs), pd.DataFrame(points)
     if md_survey is not None and len(secs):
         secs["TVD bottom (ft)"] = tvd_at(md_survey, tvd_survey, secs["MD bottom (ft)"])

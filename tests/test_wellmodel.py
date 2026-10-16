@@ -1174,3 +1174,40 @@ def test_bergman_sutton_matches_prosper_at_and_above_bubble_point():
                                                      "Oil FVF": [1.193], "Oil Viscosity": [1.23]}))
     m = bo.match_all(inp, data).matches[("visc", "bergman_sutton")]
     assert m.p1 == pytest.approx(0.82253, abs=2e-3) and m.p2 == pytest.approx(-0.33829, abs=5e-3)
+
+
+def test_downhole_cells_follow_type_like_prosper():
+    md, tid, te, tod, toe, cid, ce, rm = weq.DH_NUMERIC
+    assert weq.active_columns("Xmas Tree") == {md}
+    assert weq.active_columns("Tubing") == {md, tid, te, rm}
+    assert weq.active_columns("Tubing", "annular") == {md, tid, te, rm, tod, toe, cid, ce}
+    assert weq.active_columns("SSSV") == {tid} and weq.active_columns("Restriction") == {tid, rm}
+    assert weq.active_columns("Casing") == {md, cid, ce, rm} and weq.active_columns("") == set()
+    df = pd.DataFrame([{"Type": "Tubing", md: 231.93, tid: 2.441, tod: 2.875},
+                       {"Type": "SSSV", md: 200.0, tid: 1.5, rm: 1.0},
+                       {"Type": "Casing", md: 10932.0, cid: 8.681, ce: 0.0008},
+                       {md: 5.0}]).reindex(columns=weq.DOWNHOLE_COLUMNS)
+    out = weq.apply_cell_rules(df)
+    assert out.loc[0, te] == 0.0006 and out.loc[0, rm] == 1.0 and np.isnan(out.loc[0, tod])   # defaults; OD locked
+    assert np.isnan(out.loc[1, md]) and np.isnan(out.loc[1, rm]) and out.loc[1, tid] == 1.5    # SSSV: ID only
+    assert out.loc[2, ce] == 0.0008                                                              # user value kept
+    assert out.iloc[3, 2:].isna().all()                                                          # no type: locked
+    assert weq.same_table(out, weq.apply_cell_rules(out))
+    ann = weq.apply_cell_rules(df, "annular")
+    assert ann.loc[0, tod] == 2.875 and ann.loc[0, toe] == 0.0006 and ann.loc[0, ce] == 0.0006
+
+
+def test_surface_cells_follow_type_like_prosper():
+    ln, tvd, d, e, rm = weq.SURFACE_NUMERIC
+    assert weq.surface_active_columns("Manifold") == {tvd}
+    assert weq.surface_active_columns("Line Pipe") == {ln, tvd, d, e, rm}
+    assert weq.surface_active_columns("Choke") == {d, rm}
+    assert weq.surface_active_columns("Fitting") == {"Fitting", d, rm}
+    df = pd.DataFrame([{"Type": "Manifold", tvd: 0.0, ln: 10.0},
+                       {"Type": "Line Pipe", ln: 3000.0, tvd: 0.0, d: 4.026, "Fitting": "Gate valve (open)"},
+                       {"Type": "Choke", d: 0.75, e: 0.001}]).reindex(columns=weq.SURFACE_COLUMNS)
+    out = weq.apply_surface_rules(df)
+    assert np.isnan(out.loc[0, ln]) and np.isnan(out.loc[0, rm])
+    assert out.loc[1, e] == 0.0006 and out.loc[1, rm] == 1.0 and out.loc[1, "Fitting"] is None
+    assert np.isnan(out.loc[2, e]) and out.loc[2, rm] == 1.0
+    assert weq.same_table(out, weq.apply_surface_rules(out)) and weq.check_surface(out, 60, 8) == []

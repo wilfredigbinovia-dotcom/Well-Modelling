@@ -189,10 +189,30 @@ def project_state():
     return {"inputs": inputs, "widgets": widgets, "tables": tables, "extras": extras}
 
 
-def queue_project():
-    up = ss.get("proj_upload")
+def _file_stem(name):
+    """Project name -> safe file name stem."""
+    return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(name)).strip("_") or "project"
+
+
+def _uploader_key():
+    return f"proj_upload_{ss.get('_proj_up_ver', 0)}"
+
+
+def queue_project(key):
+    up = ss.get(key)
     if up is not None:
         ss["_proj_pending"] = (up.getvalue(), up.name)
+
+
+def _clear_session():
+    """Forget the model; keep widget version counters (every widget is rebuilt) and give the project uploader a
+    fresh, empty box so the same file can be opened again."""
+    keep = {k: v + 1 for k, v in ss.items() if isinstance(k, str) and k.startswith("_ver_")}
+    up_ver = ss.get("_proj_up_ver", 0) + 1
+    for k in list(ss.keys()):
+        del ss[k]
+    ss.update(keep)
+    ss["_proj_up_ver"] = up_ver
 
 
 def apply_project(data, fname):
@@ -201,14 +221,10 @@ def apply_project(data, fname):
         doc = wproj.loads(data)
     except ValueError as e:
         ss["_proj_msg"] = ("error", f"Could not open {fname}: {e}")
+        ss["_proj_up_ver"] = ss.get("_proj_up_ver", 0) + 1
         return
     # start from a clean model; keep version counters (so every widget is rebuilt) and the uploader itself
-    keep = {k: v for k, v in ss.items() if isinstance(k, str) and k.startswith("_ver_")}
-    for k in list(ss.keys()):
-        if k not in ("proj_upload",):
-            del ss[k]
-    for k, v in keep.items():
-        ss[k] = v + 1
+    _clear_session()
     for k, v in doc["inputs"].items():
         ss["_v_" + k] = v
         ss["_ver_" + k] = ss.get("_ver_" + k, 0) + 1
@@ -230,16 +246,15 @@ def apply_project(data, fname):
             for m in ex["vlp_matches"]}}
     if ex.get("pvt_matched") and "pvt_table" in ss:
         ss["_proj_rematch"] = True                 # repeated just before the PVT tab draws
-    ss["proj_name"] = doc.get("name") or fname.rsplit(".", 1)[0].replace(".wellmodel", "")
+    stem = fname.rsplit(".", 1)[0].replace(".wellmodel", "").strip()
+    saved = doc.get("name") or ""
+    # the file name the user chose wins, unless it is just the saved name made file-safe ("Abura 2S" -> Abura_2S)
+    ss["proj_name"] = saved if saved and _file_stem(saved) == stem else (stem or saved or "my_well")
     ss["_proj_msg"] = ("success", f"Opened {fname} (saved {doc.get('saved', '?')}).")
 
 
 def new_project():
-    keep = {k: v + 1 for k, v in ss.items() if isinstance(k, str) and k.startswith("_ver_")}
-    for k in list(ss.keys()):
-        if k != "proj_upload":
-            del ss[k]
-    ss.update(keep)
+    _clear_session()
     ss["_proj_msg"] = ("success", "New project - all inputs cleared.")
 
 
@@ -333,8 +348,7 @@ UNITS = {"Pressure": "psia", "Gas Oil Ratio": "scf/STB", "Oil FVF": "RB/STB",
          "Oil Viscosity": "centipoise"}
 N_ROWS = 15
 INPUT_DEFAULTS = {"pvt_rsb": 500.0, "pvt_api": 35.0, "pvt_gg": 0.75, "pvt_sal": 50000.0,
-                  "pvt_h2s": 0.0, "pvt_co2": 0.0, "pvt_n2": 0.0, "pvt_t": 200.0, "pvt_pb": 0.0,
-                  "pvt_kw": 12.1}
+                  "pvt_h2s": 0.0, "pvt_co2": 0.0, "pvt_n2": 0.0, "pvt_t": 200.0, "pvt_pb": 0.0}
 
 
 def empty_table(n=N_ROWS) -> pd.DataFrame:
@@ -372,7 +386,7 @@ def current_inputs() -> tuple[bo.PVTInputs, bo.MatchData]:
     g = lambda k: float(val(k, INPUT_DEFAULTS[k]))
     inp = bo.PVTInputs(rsb=g("pvt_rsb"), api=g("pvt_api"), gas_sg=g("pvt_gg"), salinity_ppm=g("pvt_sal"),
                        h2s=g("pvt_h2s"), co2=g("pvt_co2"), n2=g("pvt_n2"),
-                       correct_impurities=bool(val("pvt_impurity_corr", False)), watson_k=g("pvt_kw"))
+                       correct_impurities=bool(val("pvt_impurity_corr", False)))
     data = bo.MatchData(temperature=g("pvt_t"), bubble_point=g("pvt_pb") if g("pvt_pb") > 0 else None,
                         table=ss.get("pvt_table_current", ss["pvt_table"]))
     return inp, data
@@ -694,11 +708,6 @@ with tabs[1]:
                       help="Glaso (1980) non-hydrocarbon correction factors on every bubble-point correlation. "
                            "Off by default - PROSPER does not apply them. Impurities always correct the gas "
                            "Z-factor (Wichert-Aziz).")
-        c = st.columns(4)
-        num(c[0], "Watson K factor (Bergman-Sutton only)", "pvt_kw", INPUT_DEFAULTS["pvt_kw"], 10.0, 13.5, 0.05,
-            help="Characterises the oil for the Bergman-Sutton dead-oil viscosity (SPE 110194). Paraffinic 12.2-12.9, "
-                 "intermediate 11.5-12.2, naphthenic 10.5-11.5. 12.1 reproduces PROSPER's Bergman-Sutton values "
-                 "on the test oil.")
 
         # ---------------------------------------------------------- lab data
         st.subheader("Match data")
@@ -1634,7 +1643,7 @@ def load_equipment_example():
         {"Type": "Tubing", "Measured Depth (ft)": 136.54, "Tubing Inside Diameter (in)": 2.992,
          "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 3.5,
          "Tubing Outside Roughness (in)": 0.0006, "Rate Multiplier": 1.0},
-        {"Label": "WRSCSSSV", "Type": "SSSV", "Tubing Inside Diameter (in)": 1.5, "Rate Multiplier": 1.0},
+        {"Label": "WRSCSSSV", "Type": "SSSV", "Tubing Inside Diameter (in)": 1.5},
         {"Type": "Tubing", "Measured Depth (ft)": 10962.0, "Tubing Inside Diameter (in)": 2.992,
          "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 3.5,
          "Tubing Outside Roughness (in)": 0.0006, "Rate Multiplier": 1.0},
@@ -1796,10 +1805,25 @@ with tabs[3]:
         t_sur = num(c[0], "Surrounding temperature (deg F)", "eq_tsur", 60.0, -60.0, 200.0)
         u_sur = num(c[1], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_usur", 8.0, 0.0, 1000.0,
                     help="Flowline to surroundings: roughly 1-2 buried, 5-10 bare pipe in air, higher in water.")
+        st.caption("Cells open according to the type in each row, as in PROSPER: a value typed into a locked cell is "
+                   "cleared. Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed.")
+        with st.expander("Which cells each type opens", expanded=False):
+            s_cols = ["Fitting"] + weq.SURFACE_NUMERIC
+            s_short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Pipe Inside ", "Pipe ") for c_ in s_cols}
+            s_guide = pd.DataFrame([{s_short[c_]: ("open" if c_ in weq.surface_active_columns(t_) else "")
+                                     for c_ in s_cols} for t_ in weq.SURFACE_TYPES], index=weq.SURFACE_TYPES)
+            st.dataframe(s_guide.style.apply(lambda d: np.where(d == "", "background-color: rgba(120, 170, 215, 0.35)",
+                                                                "background-color: rgba(120, 200, 140, 0.25)"),
+                                             axis=None), width="stretch")
+            st.caption("Green: accepts input. Blue: locked for that type (anything typed there is cleared).")
         ed_s = grid("surface", {
             "Type": st.column_config.SelectboxColumn(options=weq.SURFACE_TYPES),
             "Fitting": st.column_config.SelectboxColumn(options=list(weq.FITTINGS), width="medium"),
             **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.SURFACE_COLUMNS[3:]}})
+        s_clean = weq.apply_surface_rules(ed_s)
+        if not weq.same_table(s_clean, ed_s):            # entry in a locked cell, or a new type needing defaults
+            set_grid("surface", s_clean)
+            st.rerun()
         iss = weq.check_surface(ed_s, t_sur, u_sur)
         status["Surface equipment"] = iss
         show_issues(iss)
@@ -1818,9 +1842,29 @@ with tabs[3]:
                                     "every tubing row." if ft != "tubing" else ""))
         with st.expander("Equipment types"):
             st.markdown("\n".join(f"- **{k}** - {v}" for k, v in weq.TYPE_HELP.items()))
-        ed_d = grid("downhole", {
-            "Type": st.column_config.SelectboxColumn(options=weq.DOWNHOLE_TYPES),
-            **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.DOWNHOLE_COLUMNS[2:]}})
+        st.caption("Cells open according to the type in each row, as in PROSPER: a value typed into a locked cell is "
+                   "cleared. "
+                   "Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed."
+                   + (" Annular flow also opens tubing OD/outside roughness and casing ID/roughness on tubing "
+                      "rows." if ft != "tubing" else ""))
+        with st.expander("Which cells each type opens", expanded=False):
+            short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Tubing ", "Tbg ").replace(
+                "Casing ", "Csg ").replace("Inside ", "In. ").replace("Outside ", "Out. ") for c_ in weq.DH_NUMERIC}
+            guide = pd.DataFrame([{short[c_]: ("open" if c_ in weq.active_columns(t_, ft) else "")
+                                   for c_ in weq.DH_NUMERIC} for t_ in weq.DOWNHOLE_TYPES], index=weq.DOWNHOLE_TYPES)
+            st.dataframe(guide.style.apply(lambda d: np.where(d == "", "background-color: rgba(120, 170, 215, 0.35)",
+                                                              "background-color: rgba(120, 200, 140, 0.25)"), axis=None),
+                         width="stretch")
+            st.caption("Green: accepts input. Blue: locked for that type (anything typed there is cleared).")
+        dh_base = ss["eq_downhole"]
+        ed_d = track("eq_downhole", st.data_editor(
+            dh_base, key=f"eq_downhole_ed_{ss.get('_ver_eq_downhole', 0)}", num_rows="fixed", width="stretch",
+            column_config={"Type": st.column_config.SelectboxColumn(options=weq.DOWNHOLE_TYPES),
+                           **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.DOWNHOLE_COLUMNS[2:]}}))
+        dh_clean = weq.apply_cell_rules(ed_d, ft)
+        if not weq.same_table(dh_clean, ed_d):          # entry in a locked cell, or a new type needing defaults
+            set_grid("downhole", dh_clean)
+            st.rerun()
         iss = weq.check_downhole(ed_d, ft, survey_max)
         status["Downhole equipment"] = iss
         show_issues(iss)
@@ -3331,12 +3375,15 @@ with st.sidebar:
     try:
         payload = wproj.dumps(project_state(), pname)
         ss["_proj_payload"] = payload
-        fname = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in pname).strip("_") or "project"
-        st.download_button("💾 Save project", payload.encode(), f"{fname}.wellmodel.json", "application/json",
-                           width="stretch", help="Downloads every input, table and accepted match as one file.")
+        fname = _file_stem(pname)
+        st.download_button(f"💾 Save as {fname}.wellmodel.json", payload.encode(), f"{fname}.wellmodel.json",
+                           "application/json", width="stretch",
+                           help="Downloads every input, table and accepted match as one file.")
+        st.caption("Press Enter after typing the name - the button shows the file name that will be saved.")
     except TypeError as e:
         st.error(f"Project cannot be saved: {e}")
-    st.file_uploader("Open project", type=["json"], key="proj_upload", on_change=queue_project,
+    st.file_uploader("Open project", type=["json"], key=_uploader_key(), on_change=queue_project,
+                     args=(_uploader_key(),),
                      help="A .wellmodel.json file saved from this tool. Replaces the current model.")
     st.button("New project", on_click=new_project, width="stretch")
     msg = ss.pop("_proj_msg", None)
