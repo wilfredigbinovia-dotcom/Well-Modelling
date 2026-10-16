@@ -2642,15 +2642,27 @@ with tabs[4]:
                         mm = ms[chosen]
                         scale = 1000.0 if kind == "gas" else 1.0          # IPR gas rates are Mscf/d
                         rows_, curves_ = [], []
-                        q_top = max(float(ipr_curve.aof) / scale, float(tests["q"].max()) * 1.6)
-                        rates = np.linspace(q_top * 0.01, q_top, 40)
+                        # Rate range: around the tests, not out to the AOF - a high-PI well has an AOF of
+                        # 100,000s STB/d, and a grid spread that wide starts above the operating point.
+                        aof_ = float(ipr_curve.aof) / scale
+                        q_top = min(aof_, float(tests["q"].max()) * 3.0)
                         with st.spinner("Calculating VLP curves..."):
                             for _, t in tests.iterrows():
                                 curve_t, note = ipr_for_test(ipr_curve, t["pr"])
-                                bhp = wvlp.vlp_curve(path, fluid, t, rates, chosen, mm.p1, mm.p2, u_cur, hc)
+                                q_hi = min(max(q_top, float(t["q"]) * 1.6), aof_)
+                                for _ in range(6):                      # widen until the curves cross
+                                    rates = np.unique(np.r_[np.geomspace(q_hi * 2e-3, q_hi, 15),
+                                                            np.linspace(q_hi * 0.02, q_hi, 30),
+                                                            [float(t["q"])] if t["q"] < q_hi else []])
+                                    bhp = wvlp.vlp_curve(path, fluid, t, rates, chosen, mm.p1, mm.p2, u_cur, hc)
+                                    hit = wvlp.intersect(rates, bhp, curve_t.q / scale, curve_t.pwf)
+                                    if hit or q_hi >= aof_ * 0.999 or not np.isfinite(bhp[-1]) \
+                                            or bhp[-1] > float(curve_t.pr):
+                                        break
+                                    q_hi = min(q_hi * 3.0, aof_)
+                                q_top = max(q_top, q_hi)
                                 bhp_test = float(wvlp.vlp_curve(path, fluid, t, [t["q"]], chosen, mm.p1, mm.p2,
                                                                 u_cur, hc)[0])
-                                hit = wvlp.intersect(rates, bhp, curve_t.q / scale, curve_t.pwf)
                                 ipr_at_test = float(np.interp(t["q"] * scale, np.sort(curve_t.q),
                                                               curve_t.pwf[np.argsort(curve_t.q)]))
                                 rows_.append({"Test": t["label"], f"Test rate ({qunit})": t["q"],
@@ -2660,7 +2672,7 @@ with tabs[4]:
                                               "BHP from IPR at test rate (psia)": ipr_at_test,
                                               "IPR reservoir pressure (psia)": curve_t.pr, "Note": note
                                               or ("" if hit else "no intersection - well does not flow")})
-                                curves_.append((t, curve_t, bhp, bhp_test, hit))
+                                curves_.append((t, curve_t, rates, bhp, bhp_test, hit))
                         vi = pd.DataFrame(rows_)
                         ss["vlp_vi"] = vi
                         if action == "VLP/IPR":
@@ -2682,7 +2694,7 @@ with tabs[4]:
                                     f"Largest rate difference {md_:.1f} %. " + ("The IPR is consistent with the tests."
                                     if md_ <= 5 else "Use Adjust IPR to bring the IPR in line with the tests."))
                             fig, ax = plt.subplots(figsize=(8.5, 5))
-                            for i, (t, curve_t, bhp, bhp_test, hit) in enumerate(curves_):
+                            for i, (t, curve_t, rates, bhp, bhp_test, hit) in enumerate(curves_):
                                 col = wplt.SERIES[i % len(wplt.SERIES)]
                                 ax.plot(curve_t.q / scale, curve_t.pwf, color=col, lw=1.2, ls="--")
                                 ax.plot(rates, bhp, color=col, lw=1.6, label=f"test {t['label']} VLP")

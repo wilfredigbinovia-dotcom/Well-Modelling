@@ -660,8 +660,12 @@ def intersect(rates, bhp, ipr_q, ipr_pwf):
     ok = rates <= iq.max()
     if ok.sum() < 2:
         return None
-    r, b = rates[ok], np.asarray(bhp)[ok]
+    r, b = rates[ok], np.asarray(bhp, float)[ok]
     diff = b - np.interp(r, iq, ip)
+    fin = np.isfinite(diff)                     # a VLP that fails at extreme rates must not fake a crossing
+    r, diff = r[fin], diff[fin]
+    if len(r) < 2:
+        return None
     s = np.where(np.sign(diff[:-1]) != np.sign(diff[1:]))[0]
     if not len(s):
         return None
