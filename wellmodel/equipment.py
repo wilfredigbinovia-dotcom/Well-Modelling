@@ -233,8 +233,8 @@ TYPE_HELP = {
     "Tubing": "Tubing from the previous depth down to this MD.",
     "SSSV": "Sub-surface safety valve: minimum ID, at the previous depth unless an MD is entered.",
     "Restriction": "Nipple or other restriction: minimum ID, at the previous depth unless an MD is entered.",
-    "Gas Lift Mandrel": "Mandrel depth (MD required). ID defaults to the tubing ID.",
-    "SSD": "Sliding side door (MD required). ID defaults to the tubing ID.",
+    "Gas Lift Mandrel": "Gas lift mandrel: minimum ID, at the previous depth (treated like a restriction).",
+    "SSD": "Sliding side door: minimum ID, at the previous depth (treated like a restriction).",
     "Casing": "Casing or liner from the previous depth down to this MD (flow below the tubing shoe).",
 }
 
@@ -256,10 +256,8 @@ def active_columns(row_type, flow_type="tubing"):
         return {md, tid, te, rm} | ({tod, toe, cid, ce} if annulus else set())
     if row_type == "SSSV":
         return {tid}
-    if row_type == "Restriction":
+    if row_type in ("Restriction", "Gas Lift Mandrel", "SSD"):
         return {tid, rm}
-    if row_type in ("Gas Lift Mandrel", "SSD"):
-        return {md, tid, rm}
     if row_type == "Casing":
         return {md, cid, ce, rm}
     return set()
@@ -338,7 +336,7 @@ def check_downhole(df, flow_type="tubing", survey_max_md=None):
             else:
                 last_md = md
             continue
-        needs_md = t in ("Tubing", "Casing", "Gas Lift Mandrel", "SSD")
+        needs_md = t in ("Tubing", "Casing")
         if np.isnan(md):
             if needs_md:
                 out.append(("error", f"{name}: enter the measured depth."))
@@ -375,9 +373,8 @@ def check_downhole(df, flow_type="tubing", survey_max_md=None):
         else:  # point component
             if n_tubing == 0:
                 out.append(("error", f"{name}: place {t} below a tubing entry."))
-            if t in ("SSSV", "Restriction"):
-                if np.isnan(tid) or tid <= 0:
-                    out.append(("error", f"{name}: enter the minimum inside diameter."))
+            if np.isnan(tid) or tid <= 0:
+                out.append(("error", f"{name}: enter the minimum inside diameter."))
             if not np.isnan(tid) and not np.isnan(last_tub_id) and tid > last_tub_id:
                 out.append(("warning", f"{name}: ID {tid:g} in is larger than the tubing ID {last_tub_id:g} in."))
         if not np.isnan(md):

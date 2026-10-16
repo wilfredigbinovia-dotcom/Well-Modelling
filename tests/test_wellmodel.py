@@ -640,7 +640,9 @@ def test_well_schematic_svg_is_valid_and_labelled():
                     {"Type": "Tubing", "Measured Depth (ft)": 3000, "Tubing Inside Diameter (in)": 2.992,
                      "Tubing Inside Roughness (in)": 0.0006},
                     {"Type": "SSSV", "Label": "TRSV", "Tubing Inside Diameter (in)": 1.5},
-                    {"Type": "Gas Lift Mandrel", "Label": "GLM 1", "Measured Depth (ft)": 5000},
+                    {"Type": "Tubing", "Measured Depth (ft)": 5000, "Tubing Inside Diameter (in)": 2.992,
+                     "Tubing Inside Roughness (in)": 0.0006},
+                    {"Type": "Gas Lift Mandrel", "Label": "GLM 1", "Tubing Inside Diameter (in)": 2.867},
                     {"Type": "Tubing", "Measured Depth (ft)": 9000, "Tubing Inside Diameter (in)": 2.992,
                      "Tubing Inside Roughness (in)": 0.0006},
                     {"Type": "Casing", "Measured Depth (ft)": 9500, "Casing Inside Diameter (in)": 6.276,
@@ -1182,6 +1184,7 @@ def test_downhole_cells_follow_type_like_prosper():
     assert weq.active_columns("Tubing") == {md, tid, te, rm}
     assert weq.active_columns("Tubing", "annular") == {md, tid, te, rm, tod, toe, cid, ce}
     assert weq.active_columns("SSSV") == {tid} and weq.active_columns("Restriction") == {tid, rm}
+    assert weq.active_columns("Gas Lift Mandrel") == {tid, rm} == weq.active_columns("SSD")   # like a restriction
     assert weq.active_columns("Casing") == {md, cid, ce, rm} and weq.active_columns("") == set()
     df = pd.DataFrame([{"Type": "Tubing", md: 231.93, tid: 2.441, tod: 2.875},
                        {"Type": "SSSV", md: 200.0, tid: 1.5, rm: 1.0},
@@ -1211,3 +1214,23 @@ def test_surface_cells_follow_type_like_prosper():
     assert out.loc[1, e] == 0.0006 and out.loc[1, rm] == 1.0 and out.loc[1, "Fitting"] is None
     assert np.isnan(out.loc[2, e]) and out.loc[2, rm] == 1.0
     assert weq.same_table(out, weq.apply_surface_rules(out)) and weq.check_surface(out, 60, 8) == []
+
+
+def test_glm_and_ssd_act_like_restrictions():
+    md, tid, te, tod, toe, cid, ce, rm = weq.DH_NUMERIC
+    df = pd.DataFrame([{"Type": "Xmas Tree", md: 0.0},
+                       {"Type": "Tubing", md: 4000.0, tid: 2.992, te: 0.0006},
+                       {"Type": "Gas Lift Mandrel", md: 4500.0, tid: 2.5},      # MD is locked: cleared
+                       {"Type": "Tubing", md: 8000.0, tid: 2.992, te: 0.0006},
+                       {"Type": "SSD", tid: 2.2},
+                       {"Type": "Restriction", tid: 1.9},
+                       {"Type": "Tubing", md: 9000.0, tid: 2.992, te: 0.0006}]).reindex(columns=weq.DOWNHOLE_COLUMNS)
+    df = weq.apply_cell_rules(df)
+    assert np.isnan(df.loc[2, md]) and df.loc[2, rm] == 1.0
+    assert not [m for l, m in weq.check_downhole(df, "tubing", None) if l == "error"]
+    top, secs, pts = weq.downhole_sections(df)
+    assert list(pts["MD (ft)"]) == [4000.0, 8000.0, 8000.0]                      # at the previous depth
+    path = wvlp.build_flow_path(top, secs, pts, [0.0, 9000.0], [0.0, 9000.0], [0.0, 9000.0], [60.0, 180.0])
+    assert sorted(path.restrictions.values()) == [1.9, 2.5]                     # SSD and restriction share a node
+    bad = df.copy(); bad.loc[4, tid] = np.nan
+    assert any("minimum inside diameter" in m for _, m in weq.check_downhole(bad, "tubing", None))

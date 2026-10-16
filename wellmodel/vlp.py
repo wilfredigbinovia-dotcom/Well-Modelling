@@ -118,8 +118,9 @@ def build_flow_path(top_md, secs: pd.DataFrame, points: pd.DataFrame, survey_md,
     restr = {}
     if points is not None and len(points):
         for _, p in points.iterrows():
-            if p["Type"] in ("SSSV", "Restriction") and pd.notna(p["ID (in)"]):
-                restr[int(np.argmin(np.abs(md - p["MD (ft)"])))] = float(p["ID (in)"])
+            if p["Type"] in ("SSSV", "Restriction", "Gas Lift Mandrel", "SSD") and pd.notna(p["ID (in)"]):
+                k_ = int(np.argmin(np.abs(md - p["MD (ft)"])))
+                restr[k_] = min(restr.get(k_, np.inf), float(p["ID (in)"]))      # two at one depth: the smaller ID
     t_form = np.interp(md, geo_md, geo_t)
     return FlowPath(md, tvd, t_form, seg, sin_t, area, dh, rough, dht, restr)
 
