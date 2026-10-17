@@ -1234,3 +1234,30 @@ def test_glm_and_ssd_act_like_restrictions():
     assert sorted(path.restrictions.values()) == [1.9, 2.5]                     # SSD and restriction share a node
     bad = df.copy(); bad.loc[4, tid] = np.nan
     assert any("minimum inside diameter" in m for _, m in weq.check_downhole(bad, "tubing", None))
+
+
+def test_gradient_results_follow_the_traverse():
+    from wellmodel import gradient as wgrad
+    top, secs, pts, smd, stvd, path, oil = _vlp_setup()
+    case = {"q": np.array([1500.0]), "wc": np.array([0.2]), "gor": np.array([400.0])}
+    for corr in ("hagedorn_brown", "beggs_brill"):
+        P, T = wvlp.traverse(path, oil, 250.0, case, corr, 1.0, 1.0, 5.0)
+        gt = wgrad.gradient_table(path, oil, case, P[0], T[0], corr, 1.0, 1.0, 5.0, wgrad.node_labels(path, pts))
+        assert gt["Regime"].iloc[0] == "Wellhead" and gt["Regime"].iloc[-1] == "Bottomhole"
+        assert gt["Pressure (psia)"].iloc[-1] == pytest.approx(P[0, -1])
+        inlet = gt[gt["Regime"].str.startswith("Restriction Inlet")]
+        outlet = gt[gt["Regime"].str.startswith("Restriction Outlet")]
+        assert len(inlet) == len(outlet) == len(path.restrictions) == 1
+        assert outlet["Label"].iloc[0] == "SSSV"
+        dp_r = float(inlet["Pressure (psia)"].iloc[0] - outlet["Pressure (psia)"].iloc[0])
+        assert dp_r > 0
+        # cumulative gravity + friction loss from the wellhead ~ total pressure rise minus the restriction
+        tot = gt["Gravity Pressure Loss (psi)"].iloc[0] + gt["Friction Pressure Loss (psi)"].iloc[0]
+        assert tot == pytest.approx(P[0, -1] - P[0, 0] - dp_r, rel=0.01)
+        flow = gt.dropna(subset=["Holdup (fraction)"])
+        assert flow["Total Mass Flow Rate (lbm/day)"].std() / flow["Total Mass Flow Rate (lbm/day)"].mean() < 1e-6
+        assert (flow["Holdup (fraction)"].between(0, 1)).all()
+        assert flow["Mixture Density (lb/ft3)"].le(flow["Flowing Density (lb/ft3)"] + 1e-9).all()
+        assert set(flow["Regime"]) <= {"Bubble", "Slug", "Transition", "Mist", "Liquid", "Segregated",
+                                       "Intermittent", "Distributed"}
+    assert wgrad.flow_regime("hagedorn_brown", 4.017, 4.06, 52.76, 1.78, 27.0, 2.44 / 12, 1.0) == "Slug"

@@ -12,7 +12,7 @@ dependencies = ["numpy>=1.24", "scipy>=1.10", "pandas>=2.0", "matplotlib>=3.7"]
 
 [project.optional-dependencies]
 dev = ["pytest", "jupyter"]
-app = ["streamlit>=1.40", "streamlit-aggrid>=1.0"]
+app = ["streamlit>=1.40", "streamlit-aggrid>=1.0", "openpyxl>=3.1"]
 
 [tool.setuptools]
 packages = ["wellmodel"]

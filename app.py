@@ -35,6 +35,7 @@ from wellmodel import system as wsys
 from wellmodel import surface as wsurf
 from wellmodel import project as wproj
 from wellmodel import liftcurves as wlc
+from wellmodel import gradient as wgrad
 try:                                    # PROSPER-style grids with per-cell locking; optional dependency
     from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
     HAVE_AGGRID = True
@@ -281,13 +282,14 @@ with hdr[3].popover("", icon=":material/folder_open:", help="Open project"):
                "not saved - press Calculate after opening.")
 hdr[4].button("", icon=":material/note_add:", on_click=new_project, help="New project - clears every input",
               key="proj_new")
+_msg_slot = st.empty()            # always present, so the tabs below keep their identity (and selection)
 _msg = ss.pop("_proj_msg", None)
 if _msg:
-    getattr(st, _msg[0])(_msg[1])
+    getattr(_msg_slot, _msg[0])(_msg[1])
 schematic_svg = None
 
 TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP", "6 · Calculation"]
-tabs = st.tabs(TAB_NAMES)
+tabs = st.tabs(TAB_NAMES, key="main_tabs")
 
 CAPTIONS = {
     "fluid_type": {"oil": "Oil with associated gas and water",
@@ -2292,6 +2294,71 @@ def show_vlp_issues(issues, infos=True):
             st.caption("ℹ️ " + msg)
 
 
+def blank_table(df, cols, fmt="{:.6g}"):
+    """Display copy with numbers as text and empty cells blank (st.dataframe shows NaN as 'None')."""
+    out = df.copy()
+    for c in cols:
+        out[c] = [fmt.format(v) if isinstance(v, (int, float, np.floating, np.integer)) and np.isfinite(v) else ""
+                  for v in df[c]]
+    return out
+
+
+def gradient_workbook(tables, names):
+    """Excel workbook with one sheet of gradient results per correlation."""
+    import io
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        used = set()
+        for key, df in tables.items():
+            sheet = "".join(ch for ch in names.get(key, key) if ch not in '[]:*?/\\')[:31] or key[:31]
+            while sheet in used:
+                sheet = sheet[:28] + f"_{len(used)}"
+            used.add(sheet)
+            df.to_excel(xw, sheet_name=sheet, index=False)
+    return buf.getvalue()
+
+
+def _test_phase_rates(kind, t, q):
+    """Surface phase rates of a test at total rate q (liquid STB/d for oil, MMscf/d gas for gas wells)."""
+    if kind == "oil":
+        wc, gor = float(t["wc"]), float(t["gor"])
+        return {"Liquid": (q, "STB/day"), "Oil": (q * (1 - wc), "STB/day"), "Water": (q * wc, "STB/day"),
+                "Gas": (q * (1 - wc) * gor / 1e6, "MMscf/day")}
+    return {"Gas": (q, "MMscf/day"), "Condensate": (q * float(t["cgr"]), "STB/day"),
+            "Water": (q * float(t["wgr"]), "STB/day")}
+
+
+def vlp_ipr_results(kind, t, hit, bhp_test):
+    """PROSPER-style VLP/IPR result list for one test: calculated and measured rates, bottom hole pressures and
+    the percentage differences."""
+    calc = _test_phase_rates(kind, t, hit[0]) if hit else {k: (np.nan, u) for k, (_, u) in
+                                                           _test_phase_rates(kind, t, 1.0).items()}
+    meas = _test_phase_rates(kind, t, float(t["q"]))
+    rows = [(f"Calculated {k} Rate", v, f"({u})") for k, (v, u) in calc.items()]
+    rows.append(("Calculated Bottom Hole Pressure", hit[1] if hit else np.nan, "(psia)"))
+    rows += [(f"Measured {k} Rate", v, f"({u})") for k, (v, u) in meas.items()]
+    rows.append(("Measured Bottom Hole Pressure", bhp_test, "(psia)"))
+    rows += [(f"% Difference {k} Rate", 100 * (calc[k][0] - v) / v if v else np.nan, "(percent)")
+             for k, (v, _) in meas.items()]
+    rows = [(l_, 0.0 if u_ == "(percent)" and abs(v_) < 5e-7 else v_, u_) for l_, v_, u_ in rows]
+    return pd.DataFrame(rows, columns=["Label", "Value", "Units"])
+
+
+def vlp_ipr_points(kind, t, rates, bhp, curve_t, scale):
+    """Point table: phase rates, IPR pressure and VLP pressure at each calculated rate."""
+    order = np.argsort(curve_t.q)
+    iq, ip = np.asarray(curve_t.q)[order] / scale, np.asarray(curve_t.pwf)[order]
+    rows = []
+    for q, b in zip(rates, bhp):
+        r = {f"{k} Rate ({u})": v for k, (v, u) in _test_phase_rates(kind, t, float(q)).items()}
+        r["IPR Pressure (psia)"] = float(np.interp(q, iq, ip)) if q <= iq.max() else np.nan
+        r["VLP Pressure (psia)"] = float(b)
+        rows.append(r)
+    df = pd.DataFrame(rows)
+    df.index = pd.RangeIndex(1, len(df) + 1, name="Point")
+    return df
+
+
 def accept_u(u):
     put("eq_u", float(round(u, 5)))
     ss["vlp_u_accepted"] = float(round(u, 5))
@@ -2464,6 +2531,41 @@ with tabs[4]:
                         T_by = {"flowing": travs[corrs[0]][1][i]}
                         st.pyplot(traverse_plot(path, P_by, T_by, g.iloc[i], f"Test {tsel}: gradient traverses",
                                                 g.iloc[i]["tht"]), clear_figure=True)
+                        # ---- gradient results: one table per correlation for the plotted test
+                        st.markdown(f"**Gradient results - test {tsel}**")
+                        case_i = {k_: np.array([v_[i]]) for k_, v_ in wvlp.case_of(g, kind).items()}
+                        labels_ = wgrad.node_labels(path, eqd["downhole"][2])
+                        grads_ = {}
+                        for c_ in corrs:
+                            try:
+                                grads_[c_] = wgrad.gradient_table(path, fluid, case_i, travs[c_][0][i],
+                                                                  travs[c_][1][i], c_, 1.0, 1.0, u_cur, labels_)
+                            except (ValueError, FloatingPointError, KeyError) as e:
+                                st.warning(f"{VLP_LABELS[c_]}: gradient results not available ({e}).")
+                        if grads_:
+                            gsel = st.radio("Correlation", list(grads_), format_func=VLP_LABELS.get,
+                                            horizontal=True, key="vlp_grad_corr")
+                            gt_ = grads_[gsel]
+                            num_ = [c_ for c_ in gt_.columns if c_ not in ("Point", "Label", "Regime")]
+                            st.dataframe(blank_table(gt_, num_), hide_index=True, width="stretch", height=420,
+                                         column_config={"Regime": st.column_config.TextColumn(width="medium"),
+                                                        "Point": st.column_config.NumberColumn(width="small"),
+                                                        **{c_: st.column_config.TextColumn(alignment="right")
+                                                           for c_ in num_}})
+                            st.caption("Unmatched (Parameter 1 = Parameter 2 = 1), from the measured THP down to the "
+                                       "bottom node. Each row is a node; gradients, holdup, regime, velocities and "
+                                       "fluid properties are for the segment above it. Gravity and friction pressure "
+                                       "loss are the totals from the node down to the bottom node. Mixture density is "
+                                       "the no-slip density; flowing density uses the holdup.")
+                            dl_ = st.columns(2)
+                            dl_[0].download_button(f"Download {VLP_LABELS[gsel]} (CSV)",
+                                                   gt_.to_csv(index=False).encode(),
+                                                   f"gradient_{gsel}_{_file_stem(str(tsel))}.csv", width="stretch")
+                            dl_[1].download_button("Download all correlations (Excel, one sheet each)",
+                                                   gradient_workbook(grads_, VLP_LABELS),
+                                                   f"gradient_results_{_file_stem(str(tsel))}.xlsx",
+                                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                                   width="stretch")
                         with st.expander("Error by test"):
                             st.dataframe(detail.style.format(precision=2), hide_index=True, width="stretch")
                         ss["vlp_suggested"] = best["key"]
@@ -2680,37 +2782,56 @@ with tabs[4]:
                             if just_:
                                 st.success(f"Adjust IPR accepted: {just_} written to the IPR Data tab. The IPR has "
                                            "been rebuilt and VLP/IPR recalculated with it.")
-                            st.caption(f"VLP: {mm.label} matched (P1 {mm.p1:.3f}, P2 {mm.p2:.3f}) at each test's "
+                            st.caption(f"VLP: {mm.label} matched (P1 {mm.p1:.3f}, P2 {mm.p2:.3f}) at the test's "
                                        f"THP and ratios. IPR: {ss.get('ipr_meta', {}).get('model', '')} from the IPR "
-                                       "tab, rebuilt at each test's reservoir pressure where possible. A good IPR "
-                                       "puts every intersection close to the measured rate.")
-                            fmt_ = {c_: ("{:,.3f}" if kind == "gas" and "rate" in c_.lower() else "{:,.1f}")
-                                    for c_ in vi.columns if c_ not in ("Test", "Note")}
-                            fmt_["Rate difference (%)"] = "{:+.1f}"
-                            st.dataframe(vi.style.format(fmt_, na_rep="—"), hide_index=True, width="stretch")
-                            md_ = vi["Rate difference (%)"].abs().max()
-                            if np.isfinite(md_):
-                                (st.success if md_ <= 5 else st.warning)(
-                                    f"Largest rate difference {md_:.1f} %. " + ("The IPR is consistent with the tests."
-                                    if md_ <= 5 else "Use Adjust IPR to bring the IPR in line with the tests."))
-                            fig, ax = plt.subplots(figsize=(8.5, 5))
-                            for i, (t, curve_t, rates, bhp, bhp_test, hit) in enumerate(curves_):
-                                col = wplt.SERIES[i % len(wplt.SERIES)]
-                                ax.plot(curve_t.q / scale, curve_t.pwf, color=col, lw=1.2, ls="--")
-                                ax.plot(rates, bhp, color=col, lw=1.6, label=f"test {t['label']} VLP")
-                                ax.scatter([t["q"]], [bhp_test], marker="s", s=55, color=col, edgecolor=wplt.INK,
-                                           zorder=5)
-                                if hit:
-                                    ax.scatter([hit[0]], [hit[1]], marker="o", s=45, facecolor="white", edgecolor=col,
-                                               lw=1.8, zorder=6)
-                            ax.set_xlabel(f"Rate ({qunit})"); ax.set_ylabel("Pressure at IPR depth (psia)")
-                            ax.set_ylim(0, max(float(ipr_curve.pr), float(np.nanmax(tests["pr"])) if
-                                               np.isfinite(tests["pr"]).any() else 0) * 1.08)
-                            ax.set_xlim(0, q_top)
-                            ax.set_title("VLP (solid) and IPR (dashed); squares = test, circles = solution", fontsize=10)
+                                       "tab, rebuilt at the test's reservoir pressure where possible. Measured bottom "
+                                       "hole pressure is the matched VLP at the measured rate (the test point).")
+                            labels_ = tests["label"].tolist()
+                            tsel_ = (st.selectbox("Test", labels_, key="vlp_vi_test") if len(labels_) > 1
+                                     else labels_[0])
+                            t, curve_t, rates, bhp, bhp_test, hit = curves_[labels_.index(tsel_)]
+                            cc_ = st.columns([1, 1.7])
+                            with cc_[0]:
+                                res_ = vlp_ipr_results(kind, t, hit, bhp_test)
+                                st.dataframe(res_.style.format({"Value": "{:.6g}"}, na_rep="—"), hide_index=True,
+                                             width="stretch", height=35 * (len(res_) + 1) + 3)
+                            with cc_[1]:
+                                pts_ = vlp_ipr_points(kind, t, rates, bhp, curve_t, scale)
+                                st.dataframe(blank_table(pts_, list(pts_.columns)), width="stretch",
+                                             height=35 * (len(res_) + 1) + 3,
+                                             column_config={c_: st.column_config.TextColumn(alignment="right")
+                                                            for c_ in pts_.columns})
+                            fig, ax = plt.subplots(figsize=(10, 4.6))
+                            ax.plot(rates, bhp, color=wplt.SERIES[0], lw=1.8, label="VLP")
+                            ax.plot(curve_t.q / scale, curve_t.pwf, color=wplt.SERIES[1], lw=1.8, label="IPR")
+                            ax.scatter([t["q"]], [bhp_test], marker="s", s=60, color=wplt.SERIES[2],
+                                       edgecolor=wplt.INK, zorder=5, label="test point")
+                            if hit:
+                                ax.scatter([hit[0]], [hit[1]], marker="o", s=50, facecolor="white",
+                                           edgecolor=wplt.INK, lw=1.8, zorder=6, label="solution")
+                            ax.set_xlabel(f"Liquid rate ({qunit})" if kind == "oil" else f"Gas rate ({qunit})")
+                            ax.set_ylabel("Pressure (psia)")
+                            ax.set_ylim(0, max(float(curve_t.pr), float(np.nanmax(bhp[np.isfinite(bhp)]))
+                                               if np.isfinite(bhp).any() else 0) * 1.05)
+                            ax.set_xlim(0, float(rates.max()))
+                            ax.set_title(f"VLP/IPR - test {t['label']}", fontsize=10)
+                            ax.grid(alpha=0.3, ls="--")
                             ax.legend(fontsize=8)
                             fig.tight_layout()
                             st.pyplot(fig, clear_figure=True)
+                            md_ = vi["Rate difference (%)"].abs().max()
+                            if np.isfinite(md_):
+                                (st.success if md_ <= 5 else st.warning)(
+                                    f"Largest rate difference over {len(vi)} test(s): {md_:.2f} %. " +
+                                    ("The IPR is consistent with the tests." if md_ <= 5
+                                     else "Use Adjust IPR to bring the IPR in line with the tests."))
+                            with st.expander("All tests", expanded=len(vi) > 1):
+                                fmt_ = {c_: ("{:,.3f}" if kind == "gas" and "rate" in c_.lower() else "{:,.1f}")
+                                        for c_ in vi.columns if c_ not in ("Test", "Note")}
+                                fmt_["Rate difference (%)"] = "{:+.2f}"
+                                st.dataframe(vi.style.format(fmt_, na_rep="—"), hide_index=True, width="stretch")
+                            st.download_button("Download VLP/IPR points (CSV)", pts_.to_csv().encode(),
+                                               f"vlp_ipr_{_file_stem(str(t['label']))}.csv")
 
                         # ----------------------------------------------- adjust IPR
                         else:
