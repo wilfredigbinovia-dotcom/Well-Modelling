@@ -1352,3 +1352,44 @@ def test_pe5_style_reproduces_prosper_pe5_rows():
     args = (*a, 1.95 / 12, 0.0006 / 12, 0.95, np.array([1960.0]))
     assert np.allclose(C.pe5_style(*args), C.hagedorn_brown(*args))         # bubble flow: Griffith
     assert "pe5_style" in wvlp.VLP_CORRELATIONS
+
+
+def test_choke_performance_elf_perkins():
+    from wellmodel import choke as CK
+    *_, path, oil = _vlp_setup()
+    S = CK.ChokeSetup(oil, "oil", {"wc": 0.2, "gor": 800.0}, weq.HeatCapacities())
+    p1, t1 = 664.7, 120.0
+    # the three calculation options are consistent with each other
+    r = S.rate(p1, t1, 414.7, 0.42)
+    d, r2 = S.choke_size(p1, t1, 414.7, r["q"])
+    assert d == pytest.approx(0.42, rel=1e-3)
+    p4, r3 = S.downstream_pressure(p1, t1, r["q"], 0.42)
+    assert p4 == pytest.approx(414.7, abs=0.5)
+    # critical flow: rate independent of the outlet pressure below the boundary, equal to the critical rate
+    lo = S.rate(p1, t1, 50.0, 0.42)
+    assert lo["regime"] == "Critical" and lo["q"] == pytest.approx(lo["q_crit"], rel=1e-9)
+    assert S.rate(p1, t1, 100.0, 0.42)["q"] == pytest.approx(lo["q"], rel=1e-9)
+    assert 0.3 < lo["p_crit"] / p1 < 0.75 and lo["t_crit"] < t1
+    ps, qs, ts = S.performance_curve(p1, t1, 0.42)
+    assert np.all(np.diff(qs) <= 1e-9) and qs[-1] < 0.3 * qs[0]
+    # a rate above the critical rate cannot pass
+    assert np.isnan(S.downstream_pressure(p1, t1, lo["q"] * 1.05, 0.42)[0])
+    # PROSPER's ELF example (GOR 800, WC 20 %, 650 -> 400 psig, 120 F, 1,000 STB/d): 0.4026 in, critical
+    # pressure 366 psig, critical rate 1,014 STB/d - with this tool's example oil, within a few per cent
+    d0, r0 = S.choke_size(p1, t1, 414.7, 1000.0)
+    assert d0 == pytest.approx(0.4026, rel=0.06)
+    assert r0["p_crit"] - 14.7 == pytest.approx(366.0, rel=0.06)
+    assert r0["q_crit"] == pytest.approx(1014.0, rel=0.05)
+
+
+def test_choke_gas_only_critical_ratio_and_liquid_only():
+    from wellmodel import choke as CK
+    gas = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.6), 50)
+    S = CK.ChokeSetup(gas, "gas", {"wgr": 0.0, "cgr": 0.0}, weq.HeatCapacities(), d_up=6.0, d_down=6.0)
+    pr_c, n, lam, B = S._critical(1000.0, 100.0, 0.5)
+    k = n                                                     # single-phase gas: n = F
+    assert pr_c == pytest.approx((2 / (k + 1)) ** (k / (k - 1)), rel=0.02)
+    *_, path, oil = _vlp_setup()
+    L = CK.ChokeSetup(oil, "oil", {"wc": 1.0, "gor": 0.0}, weq.HeatCapacities())
+    r = L.rate(1000.0, 100.0, 50.0, 0.5)
+    assert r["regime"] == "Subcritical" and np.isnan(r["q_crit"])

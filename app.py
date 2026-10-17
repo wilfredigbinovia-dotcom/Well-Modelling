@@ -36,6 +36,7 @@ from wellmodel import surface as wsurf
 from wellmodel import project as wproj
 from wellmodel import liftcurves as wlc
 from wellmodel import gradient as wgrad
+from wellmodel import choke as wchoke
 try:                                    # PROSPER-style grids with per-cell locking; optional dependency
     from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
     HAVE_AGGRID = True
@@ -3107,11 +3108,161 @@ def solution_panel(kind, r, det, regimes):
     return out
 
 
-CALC_MODES = ["System analysis (IPR + VLP)", "Gradient traverse", "Lift curves (VFP tables)"]
+CALC_MODES = ["System analysis (IPR + VLP)", "Gradient traverse", "Lift curves (VFP tables)", "Choke performance"]
 
 
 def _qunit(kind):
     return "STB/d" if kind == "oil" else "MMscf/d"
+
+
+CHOKE_OPTIONS = ["Predict flow rate", "Predict pressure drop", "Predict choke setting"]
+
+
+def choke_plot(ps, qs, ts, point, qunit, p1):
+    """PROSPER-style choke performance plot: rate against outlet pressure (bottom axis) and against outlet
+    temperature (top axis), with the calculated point."""
+    fig, ax = plt.subplots(figsize=(8.5, 5.0))
+    ax.plot(ps, qs, color=wplt.SERIES[0], lw=1.8, label="Outlet pressure")
+    ax.set_xlabel("Outlet pressure (psia)"); ax.set_ylabel(f"Rate ({qunit})")
+    ax.set_xlim(0, p1 * 1.02); ax.set_ylim(0, max(np.nanmax(qs), point[1] if point else 0) * 1.12)
+    ax.grid(alpha=0.3, ls="--")
+    ax2 = ax.twiny()
+    ax2.plot(ts, qs, color=wplt.SERIES[1], lw=1.6, label="Outlet temperature")
+    ax2.set_xlabel("Outlet temperature (°F)")
+    if point:
+        ax.scatter([point[0]], [point[1]], s=70, marker="s", color="#2ca02c", edgecolor=wplt.INK, zorder=6,
+                   label="Calculated point")
+    h1, l1 = ax.get_legend_handles_labels(); h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower left")
+    ax.set_title("Choke performance plot", fontsize=10, pad=34)
+    fig.tight_layout()
+    return fig
+
+
+def choke_mode(o):
+    """General-purpose choke calculator - needs only the PVT (tab 2)."""
+    kind = "gas" if o.is_gas else "oil"
+    qunit = "STB/d" if kind == "oil" else "MMscf/d"
+    st.caption("General-purpose choke calculator: flow rate for a given choke size and pressures, the outlet "
+               "pressure for a given rate, or the choke setting that gives a rate. Only the PVT data (tab 2) is "
+               "needed. The critical values (pressure, temperature and rate) are always calculated. With continuous "
+               "gas lift, include the lift gas in the total GOR.")
+    left, right = st.columns([1, 1.5], gap="large")
+    with left:
+        how = radio(st, "Calculation option", CHOKE_OPTIONS, "ck_how")
+        model = sel(st, "Choke model", wchoke.MODELS, "ck_model",
+                    help="ELF: Perkins (1993), isentropic multiphase flow, critical and subcritical, discharge "
+                         "coefficient 0.826 (best fit to 1,432 data sets). Sachdeva et al. (1986), Cd 0.75 typical.")
+        c = st.columns(2)
+        ratios = {}
+        if kind == "oil":
+            gor = num(c[0], "Total GOR (scf/STB)", "ck_gor", float(val("sys_gor", 500.0)), 0.0, 1e6)
+            wc = num(c[1], "Water cut (%)", "ck_wc", float(val("sys_wc", 0.0)), 0.0, 99.0)
+            ratios = {"wc": wc / 100, "gor": gor}
+        else:
+            wgr = num(c[0], "Water gas ratio (STB/MMscf)", "ck_wgr", float(val("sys_wgr", 0.0)), 0.0, 1e5)
+            sgor = num(c[1], "Separator GOR (scf/STB)", "ck_sgor", float(val("sys_sep_gor", 0.0)), 0.0, 1e8,
+                       help="0 = dry gas")
+            ratios = {"wgr": wgr, "cgr": 1e6 / sgor if sgor > 0 else 0.0}
+        c = st.columns(2)
+        p1 = num(c[0], "Inlet pressure (psia)", "ck_p1", 650.0, 15.0, 3e4)
+        t1 = num(c[1], "Inlet temperature (°F)", "ck_t1", 120.0, 32.0, 400.0)
+        c = st.columns(2)
+        p4 = q = d64 = None
+        if how != "Predict pressure drop":
+            p4 = num(c[0], "Outlet pressure (psia)", "ck_p4", 400.0, 14.7, 3e4)
+        if how != "Predict flow rate":
+            q = num(c[1] if how != "Predict pressure drop" else c[0],
+                    f"{'Liquid' if kind == 'oil' else 'Gas'} rate ({qunit})", "ck_q",
+                    1000.0 if kind == "oil" else 5.0, 1e-6, 1e7)
+        if how != "Predict choke setting":
+            d64 = num(c[1] if how == "Predict flow rate" else c[1], "Choke size (64ths in)", "ck_d64", 32.0, 1.0, 256.0)
+        c = st.columns(3)
+        d_up = num(c[0], "Upstream pipe ID (in)", "ck_dup", 2.992, 0.1, 48.0, None, "%.3f",
+                   help="Area upstream of the choke (A1 in Eq. A-28).")
+        d_dn = num(c[1], "Downstream pipe ID (in)", "ck_ddn", 2.992, 0.1, 48.0, None, "%.3f",
+                   help="Sets the pressure recovery downstream of the choke (Eq. 7).")
+        elf = model.startswith("ELF")
+        cd = num(c[2], "Discharge coefficient", "ck_cd_elf" if elf else "ck_cd_sach", 0.826 if elf else 0.75,
+                 0.1, 1.5, None, "%.3f")
+        f_in = num(st, "Gas Cp/Cv (0 = from correlation)", "ck_f", 0.0, 0.0, 3.0, None, "%.3f",
+                   help="Ratio of specific heats of the gas. Perkins used Johnson's methane tables; by default the "
+                        "ideal-gas value of a natural gas of this gravity is used.")
+        go = st.button("Calculate", type="primary", key="ck_go")
+    fluid, fluid_note = vlp_fluid(o, kind, max(p1, 1000.0) * 1.2, max(t1 - 80.0, 20.0), t1 + 20.0)
+    with right:
+        if fluid is None:
+            st.warning(fluid_note)
+            return
+        st.caption(f"PVT: {fluid_note}.")
+        setup = wchoke.ChokeSetup(fluid, kind, ratios, ss.get("equipment", {}).get("heat_capacities")
+                                  or weq.HeatCapacities(), d_up=d_up, d_down=d_dn, cd=cd, model=model,
+                                  f_ratio=f_in if f_in > 1.0 else None)
+        sig = (how, model, tuple(sorted(ratios.items())), p1, t1, p4, q, d64, d_up, d_dn, cd, f_in, fluid_note)
+        if go or ss.get("ck_res", {}).get("sig") == sig:
+            if ss.get("ck_res", {}).get("sig") != sig:
+                with st.spinner("Calculating..."):
+                    try:
+                        if how == "Predict flow rate":
+                            d_in = d64 / 64
+                            if d_in >= min(d_up, d_dn):
+                                raise ValueError("The choke must be smaller than the pipe.")
+                            r = setup.rate(p1, t1, p4, d_in)
+                            out = {"d": d_in, "p4": p4, "q": r["q"], "r": r}
+                        elif how == "Predict pressure drop":
+                            d_in = d64 / 64
+                            p4_, r = setup.downstream_pressure(p1, t1, q, d_in)
+                            out = {"d": d_in, "p4": p4_, "q": q, "r": r}
+                        else:
+                            if p4 >= p1:
+                                raise ValueError("The outlet pressure must be below the inlet pressure.")
+                            d_in, r = setup.choke_size(p1, t1, p4, q)
+                            out = {"d": d_in, "p4": p4, "q": q, "r": r}
+                        if np.isfinite(out["d"]):
+                            out["curve"] = setup.performance_curve(p1, t1, out["d"])
+                        ss["ck_res"] = {"sig": sig, "out": out, "err": None}
+                    except (ValueError, RuntimeError, ZeroDivisionError) as e:
+                        ss["ck_res"] = {"sig": sig, "out": None, "err": str(e)}
+            res = ss["ck_res"]
+            if res["err"]:
+                st.error(res["err"])
+                return
+            out, r = res["out"], res["out"]["r"]
+            if how == "Predict pressure drop" and not np.isfinite(out["p4"]):
+                st.error(f"The choke cannot pass {q:,.4g} {qunit} at {p1:,.1f} psia: the critical (maximum) rate is "
+                         f"{r['q']:,.4g} {qunit}. Open the choke or raise the inlet pressure.")
+            elif how == "Predict choke setting" and not np.isfinite(out["d"]):
+                st.error("No choke smaller than the pipe passes this rate between these pressures.")
+            else:
+                rows = []
+                if how == "Predict choke setting":
+                    rows.append(("Choke setting", out["d"], "in"))
+                    rows.append(("Choke setting", out["d"] * 64, "64ths in"))
+                if how == "Predict flow rate":
+                    rows.append((f"{'Liquid' if kind == 'oil' else 'Gas'} rate", out["q"], qunit))
+                if how == "Predict pressure drop":
+                    rows.append(("Outlet pressure", out["p4"], "psia"))
+                    rows.append(("Pressure drop", p1 - out["p4"], "psi"))
+                rows += [("Outlet temperature", r["t_out"], "°F"), ("Flow regime", r["regime"], ""),
+                         ("Critical pressure (throat)", r["p_crit"], "psia"),
+                         ("Critical rate", r["q_crit"], qunit), ("Critical temperature", r["t_crit"], "°F"),
+                         ("Throat pressure", r["p_throat"], "psia"),
+                         ("Gas mass fraction at the inlet", r["fg"], ""), ("Polytropic exponent n", r["n"], "")]
+                if how == "Predict pressure drop" and r["regime"] == "Critical":
+                    st.info("This rate is the critical rate: any outlet pressure up to the one shown gives it.")
+                tab = pd.DataFrame(rows, columns=["Result", "Value", "Units"])
+                tab["Value"] = [f"{v:,.5g}" if isinstance(v, (float, int, np.floating)) and np.isfinite(v)
+                                else ("—" if isinstance(v, (float, np.floating)) else v) for v in tab["Value"]]
+                st.dataframe(tab, hide_index=True, width="stretch")
+                if "curve" in out:
+                    ps, qs, ts = out["curve"]
+                    st.pyplot(choke_plot(ps, qs, ts, (out["p4"], out["q"]), qunit, p1), clear_figure=True)
+                    cur = pd.DataFrame({"Outlet pressure (psia)": ps, f"Rate ({qunit})": qs,
+                                        "Outlet temperature (°F)": ts})
+                    st.download_button("Download performance curve (CSV)", cur.to_csv(index=False).encode(),
+                                       "choke_performance.csv")
+        else:
+            st.info("Press Calculate.")
 
 
 def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
@@ -3315,6 +3466,7 @@ with tabs[5]:
     st.header("Calculation")
     mode = radio(st, "Calculation", CALC_MODES, "calc_mode", horizontal=True, label_visibility="collapsed")
     SYS = mode == CALC_MODES[0]
+    CHOKE = mode == CALC_MODES[3]
     st.subheader(mode)
     o = ss.get("options")
     eqd = ss.get("equipment", {})
@@ -3322,6 +3474,8 @@ with tabs[5]:
     blocker = None
     if o is None or o.errors:
         blocker = "Fix the configuration in the Options summary first."
+    elif CHOKE:
+        blocker = None
     elif o.is_injector:
         blocker = "System analysis for injectors is not built yet."
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
@@ -3330,6 +3484,8 @@ with tabs[5]:
         blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
     if blocker:
         st.info(blocker)
+    elif CHOKE:
+        choke_mode(o)
     else:
         kind = "gas" if o.is_gas else "oil"
         gmd, gt = eqd["geothermal"]
