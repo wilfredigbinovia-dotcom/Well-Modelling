@@ -2975,9 +2975,21 @@ def parse_values(text):
     return out
 
 
-def sys_plot(results, kind, highlight=None, max_curves=12):
+def _plot_qmax(shown, full):
+    """x-axis limit: the whole rate range, or (default) a window around the solution(s) - a high-PI well's IPR
+    runs out to an AOF far beyond anything the tubing can lift."""
+    q_all = max(r.rates.max() for r in shown) * 1.02
+    sols = [r.q for r in shown if r.q is not None]
+    if full or not sols:
+        return q_all
+    # include the VLP minimum (stability) as well as the solution
+    q_min_vlp = max(float(r.rates[int(np.nanargmin(r.vlp))]) if np.isfinite(r.vlp).any() else 0.0 for r in shown)
+    return min(q_all, max(3.0 * max(sols), 1.5 * q_min_vlp))
+
+
+def sys_plot(results, kind, highlight=None, max_curves=12, full=False):
     if results and results[0].node == "top":
-        return sys_plot_top(results, kind, max_curves)
+        return sys_plot_top(results, kind, max_curves, full)
     qunit = "STB/d" if kind == "oil" else "MMscf/d"
     scale = 1000.0 if kind == "gas" else 1.0
     fig, ax = plt.subplots(figsize=(9, 5.2))
@@ -2996,8 +3008,11 @@ def sys_plot(results, kind, highlight=None, max_curves=12):
                        marker="o" if r.stable else "X")
     ax.set_xlabel(f"Rate ({qunit})"); ax.set_ylabel("Pressure at bottom node (psia)")
     top = max(float(np.nanmax(r.ipr_curve.pr)) for r in shown)
-    ax.set_ylim(0, top * 1.6)
-    ax.set_xlim(0, max(r.rates.max() for r in shown) * 1.02)
+    qmax = _plot_qmax(shown, full)
+    vis = [float(np.nanmax(r.vlp[r.rates <= qmax])) for r in shown if np.isfinite(r.vlp[r.rates <= qmax]).any()]
+    ax.set_ylim(0, min(max([top] + vis) * 1.08, top * 1.6))
+    ax.set_xlim(0, qmax)
+    ax.grid(alpha=0.3, ls="--")
     ax.set_title("Inflow (IPR) v Outflow (VLP)" + ("" if single else "  -  dashed: IPR; X = unstable solution"),
                  fontsize=10)
     ax.legend(fontsize=7.5, ncol=2 if len(shown) > 6 else 1)
@@ -3005,7 +3020,7 @@ def sys_plot(results, kind, highlight=None, max_curves=12):
     return fig
 
 
-def sys_plot_top(results, kind, max_curves=12):
+def sys_plot_top(results, kind, max_curves=12, full=False):
     """Solution at the top node: inflow (IPR + tubing [+ surface equipment]) against the top-node pressure."""
     qunit = "STB/d" if kind == "oil" else "MMscf/d"
     fig, ax = plt.subplots(figsize=(9, 5.2))
@@ -3042,7 +3057,8 @@ def sys_plot_top(results, kind, max_curves=12):
                        marker="o" if r.stable else "X")
     ax.set_xlabel(f"Rate ({qunit})"); ax.set_ylabel(f"Pressure at top node - {top_name} (psia)")
     ax.set_ylim(0, max(ymax, 1.0) * 1.25)
-    ax.set_xlim(0, max(r.rates.max() for r in shown) * 1.02)
+    ax.set_xlim(0, _plot_qmax(shown, full))
+    ax.grid(alpha=0.3, ls="--")
     ax.set_title("Solution at the top node" + ("" if single else "  -  dashed: top-node pressure; X = unstable"),
                  fontsize=10)
     ax.legend(fontsize=7.5, ncol=2 if len(shown) > 6 else 1)
@@ -3578,7 +3594,8 @@ with tabs[5]:
                                            "system_sensitivity.csv")
                         cc = st.columns([1.2, 1])
                         with cc[0]:
-                            st.pyplot(sys_plot(res, kind), clear_figure=True)
+                            full_s_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full_sens")
+                            st.pyplot(sys_plot(res, kind, full=full_s_), clear_figure=True)
                             if len(res) > 12:
                                 st.caption("IPR/VLP plot shows the first 12 cases.")
                         with cc[1]:
@@ -3596,18 +3613,6 @@ with tabs[5]:
                     if r.note:
                         (st.warning if r.q is None or not r.stable else st.info)(r.note)
                     if r.q is not None:
-                        m = st.columns(5 if r.pwh_q is not None else 4)
-                        sr_ = wsys.surface_rates(kind, r.params, r.q)
-                        if kind == "oil":
-                            m[0].metric("Liquid rate", f"{r.q:,.1f} STB/d")
-                            m[1].metric("Oil rate", f"{sr_['Oil rate (STB/d)']:,.1f} STB/d")
-                        else:
-                            m[0].metric("Gas rate", f"{r.q:,.3f} MMscf/d")
-                            m[1].metric("Condensate rate", f"{sr_['Condensate rate (STB/d)']:,.1f} STB/d")
-                        m[2].metric("Bottom node pressure", f"{r.pwf:,.1f} psia")
-                        m[3].metric("Wellhead temperature", f"{r.wht_q:,.1f} °F")
-                        if r.pwh_q is not None:
-                            m[4].metric("Wellhead pressure", f"{r.pwh_q:,.1f} psia")
                         if r.node == "top" and r.pwh_q is not None and (r.top_in_q is None or not np.isfinite(r.top_in_q)
                                                                          or r.top_in_q > float(r.params["whp"]) + 1.0):
                             st.caption("The surface choke is critical at the solution: the inflow at the manifold drops "
@@ -3618,7 +3623,11 @@ with tabs[5]:
                     cc = st.columns([1.25, 1])
                     with cc[0]:
                         if len(res) == 1:
-                            st.pyplot(sys_plot(res, kind), clear_figure=True)
+                            full_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full",
+                                              help="Off: the plot zooms to the solution - a high-PI well's IPR "
+                                                   "runs far beyond what the tubing can lift. The curve table "
+                                                   "always lists every rate.")
+                            st.pyplot(sys_plot(res, kind, full=full_), clear_figure=True)
                         st.markdown("**IPR / VLP curve data**")
                         rt_ = wsys.rate_table(kind, r)
                         rt_show_ = rt_.copy()
