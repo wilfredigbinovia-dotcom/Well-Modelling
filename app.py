@@ -2592,7 +2592,7 @@ with tabs[4]:
                     corrs = st.multiselect("Correlations to match", match_list,
                                            **dflt("vlp_match_corrs", default=[
                                                c_ for c_ in wvlp.VLP_CORRELATIONS if c_ in
-                                               ("duns_ros", "duns_ros_gould", "ansari", "beggs_brill",
+                                               ("tuffp_unified", "pe5_style", "pe2_style", "duns_ros", "duns_ros_gould", "ansari", "beggs_brill",
                                                 "hagedorn_brown", "gray", "mukherjee_brill", "orkiszewski", "aziz")]),
                                            format_func=VLP_LABELS.get,
                                            key="vlp_match_corrs")

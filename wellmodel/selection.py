@@ -56,7 +56,8 @@ def compare_correlations(model: WellModel, tests: pd.DataFrame, weights=None,
                          verbose: bool = False) -> SelectionResult:
     tests = tests.reset_index(drop=True)
     w = np.ones(len(tests)) if weights is None else np.asarray(weights, float)
-    cands = list(correlations or CORRELATIONS)
+    # the unified mechanistic model is ~10x slower; ask for it explicitly in this all-against-all screen
+    cands = list(correlations or [c for c in CORRELATIONS if c != "tuffp_unified"])
     rows, matches, cv = [], {}, {}
     for c in cands:
         raw = match_tests(model.copy(gravity_mult=1.0, friction_mult=1.0), tests,

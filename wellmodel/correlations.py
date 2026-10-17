@@ -635,7 +635,90 @@ def ansari(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     return elev, np.maximum(fric, 0.0), np.clip(hl, 0.0, 1.0)
 
 
+
+# ---------------------------------------------------------------------------
+PE2_SLUG_SLIP = 0.155          # ft/s - slug-flow slip velocity calibrated on PROSPER PE2 gradients (Abura 2S)
+PE2_SLUG_GRAVITY = 1.0145      # slug-flow static gradient / in-situ density, same calibration
+
+
+def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
+    """PE2-style: a public-domain stand-in for Petroleum Experts' proprietary PE2, built from the pieces PROSPER's
+    gradient output shows it uses and calibrated against PROSPER PE2 gradients.
+
+    Bubble flow (Griffith & Wallis limit, gas fraction below max(1.071 - 0.2218 vm^2/d, 0.13)): Griffith holdup
+    (slip 0.8 ft/s) and Griffith friction - as in the modified Hagedorn & Brown. Slug flow: holdup from a constant
+    slip velocity (0.155 ft/s, at least the no-slip holdup), a static gradient 1.45 % above the in-situ density
+    (as PROSPER PE2 reports) and the Duns & Ros bubble/slug friction. Transition and
+    mist (Duns & Ros map): Duns & Ros. NOT Petroleum Experts' PE2 - an approximation of it."""
+    vm, lam = _no_slip_lambda(vsl, vsg)
+    e_hb, f_hb, hl_hb = hagedorn_brown(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
+    e_dr, f_dr, hl_dr = duns_ros(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
+    lb = np.maximum(1.071 - 0.2218 * vm * vm / d, 0.13)
+    bubble = (vsg / np.maximum(vm, 1e-12)) < lb
+    k = (rho_l / sig_l) ** 0.25
+    nlv, ngv = 1.938 * vsl * k, 1.938 * vsg * k
+    ls = 50 + 36 * nlv
+    beyond_slug = ngv >= ls
+    # slug: drift with a small constant slip
+    vs = PE2_SLUG_SLIP
+    disc = np.maximum((1 + vm / vs) ** 2 - 4 * vsg / vs, 0.0)
+    hl_s = np.clip(1 - 0.5 * (1 + vm / vs - np.sqrt(disc)), lam, 1.0)
+    fm1 = friction_factor(rho_l * vsl * d / (mu_l * CP_TO_LBFTS), rough / d)
+    nd = 120.872 * d * np.sqrt(rho_l / sig_l)
+    x2 = fm1 * vsg * nd ** (2 / 3) / np.maximum(vsl, 1e-9)
+    ff2 = _li(x2, *_F2V)
+    ff3 = 1 + fm1 * np.sqrt(vsg / (50 * np.maximum(vsl, 1e-9)))
+    f_s = fm1 * ff2 / ff3 * rho_l * vsl * vm / (2 * G * d) / 144.0
+    e_s = PE2_SLUG_GRAVITY * (rho_l * hl_s + rho_g * (1 - hl_s)) * sin_t / 144.0
+    e = np.where(bubble, e_hb, np.where(beyond_slug, e_dr, e_s))
+    f = np.where(bubble, f_hb, np.where(beyond_slug, f_dr, f_s))
+    hl = np.where(bubble, hl_hb, np.where(beyond_slug, hl_dr, hl_s))
+    single = lam > 0.99999
+    return np.where(single, e_hb, e), np.where(single, f_hb, f), np.where(single, 1.0, hl)
+
+
+# ---------------------------------------------------------------------------
+PE5_SLUG_SLIP = 0.32           # ft/s - slug-flow slip velocity, calibrated on PROSPER PE5 gradients (Abura 2S)
+PE5_FRICTION = (1.6517, -0.3361)   # slug friction / Moody(rho_s vm d / mu_L) rho_s vm^2/2gd = a + b HL, same data
+
+
+def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
+    """PE5-style: a calibrated approximation of Petroleum Experts' proprietary PE5, from what PROSPER's PE5
+    gradient output shows (Abura 2S). NOT PE5 itself.
+
+    Bubble flow (Griffith & Wallis limit, gas fraction below max(1.071 - 0.2218 vm^2/d, 0.13)): Griffith holdup
+    (0.8 ft/s slip) and Griffith friction - PE5 reports this region as dispersed bubble with exactly that slip.
+    Slug flow: holdup from a constant 0.32 ft/s slip (at least the no-slip holdup); static gradient from the
+    in-situ density; friction = (1.6517 - 0.3361 HL) x the Moody friction of the slug mixture (in-situ density,
+    mixture velocity, liquid viscosity). Transition and mist (Duns & Ros map): Duns & Ros."""
+    vm, lam = _no_slip_lambda(vsl, vsg)
+    e_hb, f_hb, hl_hb = hagedorn_brown(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
+    e_dr, f_dr, hl_dr = duns_ros(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
+    lb = np.maximum(1.071 - 0.2218 * vm * vm / d, 0.13)
+    bubble = (vsg / np.maximum(vm, 1e-12)) < lb
+    k = (rho_l / sig_l) ** 0.25
+    beyond_slug = 1.938 * vsg * k >= 50 + 36 * 1.938 * vsl * k
+    vs = PE5_SLUG_SLIP
+    disc = np.maximum((1 + vm / vs) ** 2 - 4 * vsg / vs, 0.0)
+    hl_s = np.clip(1 - 0.5 * (1 + vm / vs - np.sqrt(disc)), lam, 1.0)
+    rho_s = rho_l * hl_s + rho_g * (1 - hl_s)
+    f_m = friction_factor(rho_s * vm * d / (mu_l * CP_TO_LBFTS), rough / d)
+    a_, b_ = PE5_FRICTION
+    f_s = (a_ + b_ * hl_s) * f_m * rho_s * vm * vm / (2 * G * d) / 144.0
+    e_s = rho_s * sin_t / 144.0
+    e = np.where(bubble, e_hb, np.where(beyond_slug, e_dr, e_s))
+    f = np.where(bubble, f_hb, np.where(beyond_slug, f_dr, f_s))
+    hl = np.where(bubble, hl_hb, np.where(beyond_slug, hl_dr, hl_s))
+    single = lam > 0.99999
+    return np.where(single, e_hb, e), np.where(single, f_hb, f), np.where(single, 1.0, hl)
+
+
+from .unified import tuffp_unified  # noqa: E402  (unified uses friction_factor above)
+
 CORRELATIONS = {
+    "tuffp_unified": tuffp_unified,
+    "pe5_style": pe5_style,
+    "pe2_style": pe2_style,
     "beggs_brill": beggs_brill,
     "hagedorn_brown": hagedorn_brown,
     "no_slip": no_slip,
@@ -651,6 +734,9 @@ CORRELATIONS = {
 }
 
 LABELS = {
+    "tuffp_unified": "TUFFP Unified (Zhang et al. 2003)",
+    "pe5_style": "PE5-style (calibrated approximation)",
+    "pe2_style": "PE2-style (calibrated approximation)",
     "beggs_brill": "Beggs & Brill",
     "hagedorn_brown": "Hagedorn & Brown (mod.)",
     "no_slip": "No-slip (lower bound)",

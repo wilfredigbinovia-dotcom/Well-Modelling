@@ -1261,3 +1261,94 @@ def test_gradient_results_follow_the_traverse():
         assert set(flow["Regime"]) <= {"Bubble", "Slug", "Transition", "Mist", "Liquid", "Segregated",
                                        "Intermittent", "Distributed"}
     assert wgrad.flow_regime("hagedorn_brown", 4.017, 4.06, 52.76, 1.78, 27.0, 2.44 / 12, 1.0) == "Slug"
+
+
+def test_pe2_style_reproduces_prosper_pe2_rows():
+    """Rows from a PROSPER PE2 gradient export (Abura 2S): holdup and gradients at PROSPER's own conditions.
+    Friction is compared with the roughness PROSPER's single-phase friction implies (~0.0019 in)."""
+    from wellmodel import correlations as C
+    # vsl, vsg, rho_l, rho_g, mu_l, mu_g, sigma, d_in, angle, p | holdup, static, friction (PROSPER)
+    rows = [(4.051, 2.548, 51.87, 2.62, 2.831, 0.01307, 10.3, 2.44, 0.61, 824.6, None, None, None),
+            (4.259, 0.701, 50.140, 5.132, 1.879, 0.0153, 5.7563, 2.44, 0.61, 1603.0, 0.8623, 0.310, 0.015),
+            (6.836, 0.520, 49.301, 6.243, 1.5516, 0.0157, 4.43, 1.95, 18.40, 1960.27, 0.9359, 0.306, 0.041)]
+    for vsl, vsg, rl, rg, ml, mg, sg, d, ang, p, hl_p, gs_p, gf_p in rows:
+        a = [np.array([x]) for x in (vsl, vsg, rl, rg, ml, mg, sg)]
+        e, f, hl = C.pe2_style(*a, d / 12, 0.0019 / 12, np.cos(np.radians(ang)), np.array([p]))
+        if hl_p is None:
+            continue
+        assert hl[0] == pytest.approx(hl_p, abs=0.003)
+        assert e[0] == pytest.approx(gs_p, abs=0.003)
+        assert f[0] == pytest.approx(gf_p, abs=0.0015)
+    # bubble flow is the modified Hagedorn & Brown (Griffith) - identical
+    a = [np.array([x]) for x in (6.836, 0.520, 49.301, 6.243, 1.5516, 0.0157, 4.43)]
+    args = (*a, 1.95 / 12, 0.0006 / 12, 0.95, np.array([1960.0]))
+    assert np.allclose(C.pe2_style(*args), C.hagedorn_brown(*args))
+    assert "pe2_style" in wvlp.VLP_CORRELATIONS
+
+
+def test_tuffp_unified_flow_patterns_and_limits():
+    from wellmodel import unified as U
+    rl, rg, ml, mg, sig, d = 998.0, 3.5, 1e-3, 1.8e-5, 0.0731, 0.0508          # air-water, 2 in, ~3 bar
+    case = lambda vsl, vsg, ang: U.unified_si([vsl], [vsg], rl, rg, ml, mg, sig, d, 4.6e-5,
+                                              np.sin(np.radians(ang)), 3e5)
+    assert case(0.01, 0.5, 0)["regime"][0] == "Stratified"
+    assert case(1.0, 0.5, 0)["regime"][0] == "Slug"
+    assert case(3.0, 0.1, 90)["regime"][0] == "Dispersed bubble"
+    assert case(0.05, 30.0, 90)["regime"][0] == "Annular"
+    s = case(0.2, 2.0, 90)
+    assert s["regime"][0] == "Slug" and 0 < s["slug_frequency_1_s"][0] < 10 and s["slug_holdup"][0] >= 0.24
+    # vectorised = one by one; everything finite and holdup in (0, 1] at all angles
+    vsl = np.array([0.01, 0.2, 1.0, 3.0]); vsg = np.array([0.5, 2.0, 10.0, 0.3])
+    for ang in (-90, -10, 0, 30, 90):
+        D = U.unified_si(vsl, vsg, rl, rg, ml, mg, sig, d, 4.6e-5, np.sin(np.radians(ang)), 3e5)
+        assert np.isfinite(D["grav"]).all() and np.isfinite(D["fric"]).all()
+        assert ((D["hl"] > 0) & (D["hl"] <= 1)).all()
+        one = [case(a, b, ang)["hl"][0] for a, b in zip(vsl, vsg)]
+        assert np.allclose(one, D["hl"], atol=2e-3)
+    # field-unit wrapper: single-phase liquid gives the hydrostatic gradient
+    e, f, h = U.tuffp_unified(np.array([5.0]), np.array([0.0]), 62.4, 0.1, 1.0, 0.012, 70.0, 0.2, 5e-5, 1.0, 500.0)
+    assert h[0] == 1.0 and e[0] == pytest.approx(62.4 / 144, rel=1e-3)
+
+
+def test_tuffp_unified_at_prosper_pe5_conditions():
+    """Slug-flow rows of a PROSPER PE5 export (Abura 2S): the unified model's slug holdup is close to PE5's
+    (both slug-dynamics models); it is not calibrated to PE5."""
+    from wellmodel import unified as U
+    # vsl, vsg ft/s, rho_l, rho_g lb/ft3, mu_l, mu_g cp, sigma dyne/cm, d in, angle deg, p psia, PE5 holdup
+    rows = [(4.026, 3.315, 52.153, 2.169, 3.1533, 0.0124, 11.339, 2.44, 0.61, 686.37, 0.558753),
+            (4.045, 2.808, 51.989, 2.437, 3.0314, 0.0126, 10.73, 2.44, 0.61, 771.22, 0.601257)]
+    for vsl, vsg, rl, rg, ml, mg, sg, d, ang, p, hl_pe5 in rows:
+        D = U.tuffp_details([vsl], [vsg], [rl], [rg], [ml], [mg], [sg], d / 12, 0.0006 / 12,
+                            np.cos(np.radians(ang)), [p])
+        assert D["regime"][0] == "Slug"
+        assert D["hl"][0] == pytest.approx(hl_pe5, abs=0.01)
+    assert "tuffp_unified" in wvlp.VLP_CORRELATIONS
+
+
+def test_tuffp_unified_gas_well_within_mechanistic_family():
+    *_, path, oil = _vlp_setup()
+    gas = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.65), 50)
+    case = {"q": np.array([1.0, 5.0, 20.0]), "wgr": 10.0, "cgr": 20.0}
+    pt = wvlp.traverse(path, gas, 1000.0, case, "tuffp_unified", u=4.0)[0][:, -1]
+    pa = wvlp.traverse(path, gas, 1000.0, case, "ansari", u=4.0)[0][:, -1]
+    pd_ = wvlp.traverse(path, gas, 1000.0, case, "duns_ros", u=4.0)[0][:, -1]
+    assert np.all(np.isfinite(pt)) and np.all(pt > 1000.0)
+    assert np.all(pt > 0.8 * np.minimum(pa, pd_)) and np.all(pt < 1.2 * np.maximum(pa, pd_))
+
+
+def test_pe5_style_reproduces_prosper_pe5_rows():
+    """Rows from a PROSPER PE5 gradient export (Abura 2S) at PROSPER's own conditions (roughness 0.0006 in)."""
+    from wellmodel import correlations as C
+    # vsl, vsg, rho_l, rho_g, mu_l, mu_g, sigma, d_in, angle, p | holdup, static, friction (PROSPER PE5)
+    rows = [(4.026, 3.315, 52.153, 2.169, 3.1533, 0.0124, 11.339, 2.44, 0.61, 686.37, 0.558753, 0.209, 0.033),
+            (4.146, 1.384, 51.12, 3.763, 2.314, 0.0137, 8.03, 2.44, 0.61, 1187.35, 0.760532, 0.276, 0.022)]
+    for vsl, vsg, rl, rg, ml, mg, sg, d, ang, p, hl_p, gs_p, gf_p in rows:
+        a = [np.array([x]) for x in (vsl, vsg, rl, rg, ml, mg, sg)]
+        e, f, hl = C.pe5_style(*a, d / 12, 0.0006 / 12, np.cos(np.radians(ang)), np.array([p]))
+        assert hl[0] == pytest.approx(hl_p, abs=0.002)
+        assert e[0] == pytest.approx(gs_p, abs=0.002)
+        assert f[0] == pytest.approx(gf_p, rel=0.05)
+    a = [np.array([x]) for x in (6.836, 0.520, 49.301, 6.243, 1.5516, 0.0157, 4.43)]
+    args = (*a, 1.95 / 12, 0.0006 / 12, 0.95, np.array([1960.0]))
+    assert np.allclose(C.pe5_style(*args), C.hagedorn_brown(*args))         # bubble flow: Griffith
+    assert "pe5_style" in wvlp.VLP_CORRELATIONS

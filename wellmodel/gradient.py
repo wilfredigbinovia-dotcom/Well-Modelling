@@ -49,7 +49,7 @@ def flow_regime(correlation, vsl, vsg, rho_l, rho_g, sig, d_ft, sin_t):
     ls, lm = 50 + 36 * nlv, 75 + 84 * nlv ** 0.75
     lb = max(1.071 - 0.2218 * vm * vm / max(d_ft, 1e-6), 0.13)
     if 1 - lam < lb and ngv < l1 + l2 * nlv:
-        return "Bubble"
+        return "Dispersed bubble" if correlation == "pe5_style" else "Bubble"
     if ngv < ls:
         return "Slug"
     if ngv < lm:
@@ -175,8 +175,14 @@ def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.na
         i, node = s_["i"], s_["i"] + 1
         ph = {k: float(np.atleast_1d(v)[0]) for k, v in s_["ph"].items()}
         hl, lam = s_["hl"], s_["lam"]
-        regime = flow_regime(correlation, s_["vsl"], s_["vsg"], s_["rho_l"], s_["rho_g"], s_["sig"],
-                             path.d_h[i], path.sin_t[i])
+        if correlation == "tuffp_unified" and 1e-6 < lam < 0.99999:
+            from .unified import tuffp_details
+            regime = str(tuffp_details([s_["vsl"]], [s_["vsg"]], [s_["rho_l"]], [s_["rho_g"]], [ph["mu_l"]],
+                                       [ph["mu_g"]], [s_["sig"]], path.d_h[i], path.rough[i], path.sin_t[i],
+                                       [0.5 * (P[i] + P[node])])["regime"][0])
+        else:
+            regime = flow_regime(correlation, s_["vsl"], s_["vsg"], s_["rho_l"], s_["rho_g"], s_["sig"],
+                                 path.d_h[i], path.sin_t[i])
         rho_mix_ns = lam * s_["rho_l"] + (1 - lam) * s_["rho_g"]
         rho_flow = hl * s_["rho_l"] + (1 - hl) * s_["rho_g"]
         m_l = ph["m_oil"] + ph["m_water"] if np.isfinite(ph["m_oil"]) else s_["vsl"] * path.area[i] * s_["rho_l"] * 86400

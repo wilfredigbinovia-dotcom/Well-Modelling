@@ -36,11 +36,11 @@ from .equipment import HeatCapacities
 
 RB = 5.615            # ft3/bbl
 RHO_AIR_SC = 0.0764   # lb/scf
-VLP_CORRELATIONS = ["duns_ros", "duns_ros_gould", "ansari", "hagedorn_brown", "beggs_brill", "beggs_brill_noslip", "gray",
+VLP_CORRELATIONS = ["tuffp_unified", "pe5_style", "pe2_style", "duns_ros", "duns_ros_gould", "ansari", "hagedorn_brown", "beggs_brill", "beggs_brill_noslip", "gray",
                     "mukherjee_brill", "orkiszewski", "aziz", "fancher_brown", "no_slip"]
 LOWER_BOUNDS = ("fancher_brown", "no_slip")          # quality-check bounds, not suggested for matching
 NOT_AVAILABLE = {
-    "Petroleum Experts 1-5": "proprietary (Petroleum Experts) - not planned",
+    "Petroleum Experts 1-5": "proprietary (Petroleum Experts). PE2-style and PE5-style are calibrated public-domain approximations of PE2 and PE5, not the originals",
 }
 P1_RANGE, P2_RANGE = (0.9, 1.1), (0.7, 1.3)     # beyond these the match is flagged
 
