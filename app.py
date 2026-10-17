@@ -2359,6 +2359,36 @@ def vlp_ipr_points(kind, t, rates, bhp, curve_t, scale):
     return df
 
 
+def _set_all(key, options, value):
+    for c in options:
+        ss[f"{key}__{c}"] = value
+
+
+def corr_checklist(title, key, options, default, notes=None, height=None):
+    """PROSPER-style correlation list: one checkbox per correlation, with an optional note beside each (e.g. the
+    matched Parameter 1 and 2). The selection is kept in ss[key] (saved with the project)."""
+    chosen0 = set(ss.get(key, default))
+    notes = notes or {}
+    with st.container(border=True):
+        h = st.columns([3, 1, 1], vertical_alignment="center")
+        h[0].markdown(f"**{title}**")
+        h[1].button("All", key=f"{key}__all", on_click=_set_all, args=(key, options, True), width="stretch")
+        h[2].button("None", key=f"{key}__none", on_click=_set_all, args=(key, options, False), width="stretch")
+        box = st.container(height=height, border=False) if height else st.container(border=False)
+        out, slots = [], {}
+        with box:
+            for c in options:
+                k = f"{key}__{c}"
+                row = st.columns([3, 2], vertical_alignment="center")
+                if row[0].checkbox(VLP_LABELS.get(c, c), key=k, **({} if k in ss else {"value": c in chosen0})):
+                    out.append(c)
+                slots[c] = row[1].empty()
+                if notes.get(c):
+                    slots[c].caption(notes[c])
+    ss[key] = out
+    return out, slots
+
+
 def accept_u(u):
     put("eq_u", float(round(u, 5)))
     ss["vlp_u_accepted"] = float(round(u, 5))
@@ -2502,9 +2532,10 @@ with tabs[4]:
                     st.caption("Each correlation, unmatched (Parameter 1 = Parameter 2 = 1), is run from the "
                                "measured tubing head pressure down to the gauge. The one with the smallest error "
                                "is suggested; Match VLP then fine-tunes it.")
-                    corrs = st.multiselect("Correlations", wvlp.VLP_CORRELATIONS,
-                                           **dflt("vlp_cmp_corrs", default=wvlp.VLP_CORRELATIONS),
-                                           format_func=VLP_LABELS.get, key="vlp_cmp_corrs")
+                    last_ = ss.get("vlp_cmp_last", {})
+                    corrs, slots_ = corr_checklist("Tubing correlation comparison", "vlp_cmp_corrs", wvlp.VLP_CORRELATIONS,
+                                           wvlp.VLP_CORRELATIONS,
+                                           {c_: f"mean error {v_:+.1f} psi" for c_, v_ in last_.items()})
                     with st.expander("Correlations not available"):
                         st.markdown("\n".join(f"- **{k_}** - {v_}" for k_, v_ in wvlp.NOT_AVAILABLE.items()))
                         st.caption("Fancher & Brown (lowest) and Duns & Ros (highest in slug flow) bound the "
@@ -2516,8 +2547,16 @@ with tabs[4]:
                     if not np.isfinite(tests["gauge_p"]).any():
                         st.warning("No test has gauge data - comparison needs a measured downhole pressure.")
                     elif corrs:
-                        with st.spinner("Running traverses..."):
-                            summ, detail, travs, g = wvlp.compare(path, fluid, tests, corrs, u_cur, hc)
+                        csig_ = (tuple(corrs), tests.to_json(), u_cur, fluid_note, o.flow_type,
+                                 tuple(np.round(path.md, 2)), tuple(np.round(path.area, 8)))
+                        if ss.get("vlp_cmp_cache", (None,))[0] != csig_:
+                            with st.spinner("Running traverses..."):
+                                ss["vlp_cmp_cache"] = (csig_, wvlp.compare(path, fluid, tests, corrs, u_cur, hc))
+                        summ, detail, travs, g = ss["vlp_cmp_cache"][1]
+                        ss["vlp_cmp_last"] = dict(zip(summ["key"], summ["Bias (psi)"]))
+                        for c_, v_ in ss["vlp_cmp_last"].items():
+                            if c_ in slots_:
+                                slots_[c_].caption(f"mean error {v_:+.1f} psi")
                         cand = summ[~summ["key"].isin(wvlp.LOWER_BOUNDS)]
                         best = cand.iloc[0] if len(cand) else summ.iloc[0]
                         st.success(f"**Suggested: {best['Correlation']}** - mean absolute error "
@@ -2587,15 +2626,16 @@ with tabs[4]:
                     st.caption("Regression of Parameter 1 (gravity term multiplier) and Parameter 2 (friction "
                                "term multiplier) so the calculated gauge pressures match the tests. Parameter 1 "
                                "within 0.9-1.1 means the correlation and data are consistent; larger corrections "
-                               "point to PVT, rate or gauge problems.")
+                               "point to PVT, rate or gauge problems. TUFFP Unified is left unticked by default: "
+                               "it is about 10x slower to regress.")
                     match_list = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
-                    corrs = st.multiselect("Correlations to match", match_list,
-                                           **dflt("vlp_match_corrs", default=[
-                                               c_ for c_ in wvlp.VLP_CORRELATIONS if c_ in
-                                               ("tuffp_unified", "pe5_style", "pe2_style", "duns_ros", "duns_ros_gould", "ansari", "beggs_brill",
-                                                "hagedorn_brown", "gray", "mukherjee_brill", "orkiszewski", "aziz")]),
-                                           format_func=VLP_LABELS.get,
-                                           key="vlp_match_corrs")
+                    ms_prev_ = ss.get("vlp_matches", {}).get("ms", {})
+                    corrs, slots_ = corr_checklist(
+                        "Correlations to match", "vlp_match_corrs", match_list,
+                        [c_ for c_ in match_list if c_ in ("pe5_style", "pe2_style", "duns_ros",
+                                                           "duns_ros_gould", "ansari", "beggs_brill", "hagedorn_brown",
+                                                           "gray", "mukherjee_brill", "orkiszewski", "aziz")],
+                        {c_: f"P1 {m_.p1:.2f}   P2 {m_.p2:.2f}" for c_, m_ in ms_prev_.items()})
                     if not np.isfinite(tests["gauge_p"]).any():
                         st.warning("No test has gauge data to match.")
                     elif corrs:
@@ -2606,6 +2646,9 @@ with tabs[4]:
                                     ms = [wvlp.match(path, fluid, tests, c_, u_cur, hc) for c_ in corrs]
                                 ss["vlp_matches"] = {"sig": sig, "ms": {m_.correlation: m_ for m_ in ms}}
                             ms = ss["vlp_matches"]["ms"]
+                            for c_, m_ in ms.items():
+                                if c_ in slots_:
+                                    slots_[c_].caption(f"P1 {m_.p1:.2f}   P2 {m_.p2:.2f}")
                             mt = wvlp.match_table(list(ms.values()))
                             st.dataframe(mt.drop(columns=["key", "Score"]).style.format(
                                 {"Parameter 1": "{:.4f}", "Parameter 2": "{:.4f}", "Std Deviation (psi)": "{:.2f}",
