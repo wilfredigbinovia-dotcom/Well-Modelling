@@ -1393,3 +1393,109 @@ def test_choke_gas_only_critical_ratio_and_liquid_only():
     L = CK.ChokeSetup(oil, "oil", {"wc": 1.0, "gor": 0.0}, weq.HeatCapacities())
     r = L.rate(1000.0, 100.0, 50.0, 0.5)
     assert r["regime"] == "Subcritical" and np.isnan(r["q_crit"])
+
+
+# ------------------------------------------------------------ continuous gas lift design (tab 7)
+from wellmodel import gaslift as wgl
+
+
+def test_gaslift_thornhill_craver_matches_api_chart():
+    # API RP 11V6 Table 6 (uncorrected, 3/16-in port = 12/64, 1200 psig upstream, SG 0.65, 60 F)
+    for p2, q in ((1100, 550), (1000, 720), (900, 830), (800, 880), (700, 920)):
+        assert float(wgl.thornhill_craver(12 / 64, 1214.7, p2 + 14.7, 60.0, 0.65)) == pytest.approx(q, rel=0.03)
+    assert wgl.TC_RCRIT == pytest.approx(0.5512, abs=1e-4)
+    d = float(wgl.port_for_rate(750.0, 1214.7, 989.7, 60.0, 0.65)) * 64
+    assert d == pytest.approx(12.0, abs=0.15)                   # "750 MCFD needs about 225 psi" through 3/16 in
+    p1 = wgl.upstream_for_rate(750.0, 12 / 64, 989.7, 60.0, 0.65)
+    assert p1 == pytest.approx(1214.7, abs=3.0)
+
+
+def test_gaslift_dome_corrections():
+    assert float(wgl.ct_api(130)) == pytest.approx(0.869, abs=5e-4)          # API Table A-1
+    assert float(wgl.ct_api(300)) == pytest.approx(0.660, abs=5e-4)
+    # Winkler & Eads (1989) examples 1 and 2
+    assert float(wgl.dome_60_winkler(806, 170)) == pytest.approx(650.0, abs=0.2)
+    assert float(wgl.dome_60_winkler(2228, 200)) == pytest.approx(1656.0, abs=0.3)
+    assert float(wgl.dome_at_t_winkler(1656.07, 200)) == pytest.approx(2228.0, abs=0.1)
+    # Table 3: 1000 psia at 60 F -> 1291.5 psia at 190 F
+    assert float(wgl.dome_at_t_winkler(1000 - 14.4, 190)) + 14.4 == pytest.approx(1291.5, rel=2.5e-3)
+    # PROSPER option: API below 1200 psig, Winkler-Eads above
+    assert float(wgl.dome_at_60(806, 170)) == pytest.approx(806 * float(wgl.ct_api(170)))
+    assert float(wgl.dome_at_60(2228, 200)) == pytest.approx(1656.07, abs=0.3)
+    assert float(wgl.dome_at_60(2228, 200, high_pressure=False)) == pytest.approx(1713, abs=1.5)
+
+
+def test_gaslift_api_example1_spacing_and_settings():
+    """API RP 11V6 Example 1 (section 5.1): 1200 psig gas, gg 0.030, Pwh 100, gs 0.465, PD 25, Psf 20."""
+    md = np.arange(0.0, 8000.1, 1.0)
+    ppd = lambda d: np.interp(d, [0, 2500, 4000, 5000, 6000, 7000, 8000], [100, 400, 600, 740, 880, 1030, 1200])
+    depths, why = wgl.space_valves(md, md, 100.0, lambda m: float(ppd(m)), 1200 + 0.03 * md,
+                                   lambda n: 1200 - 25 * n + 0.03 * md, 0.465, 20.0, 20.0, 250.0, 7940.0)
+    assert np.allclose(depths, [2483, 4390, 5797, 6783, 7434, 7820], atol=20)
+    assert why == "injection depth reached"
+    # Table 2, valve 1: Piod 1275, Ppd 400, Ap/Ab 0.094, Tv 130 F -> Pvo (test rack) 1144 psig
+    gas = wgl.LiftGas(0.65, t_surface=78)
+    pvc, pd60, ptro, _ = wgl.valve_settings(1275.0, 400.0, 0.094, 130.0, 1200.0, gas, 0.0, 2475.0, 78.0, 128.0,
+                                            high_pressure=False, p_atm=0.0)
+    assert ptro == pytest.approx(1144, abs=1.5)
+    assert pvc == pytest.approx(1275 * 0.906 + 400 * 0.094)   # closing pressure at depth = dome at temperature
+
+
+def test_gaslift_asheim_claymore_c6():
+    m3s_bpd = 86400 / 0.158987
+    q_l, q_g = 0.0221 * m3s_bpd, 2.87 * 86400 / 0.0283168 / 1e6
+    j = 3.84e-9 * m3s_bpd * 6894.76
+
+    class Gas(wgl.LiftGas):
+        def bg(self, p, t):
+            return 0.00882
+
+    d = 7865.0
+    vt = np.pi / 4 * (4.78 / 12) ** 2 * d
+    vc = np.pi / 4 * ((8.7 / 12) ** 2 - (5.51 / 12) ** 2) * d
+    out = wgl.asheim(q_l, q_g, j, 24 / 64, 2, 1614.7, 172.0, Gas(0.81), 884 * 0.062428, 0.0221 * 35.3147, vt, vc, d)
+    assert out["F1"] == pytest.approx(0.76, abs=0.01)
+    assert out["F2"] == pytest.approx(2.74, rel=0.03)
+    assert out["stable"]
+
+
+def test_gaslift_traverse_and_casing_column():
+    *_, path, oil = _vlp_setup()
+    gas = wgl.LiftGas(0.7, t_surface=80.0)
+    pc = wgl.casing_pressure(path, gas, 1200.0)[0]
+    assert 0.02 < (pc[-1] - pc[0]) / (path.tvd[-1] - path.tvd[0]) < 0.04         # lift-gas column ~0.03 psi/ft
+    # no lift gas: the lifted traverse is the ordinary traverse
+    case = {"q": [800.0], "wc": 0.5, "gor": 300.0}
+    P0, _ = wvlp.traverse(path, oil, 200.0, case, "hagedorn_brown")
+    r = wgl.lifted_traverse(path, oil, 200.0, case, [0.0], "hagedorn_brown", fixed_md=[8000.0])
+    assert r.P[0, -1] == pytest.approx(P0[0, -1], rel=0.01)
+    # lift gas lowers the bottom-hole pressure; the injection point is where tubing + dP meets the casing
+    r = wgl.lifted_traverse(path, oil, 200.0, {"q": [800.0] * 2, "wc": 0.5, "gor": 300.0}, [0.5, 1.5],
+                            "hagedorn_brown", pc=pc, dp_valve=100.0, max_md=10000.0)
+    assert np.all(r.P[:, -1] < P0[0, -1])
+    assert r.inj_md[0] < 10000.0 and not r.limited[0]
+    assert np.interp(r.inj_md[0], path.md, pc) - r.inj_p[0] == pytest.approx(100.0, abs=3.0)
+
+
+def test_gaslift_design_new_well():
+    top, secs, pts, smd, stvd, path, oil = _vlp_setup()
+    curve = iflow.pi_entry(3000, 1000, 2.0)
+    gas = wgl.LiftGas(0.7, t_surface=80.0)
+    inp = wgl.DesignInput(design_rate=wgl.DESIGN_RATE[1], top_p=200, top_p_unload=200, p_inj=1200, p_ko=1200,
+                          qgi_max=1.0, qgi_unload_max=1.0, gor=300, wc=0.5, max_md=10000, q_liquid_max=5000,
+                          dp_close_spread=False, valve=list(wgl.VALVES)[1])
+    res = wgl.design(path, oil, curve, gas, inp, "hagedorn_brown")
+    v = res.valves
+    assert v[-1].kind == "Orifice" and all(x.kind == "Valve" for x in v[:-1]) and len(v) >= 3
+    mds = [x.md for x in v]
+    assert all(np.diff(mds) >= inp.min_spacing - 1e-6)
+    assert res.pso == pytest.approx(inp.p_inj - inp.dp_close * (len(v) - 1))
+    assert v[-1].dp_valve >= inp.dp_valve - 5            # never deeper than the balance point
+    assert all(x.ptro > x.pd60 for x in v[:-1])                   # Ptro = Pd60 / (1 - R)
+    assert all(x.chp_close < x.chp_open for x in v[:-1])
+    assert res.perf is not None and res.qgi <= inp.qgi_max + 1e-9
+    # the operating point honours the IPR
+    assert res.pwf == pytest.approx(float(wgl.ipr_pwf(curve, res.q)), abs=15)
+    vc = wgl.annulus_volume(secs, top, res.inj_md)
+    stab = wgl.design_stability(res, path, oil, gas, curve, vc)
+    assert stab["F1"] > 0 and np.isfinite(vc)
