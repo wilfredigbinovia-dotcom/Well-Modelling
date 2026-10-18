@@ -196,6 +196,8 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
     for c in cases:
         p = {**base, **c}
         changes = {k: float(p[k]) for k in IPR_KEYS if k in c}
+        if kind == "oil" and "wc" in p:
+            changes["wc"] = float(p["wc"]) / 100.0        # the IPR (composite below Pb) at the case's water cut
         curve = ipr_for(changes)
         aof = float(curve.aof) / scale
         rates = rate_grid(aof, method, n, user_rates)

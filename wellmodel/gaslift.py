@@ -457,8 +457,12 @@ class ValveType:
     bellows_area: float          # Ab, in2
     max_port_64: int
     ports_64: tuple = PORTS_64
+    r_table: tuple = ()          # (port_64, R) from the manufacturer, when known
 
     def r(self, port_64):
+        if self.r_table:
+            pt, rt = zip(*self.r_table)
+            return np.interp(np.asarray(port_64, float), pt, rt)
         ap = np.pi / 4 * (np.asarray(port_64, float) / 64.0) ** 2
         return ap / self.bellows_area
 
@@ -470,6 +474,10 @@ class ValveType:
 VALVES = {
     "Generic 1-in IPO (Ab = 0.31 in2)": ValveType("Generic 1-in IPO (Ab = 0.31 in2)", 0.31, 16),
     "Generic 1.5-in IPO (Ab = 0.77 in2)": ValveType("Generic 1.5-in IPO (Ab = 0.77 in2)", 0.77, 32),
+    # Camco R-20, Normal (1.5-in, Ab 0.77 in2): port sizes and R values as listed by PROSPER's valve database
+    "Camco R-20 Normal (1.5-in)": ValveType("Camco R-20 Normal (1.5-in)", 0.77, 36, (8, 12, 16, 20, 24, 28, 32, 36),
+                                            ((8, 0.017), (12, 0.038), (16, 0.066), (20, 0.103), (24, 0.147),
+                                             (28, 0.2), (32, 0.26), (36, 0.3))),
 }
 ORIFICE_PORTS = (8, 10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48)
 
@@ -515,6 +523,10 @@ class DesignInput:
     margin_top: float = 50.0              # casing pressure margin for the first valve, psi
     margin: float = 20.0                  # casing pressure margin (transfer safety) for the deeper valves, psi
     valve_t_profile: str = "Flowing"      # valve temperatures: flowing traverse at the design rate
+    unloading_gas: str = "Transfer pressure"   # PROSPER: gas that lowers Pt at the valve to Pt + transfer % (Pc - Pt)
+    #                                            at the design liquid rate; "Minimum tubing pressure": the older method
+    annulus_t_flowing: bool = True        # lift gas in the annulus at the flowing tubing temperature (PROSPER);
+    #                                       False: straight line from the surface gas temperature to the formation
     valve: str = next(iter(VALVES))
     economics: Economics = field(default_factory=Economics)
 
@@ -792,6 +804,38 @@ def _unloading_gas(path, fluid, ipr, inp: DesignInput, mds, q_design, correlatio
     return g_out, p_out
 
 
+def _unloading_gas_transfer(path, fluid, inp: DesignInput, mds, q_design, pt_target, correlation, p1, p2, u, hc,
+                            gas_sg, n=16):
+    """PROSPER-style unloading gas: for each valve, the lift-gas rate that brings the tubing pressure at the valve,
+    while the design liquid rate is lifted through it, down to the transfer pressure (Pt + transfer % of Pc - Pt).
+    Returns gas rates (MMscf/d), capped at the maximum gas during unloading."""
+    mds = np.atleast_1d(np.asarray(mds, float))
+    nv = len(mds)
+    if not nv:
+        return np.array([])
+    g = np.geomspace(inp.qgi_unload_max / 60.0, inp.qgi_unload_max, n)
+    gg, fm = np.tile(g, nv), np.repeat(mds, n)
+    r = lifted_traverse(path, fluid, inp.top_p_unload, {"q": np.full(gg.size, q_design), "wc": inp.wc, "gor": inp.gor},
+                        gg, correlation, p1, p2, u, hc, fixed_md=fm, gas_sg=gas_sg, passes=1)
+    pt = np.asarray(r.inj_p, float).reshape(nv, n)
+    out = np.empty(nv)
+    for v in range(nv):
+        row, tgt = pt[v], float(pt_target[v])
+        ok = np.isfinite(row)
+        if not ok.any():
+            out[v] = inp.qgi_unload_max
+            continue
+        rr, gv = row[ok], g[ok]
+        if tgt >= rr[0]:
+            out[v] = gv[0]
+        elif tgt <= rr.min():
+            out[v] = inp.qgi_unload_max          # the target cannot be reached: all the gas available
+        else:
+            k = int(np.argmax(rr <= tgt))        # first gas rate at or below the target (pressure falls with gas)
+            out[v] = gv[k - 1] + (gv[k] - gv[k - 1]) * (rr[k - 1] - tgt) / (rr[k - 1] - rr[k])
+    return np.minimum(out, inp.qgi_unload_max)
+
+
 def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedorn_brown", p1=1.0, p2=1.0, u=8.0,
            hc: HeatCapacities | None = None, step=10.0, progress=None) -> DesignResult:
     """Continuous gas-lift design for a new well (PROSPER Design | Gaslift | New Well, casing-sensitive IPO valves,
@@ -811,7 +855,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
 
     # 1. design rate and gas
     perf = None
-    pc_inj = casing_pressure(path, gas, inp.p_inj)[0]
+    pc_inj = casing_pressure(path, gas, inp.p_inj, tc_gas)[0]
     if inp.design_rate == DESIGN_RATE[0]:
         q_d, qgi_d = float(inp.q_design), float(inp.qgi_max)
     else:
@@ -826,6 +870,21 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
         q_d, qgi_d = opt["q"], opt["qgi"]
         msgs.append(f"Design point: {q_d:,.1f} STB/d liquid with {qgi_d:.4g} MMscf/d lift gas ({opt['note']}).")
     q_d = min(q_d, inp.q_liquid_max)
+    if inp.annulus_t_flowing:
+        # the lift gas comes down the annulus at the temperature of the flowing tubing (PROSPER): take the
+        # temperature profile of the lifted well at the design point and redo the design rate with it
+        lt0 = lifted_traverse(path, fluid, inp.top_p, {"q": [q_d], "wc": inp.wc, "gor": inp.gor}, [qgi_d], correlation,
+                              p1, p2, u, hc, pc=pc_inj, dp_valve=inp.dp_valve, max_md=max_md, gas_sg=gas.sg)
+        tc_gas = np.asarray(lt0.T[0], float)
+        pc_inj = casing_pressure(path, gas, inp.p_inj, tc_gas)[0]
+        if perf is not None:
+            perf = performance_curve(path, fluid, ipr, inp.top_p, inp.wc, inp.gor, inp.qgi_max * 1.5, correlation, p1,
+                                     p2, u, hc, pc=pc_inj, dp_valve=inp.dp_valve, max_md=max_md, gas_sg=gas.sg, n=13,
+                                     economics=inp.economics)
+            opt = optimum(perf, by, inp.qgi_max, inp.q_liquid_max)
+            if opt is not None and opt["q"] > 0:
+                q_d, qgi_d = min(opt["q"], inp.q_liquid_max), opt["qgi"]
+                msgs[-1] = f"Design point: {q_d:,.1f} STB/d liquid with {qgi_d:.4g} MMscf/d lift gas ({opt['note']})."
 
     # fine depth grid
     md_f = np.unique(np.concatenate([np.arange(path.md[0], path.md[-1], step), path.md]))
@@ -834,7 +893,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
     def on_grid(prof):
         return np.interp(md_f, path.md, prof)
 
-    pc_ko = casing_pressure(path, gas, inp.p_ko)[0]
+    pc_ko = casing_pressure(path, gas, inp.p_ko, tc_gas)[0]
     r_guess = float(valve_t.r(12 if 12 <= valve_t.max_port_64 else valve_t.max_port_64))
     pds, depths = [], []
     stop = ""
@@ -854,7 +913,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
             (depths, drops, d_op, d_next, stop, transfer_f)."""
             nv = len(depths)
             pso = inp.p_inj - sum(pds[:nv]) - (inp.safety_last if nv else 0.0)
-            pc_op = casing_pressure(path, gas, pso)[0]
+            pc_op = casing_pressure(path, gas, pso, tc_gas)[0]
             lt = lifted_traverse(path, fluid, inp.top_p, {"q": [q_d], "wc": inp.wc, "gor": inp.gor}, [qgi_d], correlation,
                                  p1, p2, u, hc, pc=pc_op, dp_valve=inp.dp_valve, max_md=max_md, gas_sg=gas.sg)
             if lt.no_injection[0]:
@@ -878,7 +937,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
 
             def pc_next(n):
                 if n not in pc_cache:
-                    pc_cache[n] = on_grid(casing_pressure(path, gas, pc_surface(n))[0])
+                    pc_cache[n] = on_grid(casing_pressure(path, gas, pc_surface(n), tc_gas)[0])
                 return pc_cache[n]
 
             new, stop = space_valves(md_f, tvd_f, inp.top_p_unload, lambda m: float(np.interp(m, md_f, transfer_f)),
@@ -902,7 +961,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
             for k, dk in enumerate(new):
                 pd_k = inp.dp_close
                 if inp.dp_close_spread:                      # PROSPER "Pvo = gas pressure": at least the valve spread
-                    piod = float(np.interp(dk, md_f, pc_next(k) if k else on_grid(casing_pressure(path, gas, inp.p_inj)[0])))
+                    piod = float(np.interp(dk, md_f, pc_next(k) if k else on_grid(casing_pressure(path, gas, inp.p_inj, tc_gas)[0])))
                     pd_k = max(pd_k, r_of(k) * (piod - float(np.interp(dk, md_f, transfer_f))))
                 pds_new.append(pd_k)
             return new, pds_new, d_op, d_next, stop, transfer_f
@@ -948,7 +1007,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
         nv = len(depths)
         pio = [inp.p_inj - sum(pds[:k]) for k in range(nv)]
         pso = inp.p_inj - sum(pds) - (inp.safety_last if nv else 0.0)
-        pc_op = casing_pressure(path, gas, pso)[0]
+        pc_op = casing_pressure(path, gas, pso, tc_gas)[0]
         lt = lifted_traverse(path, fluid, inp.top_p, {"q": [q_d], "wc": inp.wc, "gor": inp.gor}, [qgi_d], correlation,
                              p1, p2, u, hc, pc=pc_op, dp_valve=inp.dp_valve, max_md=max_md, fixed_md=[inj_md],
                              gas_sg=gas.sg)
@@ -962,12 +1021,21 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
         t_top = float(tc_gas[0])
         rows = []
         say("Unloading gas rates...")
-        g_unl, pt_unl_all = _unloading_gas(path, fluid, ipr, inp, depths, q_d, correlation, p1, p2, u, hc, gas.sg)
+        transfer_pct = inp.min_transfer_pct
+        if inp.unloading_gas == "Transfer pressure":
+            pc_v = [float(np.interp(dk, path.md, casing_pressure(path, gas, pio[k], tc_gas)[0])) for k, dk in enumerate(depths)]
+            pt_v = [float(np.interp(dk, md_f, pt_f)) for dk in depths]
+            ptr_v = [a + transfer_pct / 100.0 * (b - a) for a, b in zip(pt_v, pc_v)]
+            g_unl = _unloading_gas_transfer(path, fluid, inp, depths, q_d, ptr_v, correlation, p1, p2, u, hc, gas.sg)
+            pt_unl_all = np.array(pt_v)          # ports sized against the flowing tubing pressure
+        else:
+            g_unl, pt_unl_all = _unloading_gas(path, fluid, ipr, inp, depths, q_d, correlation, p1, p2, u, hc, gas.sg)
+            ptr_v = None
         for k, dk in enumerate(depths):
             tv = float(np.interp(dk, path.md, path.tvd))
-            pc_d = float(np.interp(dk, path.md, casing_pressure(path, gas, pio[k])[0]))
+            pc_d = float(np.interp(dk, path.md, casing_pressure(path, gas, pio[k], tc_gas)[0]))
             pt_d = float(np.interp(dk, md_f, pt_f))
-            ptr = float(np.interp(dk, md_f, transfer_f))
+            ptr = float(np.interp(dk, md_f, transfer_f)) if ptr_v is None else ptr_v[k]
             t_v = float(np.interp(dk, path.md, tt_n))
             tg_v = float(np.interp(dk, path.md, tc_gas))
             q_req, pt_unl = float(g_unl[k]) * 1000.0, float(pt_unl_all[k])
@@ -983,7 +1051,9 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
                 q_gas = float(thornhill_craver(port / 64, pc_d, p_down, tg_v, gas.sg)) * (1 - inp.tc_derate_valve / 100)
                 note = "largest port cannot pass the unloading gas"
             r = float(valve_t.r(port))
-            pvc, pd60, ptro, chp_c = valve_settings(pc_d, ptr, r, t_v, pio[k], gas, path.tvd[0], tv, t_top, tg_v,
+            # closing pressure Pvo (1 - R) + Pt R with the flowing tubing pressure (PROSPER: 1617.63 (1 - 0.066)
+            # + 771.99 x 0.066 = 1561.82 psig in the manual's example)
+            pvc, pd60, ptro, chp_c = valve_settings(pc_d, pt_d, r, t_v, pio[k], gas, path.tvd[0], tv, t_top, tg_v,
                                                     inp.dome_high_p)
             rows.append(ValveRow(k + 1, "Valve", dk, tv, pt_d, pc_d, ptr, t_v, q_req, q_gas, pt_unl, port, r, pc_d, pvc,
                                  pd60, ptro, pio[k], chp_c, np.nan, pc_d - pt_d, note))

@@ -1233,7 +1233,7 @@ def test_bergman_sutton_matches_prosper_at_and_above_bubble_point():
 def test_downhole_cells_follow_type_like_prosper():
     md, tid, te, tod, toe, cid, ce, rm = weq.DH_NUMERIC
     assert weq.active_columns("Xmas Tree") == {md}
-    assert weq.active_columns("Tubing") == {md, tid, te, rm}
+    assert weq.active_columns("Tubing") == {md, tid, te, rm, tod, toe, cid, ce}       # annulus data optional (gas lift)
     assert weq.active_columns("Tubing", "annular") == {md, tid, te, rm, tod, toe, cid, ce}
     assert weq.active_columns("SSSV") == {tid} and weq.active_columns("Restriction") == {tid, rm}
     assert weq.active_columns("Gas Lift Mandrel") == {tid, rm} == weq.active_columns("SSD")   # like a restriction
@@ -1243,7 +1243,7 @@ def test_downhole_cells_follow_type_like_prosper():
                        {"Type": "Casing", md: 10932.0, cid: 8.681, ce: 0.0008},
                        {md: 5.0}]).reindex(columns=weq.DOWNHOLE_COLUMNS)
     out = weq.apply_cell_rules(df)
-    assert out.loc[0, te] == 0.0006 and out.loc[0, rm] == 1.0 and np.isnan(out.loc[0, tod])   # defaults; OD locked
+    assert out.loc[0, te] == 0.0006 and out.loc[0, rm] == 1.0 and out.loc[0, tod] == 2.875     # defaults; OD kept
     assert np.isnan(out.loc[1, md]) and np.isnan(out.loc[1, rm]) and out.loc[1, tid] == 1.5    # SSSV: ID only
     assert out.loc[2, ce] == 0.0008                                                              # user value kept
     assert out.iloc[3, 2:].isna().all()                                                          # no type: locked
@@ -1670,3 +1670,24 @@ def test_karakas_tariq_matches_prosper(ld, lc, eff, target):
     assert r["total"] == pytest.approx(target, abs=2e-6)
     assert wc.deviation_skin(13, 100, 0.354, 0.1, anisotropic=True) == pytest.approx(-0.016550, abs=1e-6)
 
+
+
+def test_pi_entry_composite_water_cut():
+    """Below the bubble point the PI-entry/Darcy IPR follows the Petrobras composite form with water (PROSPER);
+    with no water it is Vogel, and above the bubble point the water cut has no effect."""
+    from wellmodel import inflow as I
+    pr, pb, j = 3464.7, 3514.7, 7.166
+    v = I.pi_entry(pr, pb, j)
+    c0 = I.pi_entry(pr, pb, j, 0.0)
+    c8 = I.pi_entry(pr, pb, j, 0.8)
+    assert c0.aof == pytest.approx(v.aof, rel=1e-9)
+    assert c8.aof > v.aof * 1.2                   # water flows linearly: more inflow at low pwf
+    hi = I.pi_entry(5000.0, 3000.0, 5.0, 0.8)
+    assert float(hi.rate(4000.0)) == pytest.approx(5.0 * 1000.0, rel=1e-3)
+
+
+def test_camco_r20_r_values():
+    from wellmodel import gaslift as wgl
+    v = wgl.VALVES["Camco R-20 Normal (1.5-in)"]
+    assert float(v.r(16)) == pytest.approx(0.066) and float(v.r(24)) == pytest.approx(0.147)
+    assert v.ports[-1] == 36

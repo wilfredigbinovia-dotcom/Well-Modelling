@@ -1598,14 +1598,14 @@ with tabs[2]:
                     pb = pvt["pb"]
                     if model == "P.I. Entry":
                         j = num(st.columns(4)[0], "Productivity index (STB/d/psi)", "ipr_j", 2.0, 0.001, 1e4, 0.1)
-                        curve = ipr.pi_entry(pr, pb, j)
+                        curve = ipr.pi_entry(pr, pb, j, wc)
                     elif model in ("Vogel", "Composite"):
                         c = st.columns(4)
                         qt = num(c[0], "Test rate (STB/d, liquid)", "ipr_qt", 1500.0, 0.1, 1e6, 10.0)
                         pt = num(c[1], "Test FBHP (psia)", "ipr_pt", 1500.0, 0.0, 3e4, 10.0)
                         curve = ipr.vogel(pr, pb, qt, pt) if model == "Vogel" else ipr.composite(pr, pb, qt, pt, wc)
                     elif model == "Darcy":
-                        curve = ipr.darcy(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"], pvt["bo"])
+                        curve = ipr.darcy(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"], pvt["bo"], wc)
                     elif model == "Fetkovich":
                         kro = num(st.columns(4)[0], "Relative permeability of oil", "ipr_kro", 1.0, 0.001, 1.0, 0.05)
                         curve = ipr.fetkovich(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin,
@@ -2470,6 +2470,12 @@ def rebuild_ipr(changes):
         raise ValueError("No IPR recipe - recalculate the IPR tab.")
     fn, a, k = rec
     b = inspect.signature(fn).bind(*a, **k)
+    changes = dict(changes)
+    if "wc" in changes and "wc" not in inspect.signature(fn).parameters:
+        changes.pop("wc")                          # models without a water-cut input ignore it
+    if not changes:
+        c = fn(*b.args, **b.kwargs)
+        return wcomp.apply_sand_control(c, ss["ipr_sc_dp"]) if ss.get("ipr_sc_dp") is not None else c
     for key, v in changes.items():
         if key not in inspect.signature(fn).parameters:
             raise ValueError(f"The {ss.get('ipr_meta', {}).get('model', 'current')} IPR has no '{key}' input.")
@@ -4062,7 +4068,14 @@ with tabs[5]:
                             return path_cache[tid]
 
                         def ipr_for(ch):
-                            return rebuild_ipr(ch) if ch else ipr_curve
+                            if not ch:
+                                return ipr_curve
+                            try:
+                                return rebuild_ipr(ch)
+                            except ValueError:
+                                if set(ch) <= {"wc"}:          # no recipe: keep the IPR tab curve
+                                    return ipr_curve
+                                raise
                         with st.spinner(f"Calculating {len(combos)} case(s)..."):
                             res, paths_ = wsys.solve_cases(path_for, fluid, kind, base, combos, ipr_for, corr, p1, p2,
                                                            eqd["heat_capacities"], method, 25, user_rates,
@@ -4281,6 +4294,15 @@ def gaslift_tab(o, eqd, ipr_curve):
                            help="Yes: the unloading gas at each valve is the rate giving the minimum tubing pressure "
                                 "with the liquid rate from the IPR. No: the design rate is assumed; the minimum "
                                 "transfer dP % lowers the gas needed.")
+        c = st.columns(2)
+        unl_method = sel(c[0], "Unloading gas per valve", ["Transfer pressure", "Minimum tubing pressure"], "gl_unl_m",
+                         help="Transfer pressure (PROSPER): the gas that lowers the tubing pressure at the valve to "
+                              "Pt + transfer % (Pc - Pt) while the design liquid rate is lifted - this sets the port "
+                              "sizes. Minimum tubing pressure: the gas rate giving the lowest tubing pressure at the valve.")
+        ann_t = flag(c[1].checkbox, "Annulus gas at the flowing tubing temperature", "gl_ann_t", True,
+                     help="PROSPER: the lift gas reaches the flowing tubing temperature, which sets the gas-column "
+                          "weight in the annulus. Off: a straight line from the surface gas temperature to the "
+                          "formation temperature.")
         spread = flag(st.checkbox, "Casing drop per valve at least the valve spread R (Pvo - Pt)", "gl_spread", True,
                       help="PROSPER 'All valves Pvo = gas pressure' (recommended for new wells): the casing pressure "
                            "drop to close each valve is the larger of the entered drop and the calculated spread. "
@@ -4319,15 +4341,16 @@ def gaslift_tab(o, eqd, ipr_curve):
         c = st.columns(2)
         margin_top = num(c[0], "Safety margin, first valve (psi)", "gl_m1", 50.0, 0.0, 500.0,
                          help="The first valve balances the load fluid against the kick-off casing pressure less this.")
-        margin = num(c[1], "Transfer safety margin, deeper valves (psi)", "gl_m2", 20.0, 0.0, 500.0,
-                     help="API RP 11V6: 20-50 psi.")
+        margin = num(c[1], "Transfer safety margin, deeper valves (psi)", "gl_m2", 50.0, 0.0, 500.0,
+                     help="API RP 11V6: 20-50 psi. PROSPER uses 50 psi for every valve.")
         c = st.columns(2)
         safety_last = num(c[0], "Safety for closure of last unloading valve (psi)", "gl_slast", 0.0, 0.0, 500.0)
         min_sp = num(c[1], "Minimum valve spacing (ft)", "gl_minsp", 250.0, 10.0, 5000.0,
                      help="API RP 11V6: 90 ft (high PI, good data) to 500 ft (low PI, poor data).")
         c = st.columns(3)
-        min_tr = num(c[0], "Minimum transfer dP (%)", "gl_mintr", 0.0, 0.0, 100.0, disabled=use_ipr_unl,
-                     help="Only with 'Use IPR for unloading' off: 5-25 % typical.")
+        min_tr = num(c[0], "Minimum transfer dP (%)", "gl_mintr", 25.0, 0.0, 100.0,
+                     disabled=use_ipr_unl and unl_method != "Transfer pressure",
+                     help="Transfer pressure = Pt + this % of (Pc - Pt) at each valve; 5-25 % typical.")
         tc_v = num(c[1], "T-C de-rating, valves (%)", "gl_tcv", 0.0, 0.0, 90.0)
         tc_o = num(c[2], "T-C de-rating, orifice (%)", "gl_tco", 0.0, 0.0, 90.0)
         econ = wgl.Economics()
@@ -4371,7 +4394,12 @@ def gaslift_tab(o, eqd, ipr_curve):
                           max_md=max_md, gor=gor, wc=wc / 100.0, load_grad=gs, min_transfer_pct=min_tr,
                           safety_last=safety_last, dp_close=dpc, dp_close_spread=spread, tc_derate_valve=tc_v,
                           tc_derate_orifice=tc_o, min_spacing=min_sp, margin_top=margin_top, margin=margin,
-                          valve=valve_name, economics=econ)
+                          valve=valve_name, economics=econ, unloading_gas=unl_method, annulus_t_flowing=ann_t)
+    if ipr_curve.fluid == "oil":            # the IPR at the design water cut (composite below the bubble point)
+        try:
+            ipr_curve = rebuild_ipr({"wc": wc / 100.0})
+        except ValueError:
+            pass
     sig = (repr(inp), repr(lg), corr, p1, p2, u, fluid_note, float(ipr_curve.pr), float(ipr_curve.aof))
     with right:
         if go:

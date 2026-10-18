@@ -253,7 +253,9 @@ def active_columns(row_type, flow_type="tubing"):
     if row_type == "Xmas Tree":
         return {md}
     if row_type == "Tubing":
-        return {md, tid, te, rm} | ({tod, toe, cid, ce} if annulus else set())
+        # tubing OD and casing ID are always open on tubing rows: required for annular flow, optional otherwise
+        # (gas lift uses them for the annulus - casing-head volume, stability)
+        return {md, tid, te, rm, tod, toe, cid, ce}
     if row_type == "SSSV":
         return {tid}
     if row_type in ("Restriction", "Gas Lift Mandrel", "SSD"):
