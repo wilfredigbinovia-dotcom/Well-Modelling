@@ -155,11 +155,87 @@ def joshi(k, h, rw, aniso_h, aniso_v, L, lx, ly, skin=0.0):
     return kh * h, float(D)
 
 
+# Goode & Kuchuk (1991, SPE 21460 - "Kuchuk & Goode" in PROSPER): horizontal well of length 2 L1/2, parallel to x,
+# anywhere in a rectangular box Lx x Ly x h; upper boundary no-flow (pseudo-steady state, Eq. 6/A-20 with the
+# geometric skin of Eq. A-21) or constant pressure (gas cap / aquifer: steady state, Eq. B-3).
+def k12(beta):
+    """K_12(beta) = integral_0^inf exp(-beta cosh u) / cosh^2 u du (Goode & Kuchuk Eq. A-22, Table 1)."""
+    from scipy.integrate import quad
+    if beta > 700:
+        return 0.0
+    with np.errstate(over="ignore", under="ignore"):
+        return float(quad(lambda u: np.exp(-beta * np.cosh(u)) / np.cosh(u) ** 2, 0.0, np.inf, limit=200)[0])
+
+
+def _gk_geometry(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw):
+    kx, ky, kz = k / aniso_h, k, k * aniso_v          # x along the well (PROSPER: k = Ky, Ky/Kx, Kz/Ky)
+    half = L / 2
+    if not (0 < zw < h):
+        raise ValueError("The well must lie between the top and bottom of the reservoir (0 < Zw < h).")
+    if not (0 < yw < ly) or xw - half < -1e-6 or xw + half > lx + 1e-6:
+        raise ValueError("The well must lie inside the drainage area (Xw +/- L/2 within Lx, 0 < Yw < Ly).")
+    hd = h / half * np.sqrt(kx / kz)
+    rwp = rw / 2 * (1 + np.sqrt(kz / ky))
+    return kx, ky, kz, half, hd, rwp
+
+
+def goode_kuchuk_szd(h, zw, hd, rwp):
+    """Geometric (vertical convergence) skin S_zD, Eq. A-21 - the K12 series makes it exact for any hD."""
+    x = zw / h
+    s = -hd / 2 * (np.log(2 * np.pi * rwp / h * np.sin(np.pi * x)) + hd * (1 / 3 - x + x * x))
+    ser, j = 0.0, 1
+    while True:
+        b = 2 * j * np.pi / hd
+        if b > 60:                                         # K12(60) ~ 1e-28
+            break
+        ser += k12(b) * np.cos(j * np.pi * x) ** 2 / j ** 2
+        j += 1
+    return float(s + hd ** 2 / np.pi ** 2 * ser)
+
+
+def goode_kuchuk(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin=0.0, boundary="no flow", n_terms=2000):
+    """Goode & Kuchuk (1991). Returns (kh_eq, D, params) for q = kh_eq (p - pwf) / (141.2 mu B D):
+    kh_eq = sqrt(kx ky) h, D = pwD + S*m with S*m = h / (2 L1/2) sqrt(kx/kz) Sm (Eqs. 3-5).
+    boundary='no flow': p = average reservoir pressure (pseudo-steady state, Eq. 6);
+    'constant pressure': p = pressure at the upper constant-pressure boundary (steady state, Eq. B-3)."""
+    kx, ky, kz, half, hd, rwp = _gk_geometry(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw)
+    if boundary == "no flow":
+        t1 = 2 * np.pi * ly / lx * np.sqrt(kx / ky) * (1 / 3 - yw / ly + (yw / ly) ** 2)
+        n = np.arange(1, n_terms + 1)
+        a = -2 * n * np.pi / lx * np.sqrt(kx / ky)
+        with np.errstate(over="ignore", under="ignore"):
+            xi = (2 * np.exp(a * ly) + np.exp(a * (ly - yw)) + np.exp(a * yw)) / (1 - np.exp(a * ly))
+        t2 = 2 * lx ** 2 / (np.pi ** 2 * half ** 2) * float(np.sum(
+            np.sin(n * np.pi * half / lx) ** 2 * np.cos(n * np.pi * xw / lx) ** 2 * (1 + xi) / n ** 3))
+        szd = goode_kuchuk_szd(h, zw, hd, rwp)
+        pwd = t1 + t2 + szd
+        params = {"Areal term": float(t1 + t2), "Geometric skin S_zD": szd}
+    else:
+        x = zw / h
+        pwd = hd / 2 * (np.log(4 * h / (np.pi * rwp) / np.tan(np.pi * x / 2)) + (zw - h) / half * np.sqrt(kx / kz))
+        ser, j = 0.0, 1
+        while True:
+            al = 2 * j - 1
+            b = al * np.pi / hd
+            if b > 60:
+                break
+            ser += k12(b) * np.cos(al * np.pi * x / 2) ** 2 / al ** 2
+            j += 1
+        pwd = float(pwd + 4 * hd ** 2 / np.pi ** 2 * ser)
+        params = {}
+    s_star = h / (2 * half) * np.sqrt(kx / kz) * skin
+    params.update({"pwD": float(pwd), "Dimensionless thickness hD": float(hd), "Skin S*m": float(s_star)})
+    return float(np.sqrt(kx * ky) * h), float(pwd + s_star), params
+
+
 def horizontal_well(fluid, method, pr, k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, mu,
                     skin=0.0, pb=None, bo=None, t_f=None, z=None, sg=None):
     if method == "Babu & Odeh":
         kh_eq, D, s_r = babu_odeh(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin)
         params = {"Partial penetration skin s_R": s_r}
+    elif method in ("Kuchuk & Goode", "Kuchuk & Goode - constant pressure upper boundary"):
+        kh_eq, D, params = goode_kuchuk(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin,
+                                        "no flow" if method == "Kuchuk & Goode" else "constant pressure")
     else:
         kh_eq, D = joshi(k, h, rw, aniso_h, aniso_v, L, lx, ly, skin)
         params = {}

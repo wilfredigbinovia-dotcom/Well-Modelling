@@ -939,17 +939,18 @@ def gas_pvt_fn(opts_now, t_f):
 # ---------------------------------------------------------------- IPR helpers
 VERTICAL_SKIN_MODELS = {"Darcy", "Fetkovich", "Jones", "Transient", "Back pressure", "Dual Porosity",
                         "Multiphase Pseudo Pressure"}
-HORIZONTAL_MODELS = {"Horizontal Well - No Flow Boundaries", "Horizontal Well - Transverse Vertical Fractures",
+HORIZONTAL_MODELS = {"Horizontal Well - No Flow Boundaries", "Horizontal Well - Constant Pressure Upper Boundary",
+                     "Horizontal Well - Transverse Vertical Fractures",
                      "Horizontal Well - friction dP"}
 OIL_ADV = ["Hydraulically Fractured Well", "Horizontal Well - No Flow Boundaries",
+           "Horizontal Well - Constant Pressure Upper Boundary",
            "Horizontal Well - Transverse Vertical Fractures", "Horizontal Well - friction dP",
            "Dual Porosity", "Multi-layer", "Multi-layer with dP loss in wellbore", "Multiphase Pseudo Pressure"]
 GAS_ADV = OIL_ADV + ["Modified Isochronal"]
 STILL_NOT = {
-    "oil": ["Kuchuk & Goode horizontal and constant-pressure upper boundary (equations not public here - "
-            "Babu & Odeh and Joshi are provided)", "SkinAide (ELF proprietary method)",
+    "oil": ["SkinAide (ELF proprietary method)",
             "Thermally Induced Fracture (water injectors - injection IPRs come with injector support)"],
-    "gas": ["Kuchuk & Goode horizontal (Babu & Odeh and Joshi are provided)", "SkinAide (ELF proprietary method)"],
+    "gas": ["SkinAide (ELF proprietary method)"],
 }
 
 
@@ -1584,13 +1585,25 @@ with tabs[2]:
                     else:
                         curve = ipr2.fractured_well("oil", pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], xf, fcd, tdays,
                                                     phi, pvt["ct"], pvt["mu"], face, **oil_kw)
-                elif model in ("Horizontal Well - No Flow Boundaries", "Horizontal Well - Transverse Vertical Fractures"):
+                elif model in ("Horizontal Well - No Flow Boundaries", "Horizontal Well - Transverse Vertical Fractures",
+                               "Horizontal Well - Constant Pressure Upper Boundary"):
                     g, spare = horizontal_inputs()
-                    hz_skin = num(spare, "Skin (along the well)", "ipr_hz_skin", 0.0, -5.0, 200.0, 0.5)
-                    if model == "Horizontal Well - No Flow Boundaries":
-                        meth = radio(st, "Horizontal well model", ["Babu & Odeh", "Joshi"], "ipr_hz_method",
-                                     horizontal=True, captions=["Closed box, pseudo-steady state",
-                                                                   "Steady state, constant pressure at drainage radius"])
+                    hz_skin = num(spare, "Skin (along the well)", "ipr_hz_skin", 0.0, -5.0, 200.0, 0.5,
+                                  help="Mechanical (van Everdingen) skin along the well length.")
+                    if model in ("Horizontal Well - No Flow Boundaries", "Horizontal Well - Constant Pressure Upper Boundary"):
+                        if model == "Horizontal Well - No Flow Boundaries":
+                            meth = radio(st, "Horizontal well model", ["Kuchuk & Goode", "Babu & Odeh", "Joshi"],
+                                         "ipr_hz_method", "Babu & Odeh", horizontal=True,
+                                         captions=["Closed box, pseudo-steady state, any well length and position "
+                                                   "(Goode & Kuchuk 1991)",
+                                                   "Closed box, pseudo-steady state",
+                                                   "Steady state, constant pressure at drainage radius"])
+                        else:
+                            meth = "Kuchuk & Goode - constant pressure upper boundary"
+                            st.caption("Goode & Kuchuk (1991) steady state: the top of the reservoir is at constant "
+                                       "pressure (gas cap, or an active aquifer when the model is turned upside down). "
+                                       "The reservoir pressure entered above is the pressure at that boundary; Zw is "
+                                       "measured from the no-flow bottom. The drainage area does not enter.")
                         curve = ipr2.horizontal_well(fluid, meth, pr, g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"],
                                                      g["L"], g["lx"], g["ly"], g["xw"], g["yw"], g["zw"], mu_used,
                                                      hz_skin, **(gas_kw if gas else oil_kw))

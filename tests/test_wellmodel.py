@@ -1583,3 +1583,34 @@ def test_deviation_and_brons_marting_skins():
     assert wc.brons_marting(100, 50, 1.0) == pytest.approx(3.067, rel=0.02)
     assert wc.brons_marting(100, 100, 1.0) == 0.0
     assert wc.brons_marting(100, 50, 1.0, 0.1) > wc.brons_marting(100, 50, 1.0)
+
+
+# ------------------------------------------------------------ Kuchuk & Goode horizontal well
+def test_goode_kuchuk_k12_table():
+    for b, v in ((0.001, 0.99843), (0.1, 0.86252), (1.0, 0.27362), (5.0, 0.31784e-2), (40.0, 0.81951e-18)):
+        assert iadv.k12(b) == pytest.approx(v, rel=2e-4)
+
+
+def test_goode_kuchuk_against_paper_figure2_and_limits():
+    """Fig. 2 (h 50 ft, zw 25 ft, rw 0.25 ft, kH 50 md, mu 1 cp, 4000 x 4000 ft, well centred): PI read off the
+    curves; the formula also tends to the 2-D image solution for the constant-pressure case."""
+    pi = lambda an, r: 7.08e-3 * np.divide(*iadv.goode_kuchuk(50, 50, 0.25, 1, an, 2 * r * 4000, 4000, 4000, 2000,
+                                                              2000, 25)[:2])
+    assert pi(1, 0.5) == pytest.approx(31.5, rel=0.06)
+    assert pi(1, 0.3) == pytest.approx(21.0, rel=0.06)
+    assert pi(0.1, 0.5) == pytest.approx(27.0, rel=0.06)
+    assert pi(0.01, 0.5) == pytest.approx(17.5, rel=0.06)
+    assert pi(1, 0.5) > pi(0.1, 0.5) > pi(0.01, 0.5)
+    # shorter wells always need more drawdown (the K12 series keeps this true when hD > 5)
+    d = [iadv.goode_kuchuk(50, 50, 0.25, 1, 0.1, L, 4000, 4000, 2000, 2000, 25)[1] for L in (400, 100, 40, 20, 10)]
+    assert all(np.diff(d) > 0)
+    # constant pressure at the top: ln term = 2-D image solution ln[(4h / pi rw) cot(pi zw / 2h)]
+    h, zw, rw, L = 100.0, 40.0, 0.25, 4000.0
+    kh, D, p = iadv.goode_kuchuk(50, h, rw, 1, 1, L, 8000, 8000, 4000, 4000, zw, boundary="constant pressure")
+    hd = h / (L / 2)
+    assert D == pytest.approx(hd / 2 * (np.log(4 * h / (np.pi * rw) / np.tan(np.pi * zw / (2 * h))) + (zw - h) / (L / 2)),
+                              rel=1e-3)
+    # mechanical skin along the well: S*m = h / (2 L1/2) sqrt(kx/kz) Sm
+    D5 = iadv.goode_kuchuk(50, h, rw, 1, 0.25, L, 8000, 8000, 4000, 4000, zw, skin=5.0)[1]
+    D0 = iadv.goode_kuchuk(50, h, rw, 1, 0.25, L, 8000, 8000, 4000, 4000, zw)[1]
+    assert D5 - D0 == pytest.approx(h / L * 2 * 5.0)
