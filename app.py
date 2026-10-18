@@ -38,6 +38,8 @@ from wellmodel import liftcurves as wlc
 from wellmodel import gradient as wgrad
 from wellmodel import choke as wchoke
 from wellmodel import gaslift as wgl
+from wellmodel import units as wu
+from wellmodel import ui_units as wuu
 try:                                    # PROSPER-style grids with per-cell locking; optional dependency
     from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
     HAVE_AGGRID = True
@@ -94,8 +96,16 @@ def wkey(key):
 
 
 def val(key, default=None):
-    """Current value of an input: live widget state, else the stored copy."""
+    """Current value of an input (internal units): live widget state, else the stored copy."""
     k = wkey(key)
+    qi = ss.get("_qty_" + key)
+    if qi is not None:                       # unit-aware input: its widget holds the value in the chosen unit
+        q, u_int = qi
+        to = wu.display_unit(q, u_int, ss.get("_units"))
+        k2 = k if to == u_int else f"{k}@{to}"
+        if k2 in ss and ss[k2] is not None:
+            return wu.convert(ss[k2], q, to, u_int)
+        return ss.get("_v_" + key, default)
     if k in ss and ss[k] is not None:
         return ss[k]
     return ss.get("_v_" + key, default)
@@ -110,24 +120,109 @@ def put(key, value):
 
 def reset(key):
     """Forget an input's value so its default applies again."""
-    ss.pop(wkey(key), None)
+    for k_ in [k_ for k_ in ss.keys() if k_ == wkey(key) or str(k_).startswith(wkey(key) + "@")]:
+        ss.pop(k_, None)
     ss.pop("_v_" + key, None)
     ss["_ver_" + key] = ss.get("_ver_" + key, 0) + 1
 
 
+UNIT_STYLE = ("<div style='height:2.5rem;display:flex;align-items:center;margin-bottom:1rem;font-size:0.86rem;"
+              "color:rgba(49,51,63,0.75);white-space:nowrap'>{}</div>")
+
+
+def unit_beside(col, unit):
+    col.markdown(UNIT_STYLE.format(unit), unsafe_allow_html=True)
+
+
+def unit_split(unit):
+    """Column widths for the input box and the unit text beside it: longer units get more room."""
+    return [0.8, 0.2] if len(unit) <= 7 else [0.68, 0.32]
+
+
 def num(col, label, key, default, mn=None, mx=None, step=None, fmt=None, help=None, disabled=False):
+    """Number input. A label ending in '(unit)' with a known unit is shown in the unit chosen on the Units tab,
+    with the unit beside the box; the value returned (and stored) is always in the internal unit."""
     cur = float(val(key, default))
     if mn is not None:
         cur = max(cur, float(mn))
     if mx is not None:
         cur = min(cur, float(mx))
-    kw = {k: v for k, v in dict(min_value=None if mn is None else float(mn),
-                                max_value=None if mx is None else float(mx),
-                                step=None if step is None else float(step), format=fmt, help=help).items()
+    sp = wu.split_label(label)
+    if sp is None:
+        kw = {k: v for k, v in dict(min_value=None if mn is None else float(mn),
+                                    max_value=None if mx is None else float(mx),
+                                    step=None if step is None else float(step), format=fmt, help=help).items()
+              if v is not None}
+        fixed = wu.fixed_unit(label)
+        if fixed is not None:      # unit with nothing to convert to: still shown beside the box
+            inner = col.columns(unit_split(fixed[1]), vertical_alignment="bottom", gap="small")
+            v = inner[0].number_input(fixed[0], value=cur, key=wkey(key), disabled=disabled, **kw)
+            unit_beside(inner[1], fixed[1])
+            ss["_v_" + key] = v
+            return v
+        v = col.number_input(label, value=cur, key=wkey(key), disabled=disabled, **kw)
+        ss["_v_" + key] = v
+        return v
+    base, q, u_int, suffix = sp
+    to = wu.display_unit(q, u_int, ss.get("_units"))
+    ss["_qty_" + key] = (q, u_int)
+    conv = (lambda x: x) if to == u_int else (lambda x: float(wu.convert(float(x), q, u_int, to)))
+    lo = None if mn is None else conv(mn)
+    hi = None if mx is None else conv(mx)
+    shown = conv(cur)
+    if lo is not None:
+        shown = max(shown, lo)
+    if hi is not None:
+        shown = min(shown, hi)
+    if to == u_int:
+        fmt2, step2 = fmt, step
+    else:
+        fmt2 = "%.6g"
+        step2 = None if step is None else float(step) * wu.scale(q, u_int, to)
+    kw = {k: v for k, v in dict(min_value=lo, max_value=hi, step=step2, format=fmt2, help=help).items()
           if v is not None}
-    v = col.number_input(label, value=cur, key=wkey(key), disabled=disabled, **kw)
-    ss["_v_" + key] = v
-    return v
+    inner = col.columns(unit_split(wu.unit_label(to, suffix)), vertical_alignment="bottom", gap="small")
+    k = wkey(key) if to == u_int else f"{wkey(key)}@{to}"
+    v = inner[0].number_input(base, value=float(shown), key=k, disabled=disabled, **kw)
+    unit_beside(inner[1], wu.unit_label(to, suffix))
+    out = v if to == u_int else float(wu.convert(float(v), q, to, u_int))
+    ss["_v_" + key] = out
+    return out
+
+
+def _fmt_list(vals):
+    return ", ".join(f"{x:.6g}" for x in vals)
+
+
+def num_list(col, label, key, default_text, note="comma separated", help=None):
+    """Comma-separated numbers. A label ending in '(unit)' takes the values in the chosen unit (unit beside the box);
+    returns the list in internal units. Invalid entries raise ValueError (as parse_values)."""
+    sp = wu.split_label(label)
+    if sp is None:
+        lab = f"{label}, {note}" if note else label
+        return parse_values(col.text_input(lab, key=key, help=help, **dflt(key, value=default_text)))
+    base, q, u_int, suffix = sp
+    to = wu.display_unit(q, u_int, ss.get("_units"))
+    k = key if to == u_int else f"{key}@{to}"
+    if k not in ss:
+        stored = ss.get("_vl_" + key)
+        if stored is None:
+            ss[k] = default_text if to == u_int else _fmt_list(wu.convert(parse_values(default_text), q, u_int, to))
+        else:
+            ss[k] = _fmt_list(stored if to == u_int else wu.convert(list(stored), q, u_int, to))
+    inner = col.columns([0.8, 0.2], vertical_alignment="bottom", gap="small")
+    txt = inner[0].text_input(f"{base}, {note}" if note else base, key=k, help=help)
+    unit_beside(inner[1], wu.unit_label(to, suffix))
+    vals = parse_values(txt)
+    vals = vals if to == u_int else [float(wu.convert(v, q, to, u_int)) for v in vals]
+    ss["_vl_" + key] = vals
+    return vals
+
+
+def unit_of(label):
+    """'Wellhead pressure (psia)' -> ' (psia)' (for derived labels such as 'First (psia)'), '' if no unit."""
+    sp = wu.split_label(label)
+    return f" ({sp[2]})" if sp is not None else ""
 
 
 def sel(col, label, options, key, default=None, **kw):
@@ -184,7 +279,8 @@ def project_state():
     """Everything needed to rebuild the model: input values, raw widget values, tables, accepted results."""
     inputs = {k[3:]: v for k, v in ss.items() if k.startswith("_v_") and isinstance(v, (int, float, str, bool, list))}
     widgets = {k: v for k, v in ss.items() if isinstance(k, str) and (k in PROJECT_WIDGETS or
-                                                                    k.startswith(PROJECT_WIDGET_PREFIXES))
+                                                                    k.startswith(PROJECT_WIDGET_PREFIXES)
+                                                                    or k.startswith("_vl_"))
                and isinstance(v, (int, float, str, bool, list)) and not k.endswith("_ed")}
     tables = dict(ss.get("_tables", {}))
     extras = {k: ss[k] for k in PROJECT_EXTRAS if ss.get(k) is not None}
@@ -290,7 +386,13 @@ if _msg:
     getattr(_msg_slot, _msg[0])(_msg[1])
 schematic_svg = None
 
-TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP", "6 · Calculation", "7 · Design"]
+# chosen units (Units tab): every input and output is shown in them; the engine keeps oilfield units
+ss["_units"] = {q_: (val("unit_" + q_, wu.default_unit(q_)) if val("unit_" + q_, wu.default_unit(q_)) in wu.QUANTITIES[q_]
+                     else wu.default_unit(q_)) for q_ in wu.QUANTITIES}
+wuu.install()
+
+TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP",
+             "6 · Calculation", "7 · Design", "8 · Units"]
 tabs = st.tabs(TAB_NAMES, key="main_tabs")
 
 CAPTIONS = {
@@ -620,7 +722,8 @@ def render_eos(opts_now):
     for note in prp.notes:
         st.info(note)
     st.caption(f"Viscosity model in file: oil {prp.oil_viscosity}, gas {prp.gas_viscosity} "
-               "(Lohrenz-Bray-Clark is used). Pressures in the file are psig and are shown here in psia.")
+               "(Lohrenz-Bray-Clark is used). Pressures in the file are psig and are shown here in "
+               f"{ss['_units']['pressure']}.")
 
     with st.expander("Composition and component properties", expanded=False):
         show = comp.copy()
@@ -1433,7 +1536,7 @@ with tabs[2]:
         models = (ipr.GAS_MODELS + GAS_ADV) if gas else (ipr.OIL_MODELS + OIL_ADV)
         st.caption(f"{'Gas and condensate' if gas else 'Oil and water'} inflow models - from the fluid type "
                    f"chosen in the Options summary. Completion: {o.label('completion').lower()}, sand control: "
-                   f"{o.label('sand_control').lower()}. Pressures in psia.")
+                   f"{o.label('sand_control').lower()}. Pressures in {ss['_units']['pressure']}.")
         c = st.columns([1.3, 2])
         model = sel(c[0], "Reservoir model", models, f"ipr_model_{fluid}")
         with c[1].expander("Models not available"):
@@ -1864,6 +1967,15 @@ def type_grid(name, types, active, numeric_cols, select_cols=None, height=None):
     idx = df.columns[0]
     for c_ in numeric_cols:
         df[c_] = pd.to_numeric(df[c_], errors="coerce").astype(float)
+    units_ = wuu.active()
+    conv_, heads_ = {}, {}
+    if units_ is not None:                      # show the numeric columns in the chosen units
+        for c_ in numeric_cols:
+            name_, info_ = wu.relabel(c_, units_)
+            if info_ is not None and info_[2] != info_[1]:
+                conv_[c_], heads_[c_] = info_, name_
+                df[c_] = wu.convert(df[c_].to_numpy(float), info_[0], info_[1], info_[2])
+    usig = "" if not conv_ else "@" + "-".join(sorted({i_[2] for i_ in conv_.values()}))
     act = _json.dumps({t_: sorted(v_) for t_, v_ in active.items()})
     gb = GridOptionsBuilder.from_dataframe(df)
     gb.configure_default_column(resizable=True, sortable=False, filter=False, suppressMovable=True,
@@ -1884,6 +1996,10 @@ def type_grid(name, types, active, numeric_cols, select_cols=None, height=None):
             gb.configure_column(c_, minWidth=150, flex=1.8, cellEditor="agSelectCellEditor",
                                 cellEditorParams={"values": [""] + list(select_cols[c_])}, **kw)
         else:
+            if c_ in heads_:
+                kw["headerName"] = heads_[c_]
+                kw["valueFormatter"] = JsCode("function(p){return (p.value===null||p.value===undefined||p.value==='')"
+                                              " ? '' : String(Number(Number(p.value).toPrecision(6)));}")
             gb.configure_column(c_, type=["numericColumn"],
                                 valueParser=JsCode("function(p){const v=String(p.newValue).trim(); "
                                                    "if(v==='') return null; const x=Number(v); "
@@ -1891,12 +2007,15 @@ def type_grid(name, types, active, numeric_cols, select_cols=None, height=None):
     gb.configure_grid_options(singleClickEdit=True, stopEditingWhenCellsLoseFocus=True, rowHeight=32,
                               suppressColumnVirtualisation=True)
     r = AgGrid(df, gridOptions=gb.build(), allow_unsafe_jscode=True, update_on=["cellValueChanged"],
-               key=f"eq_{name}_ag_{ver}", height=height or 36 + 32 * min(len(df), 14), theme="streamlit")
+               key=f"eq_{name}_ag_{ver}{usig}", height=height or 36 + 32 * min(len(df), 14), theme="streamlit")
     out = r["data"] if r is not None and r.get("data") is not None else df
     out = pd.DataFrame(out).reindex(columns=df.columns).set_index(idx)
     out.index = base.index
     for c_ in numeric_cols:
         out[c_] = pd.to_numeric(out[c_], errors="coerce").astype(float)
+        if c_ in conv_:
+            q_, u_, to_ = conv_[c_]
+            out[c_] = wu.convert(out[c_].to_numpy(float), q_, to_, u_)
     for c_ in [c_ for c_ in out.columns if c_ not in numeric_cols]:
         out[c_] = [v_ if isinstance(v_, str) and v_.strip() else None for v_ in out[c_]]
     return track("eq_" + name, out)
@@ -2635,7 +2754,7 @@ with tabs[4]:
         st.info("Complete the Equipment Data tab first (every section in its status table must be OK).")
     else:
         kind = "gas" if o.is_gas else "oil"
-        st.caption(("Gas" if kind == "gas" else "Oil") + " well test data. Pressures in psia; the tubing is calculated "
+        st.caption(("Gas" if kind == "gas" else "Oil") + f" well test data. Pressures in {ss['_units']['pressure']}; the tubing is calculated "
                    "from the Xmas tree down to the deepest equipment "
                    f"({eqd['downhole'][1]['MD bottom (ft)'].max():,.0f} ft MD), which is taken as the IPR depth.")
         key = "vlp_tests_" + kind
@@ -3297,6 +3416,14 @@ def sens_plot(tab, var_names, labels, qcol):
     return fig
 
 
+def _fmt_result(v):
+    """Result value: thousands separators without exponent for large numbers, 4 significant figures otherwise."""
+    v = float(v)
+    if not np.isfinite(v):
+        return str(v)
+    return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:.4g}"
+
+
 def solution_panel(kind, r, det, regimes):
     sr = wsys.surface_rates(kind, r.params, r.q)
     rows = [(k_, v_) for k_, v_ in sr.items()]
@@ -3314,7 +3441,7 @@ def solution_panel(kind, r, det, regimes):
     rows += [("Stability", "Stable" if r.stable else "UNSTABLE - left of the VLP minimum"),
              ("Rate at VLP minimum", f"{r.q_vlp_min:,.4g} {'STB/d' if kind == 'oil' else 'MMscf/d'}")]
     out = pd.DataFrame(rows, columns=["Result", "Value"])
-    out["Value"] = [f"{v_:,.4g}" if isinstance(v_, (int, float, np.floating)) else str(v_) for v_ in out["Value"]]
+    out["Value"] = [_fmt_result(v_) if isinstance(v_, (int, float, np.floating)) else str(v_) for v_ in out["Value"]]
     return out
 
 
@@ -3481,8 +3608,7 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
     with col:
         st.markdown("**Rates**")
         dflt_r = "500, 1000, 2000, 3000" if kind == "oil" else "2, 5, 10, 20"
-        rates = parse_values(st.text_input(f"Rates ({_qunit(kind)}), comma separated - up to 6", key=f"trav_rates_{kind}",
-                                           **dflt(f"trav_rates_{kind}", value=dflt_r)))
+        rates = num_list(st, f"Rates ({_qunit(kind)})", f"trav_rates_{kind}", dflt_r, "comma separated - up to 6")
         rates = [r for r in rates if r > 0][:6]
         st.caption("The traverse starts at the top node " + ("(the manifold) and works back through the surface "
                    "equipment, then " if surface is not None else "(the wellhead) and runs ") +
@@ -3585,22 +3711,22 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
             st.error(str(e))
             flo = []
         whp0 = float(base["whp"])
-        thp = parse_values(st.text_input(
-            "Top node pressures (psia)" + (" - at the manifold" if surface is not None else ""), key=f"vfp_thp_{kind}",
-            **dflt(f"vfp_thp_{kind}", value=_default_list(np.round(whp0 * np.array([0.5, 0.75, 1.0, 1.5, 2.0, 3.0]), 0)))))
+        thp = num_list(st, "Top node pressures (psia)", f"vfp_thp_{kind}",
+                       _default_list(np.round(whp0 * np.array([0.5, 0.75, 1.0, 1.5, 2.0, 3.0]), 0)),
+                       "comma separated" + (" - at the manifold" if surface is not None else ""))
         if kind == "oil":
             wfr = parse_values(st.text_input("Water cuts (%)", key=f"vfp_wfr_{kind}", **dflt(f"vfp_wfr_{kind}", value="0, 20, 40, 60, 80, 95")))
             g0 = float(base["gor"])
-            gfr = parse_values(st.text_input("Total GORs (scf/STB)", key=f"vfp_gfr_{kind}", **dflt(
-                f"vfp_gfr_{kind}", value=_default_list(np.round(g0 * np.array([0.75, 1.0, 1.5, 2.5, 4.0]), 0)))))
+            gfr = num_list(st, "Total GORs (scf/STB)", f"vfp_gfr_{kind}",
+                           _default_list(np.round(g0 * np.array([0.75, 1.0, 1.5, 2.5, 4.0]), 0)))
         else:
             w0 = float(base["wgr"])
-            wfr = parse_values(st.text_input("Water gas ratios (STB/MMscf)", key=f"vfp_wfr_{kind}", **dflt(
-                f"vfp_wfr_{kind}", value=_default_list(sorted({0.0, w0, max(w0 * 3, 10.0), max(w0 * 10, 50.0)})))))
+            wfr = num_list(st, "Water gas ratios (STB/MMscf)", f"vfp_wfr_{kind}",
+                           _default_list(sorted({0.0, w0, max(w0 * 3, 10.0), max(w0 * 10, 50.0)})))
             sg = float(base.get("sep_gor", 0.0))
             c0 = 1e6 / sg if sg > 0 else 0.0
-            gfr = parse_values(st.text_input("Condensate gas ratios (STB/MMscf)", key=f"vfp_gfr_{kind}", **dflt(
-                f"vfp_gfr_{kind}", value=_default_list(sorted({0.0, round(c0, 2), round(max(c0 * 2, 20.0), 2)})))))
+            gfr = num_list(st, "Condensate gas ratios (STB/MMscf)", f"vfp_gfr_{kind}",
+                           _default_list(sorted({0.0, round(c0, 2), round(max(c0 * 2, 20.0), 2)})))
         c2 = st.columns([1, 2])
         tno = int(num(c2[0], "Table number", "vfp_tno", 1.0, 1.0, 9999.0, 1.0, "%.0f"))
         wfr = [v for v in wfr if v >= 0]
@@ -3834,9 +3960,8 @@ with tabs[5]:
                     method = sel(st, "Rate method", RATE_METHODS, "sys_rate_method")
                     user_rates = None
                     if method == "User selected":
-                        user_rates = parse_values(st.text_input(
-                            f"Rates ({'STB/d' if kind == 'oil' else 'MMscf/d'}), comma separated", key="sys_rates",
-                            **dflt("sys_rates", value="100, 500, 1000, 2000, 3000" if kind == "oil" else "1, 5, 10, 20, 30")))
+                        user_rates = num_list(st, f"Rates ({'STB/d' if kind == 'oil' else 'MMscf/d'})", "sys_rates",
+                                              "100, 500, 1000, 2000, 3000" if kind == "oil" else "1, 5, 10, 20, 30")
                     lhi = sel(st, "Left-hand intersection", ["DisAllow", "Allow"], "sys_lhi")
                     flags = sel(st, "Stability flags", ["Yes", "No"], "sys_flags")
                     st.caption(f"PVT: {fluid_note}. IPR: {ss.get('ipr_meta', {}).get('model', '')} "
@@ -3873,18 +3998,22 @@ with tabs[5]:
                             cur["choke"] = round(next(i.d_in for i in surface.items if i.kind == "choke") * 64, 2)
                         for v_ in chosen:
                             with st.container(border=True):
-                                st.markdown(f"**{var_defs[v_]}** - current {cur.get(v_) if cur.get(v_) is not None else '—'}")
+                                u_lab_ = unit_of(var_defs[v_]).strip(" ()")
+                                st.markdown(f"**{var_defs[v_]}** - current "
+                                            + (f"{cur.get(v_):.6g} {u_lab_}".strip() if cur.get(v_) is not None else "—"))
                                 how = st.radio("Values", ["Enter values", "Generate values"], horizontal=True,
                                                key=f"sys_how_{v_}")
                                 try:
                                     if how == "Enter values":
-                                        vals = parse_values(st.text_input("Values, comma separated (up to 10)",
-                                                                          key=f"sys_vals_{v_}"))
+                                        vals = num_list(st, "Values" + unit_of(var_defs[v_]), f"sys_vals_{v_}", "",
+                                                        "comma separated (up to 10)")
                                     else:
                                         cc = st.columns(4)
                                         c0 = float(cur.get(v_) or 1.0)
-                                        first = num(cc[0], "First", f"sys_first_{v_}", round(c0 * 0.5, 4))
-                                        last = num(cc[1], "Last", f"sys_last_{v_}", round(c0 * 1.5 if c0 else 1.0, 4))
+                                        first = num(cc[0], "First" + unit_of(var_defs[v_]), f"sys_first_{v_}",
+                                                    round(c0 * 0.5, 4))
+                                        last = num(cc[1], "Last" + unit_of(var_defs[v_]), f"sys_last_{v_}",
+                                                   round(c0 * 1.5 if c0 else 1.0, 4))
                                         nval = num(cc[2], "Number", f"sys_n_{v_}", 5.0, 1.0, 10.0, 1.0, "%.0f")
                                         spacing = sel(cc[3], "Spacing", ["Linear", "Geometric"], f"sys_sp_{v_}")
                                         vals = list(wsys.generate_values(first, last, nval, spacing))
@@ -3892,7 +4021,10 @@ with tabs[5]:
                                         st.warning("Only the first 10 values are used.")
                                         vals = vals[:10]
                                     if vals:
-                                        st.caption("Values: " + ", ".join(f"{x:.4g}" for x in vals))
+                                        sp_ = wu.split_label(var_defs[v_])
+                                        shown_ = vals if sp_ is None else wu.convert(
+                                            list(vals), sp_[1], sp_[2], wu.display_unit(sp_[1], sp_[2], ss["_units"]))
+                                        st.caption("Values: " + ", ".join(f"{x:.4g}" for x in shown_))
                                         sens[v_] = vals
                                     else:
                                         st.caption("Enter at least one value.")
@@ -4341,6 +4473,47 @@ with tabs[6]:
         st.info(blocker)
     else:
         gaslift_tab(o, eqd, ipr_curve)
+
+
+# ================================================================ tab 8: units
+def _commit_tables():
+    """Before the units change, make every table's current edits its base (the editors restart in new units)."""
+    for k_, df_ in (ss.get("_tables") or {}).items():
+        if isinstance(df_, pd.DataFrame):
+            ss[k_] = df_.copy()
+
+
+def _apply_preset(box_key):
+    name = ss.get(box_key)
+    preset = wu.PRESETS.get(name)
+    if not preset:
+        return
+    _commit_tables()
+    for q_, u_ in preset.items():
+        put("unit_" + q_, u_)
+
+
+with tabs[7]:
+    st.header("Units")
+    st.caption("Choose the units for inputs and results. Every value is stored in oilfield units, so changing units "
+               "never changes the model - inputs, tables, plots and downloads are converted on screen. Pressure "
+               "can be absolute or gauge; dome and test-rack pressures stay gauge.")
+    cur_ = ss["_units"]
+    match_ = next((n_ for n_, p_ in wu.PRESETS.items() if all(cur_.get(q_) == u_ for q_, u_ in p_.items())), "Custom")
+    c = st.columns([1.2, 2])
+    box_ = f"unit_preset_box_{match_}"
+    c[0].selectbox("Unit system", list(wu.PRESETS) + ["Custom"],
+                   index=(list(wu.PRESETS) + ["Custom"]).index(match_), key=box_,
+                   on_change=_apply_preset, args=(box_,),
+                   help="Presets set every quantity; change any of them below for a custom set.")
+    qs_ = list(wu.QUANTITIES)
+    cols_ = st.columns(3)
+    for i_, q_ in enumerate(qs_):
+        sel(cols_[i_ % 3], wu.QUANTITY_LABELS[q_], list(wu.QUANTITIES[q_]), "unit_" + q_, wu.default_unit(q_),
+            on_change=_commit_tables)
+    st.caption("Not converted: water cut and other percentages and fractions, gravities, FVFs and ratios without "
+               "units, choke and port sizes in 64ths of an inch, the well schematic labels (ft and inches), and the Calculation tab's lift-curve export (Eclipse "
+               "VFP tables are always written in FIELD units).")
 
 
 # ================================================================ save button (top bar) and schematic (sidebar)

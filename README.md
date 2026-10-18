@@ -97,6 +97,8 @@ The app is being rebuilt tab by tab. It currently has six tabs:
    - Checked against API RP 11V6 Example 1 (valve depths within 20 ft, test rack pressure 1144 psig), the RP's Thornhill-Craver chart (within 3 %), Winkler & Eads' examples (650 and 1656 psig) and Asheim's Claymore C-6 (F1 0.76, F2 2.74).
    - Not yet: existing mandrels, tubing-sensitive / proportional valves, valve performance (VPC, API simplified), equilibrium plot, QuickLook and the transient gas-lift simulator; the design is not yet transferred to the Calculation tab as a gas-lifted system.
 
+**8 · Units.** Choose a unit system - *Oilfield (default)*, *Oilfield, gauge pressure*, *Metric*, *Metric, gauge pressure* or *SI (kPa)* - or set each quantity on its own (pressure absolute or gauge in psi, bar, kPa, MPa, kg/cm² or atm; length, temperature, rates, GOR, density, viscosity, permeability, U value, heat capacity and so on). Units are shown beside each input box rather than in brackets. Every value is stored and calculated in oilfield units; inputs, editable tables, results tables, metrics, plots and CSV downloads are converted on screen only, so switching units never changes a result and the saved project file is always in oilfield units. Dome and test-rack pressures stay gauge. Not converted: dimensionless quantities (percentages, fractions, gravities, FVFs), choke and port sizes in 64ths of an inch, the well schematic labels, and Eclipse VFP exports (always FIELD units).
+
 **Project files (icons at the top right, next to the project name).** *Save project* (💾) downloads one `.wellmodel.json` file with every input on every tab, all tables (lab PVT, IPR test and layer tables, survey, surface and downhole equipment, geothermal gradient, well tests), the PRP file, the accepted U value and IPR adjustments, and the VLP and surface matches. *Open project* (📂) replaces the current model with a saved one (the PVT match is repeated automatically) and clears itself, so the same file can be opened again; *New project* (📄+) clears everything. Hover over the save icon to see the file name it will write - press Enter after typing the project name. On opening, the project takes the name of the file chosen. The file is plain JSON - opening it never runs code - and calculation results are not stored: press Calculate after opening.
 
 The full workflow (QC, correlation selection, matching, nodal, probabilistic and transient) remains available from Python and in `notebooks/demo.ipynb` while the app's tabs are rebuilt.
@@ -153,6 +155,8 @@ wellmodel/
   vlp.py            VLP engine: flow path, fluids (black oil, wet gas, EOS grid), heat loss, U estimate, comparison, P1/P2 match, VLP/IPR
   equipment.py      deviation survey and filter, surface/downhole equipment, geothermal gradient
   schematic.py      illustrated well schematic (SVG)
+  units.py          unit catalogue, presets, conversions and label handling
+  ui_units.py       on-screen conversion of Streamlit tables, metrics, plots and downloads
   mpp.py            multiphase pseudo-pressure (Corey, black oil / EOS integrands)
   completion.py     skin models (Karakas & Tariq, MacLeod, Hawkins, deviation, partial penetration), sand control
   synthetic.py      known-answer test data

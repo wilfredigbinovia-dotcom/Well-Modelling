@@ -1614,3 +1614,44 @@ def test_goode_kuchuk_against_paper_figure2_and_limits():
     D5 = iadv.goode_kuchuk(50, h, rw, 1, 0.25, L, 8000, 8000, 4000, 4000, zw, skin=5.0)[1]
     D0 = iadv.goode_kuchuk(50, h, rw, 1, 0.25, L, 8000, 8000, 4000, 4000, zw)[1]
     assert D5 - D0 == pytest.approx(h / L * 2 * 5.0)
+
+
+# ------------------------------------------------------------ units
+def test_unit_conversions_and_labels():
+    from wellmodel import units as wu
+    assert wu.convert(5200.0, "pressure", "psig", "psia") == pytest.approx(5214.696, abs=1e-3)
+    assert wu.convert(1.0, "pressure", "bara", "psia") == pytest.approx(14.5038, rel=1e-5)
+    assert wu.convert(212.0, "temperature", "°F", "°C") == pytest.approx(100.0)
+    assert wu.convert(1.0, "gor", "Sm3/Sm3", "scf/STB") == pytest.approx(5.6146, rel=1e-4)
+    assert wu.convert(1.0, "productivity_index", "STB/d/psi", "Sm3/d/bar") == pytest.approx(2.3059, rel=1e-4)
+    assert wu.convert(wu.convert(123.4, "pressure", "psia", "barg"), "pressure", "barg", "psia") == pytest.approx(123.4)
+    assert wu.split_label("Reservoir pressure (psia)") == ("Reservoir pressure", "pressure", "psia", "")
+    assert wu.split_label("Water cut (%)") is None
+    assert wu.split_label("Screen outer radius (ft, 0 = none)")[0] == "Screen outer radius (0 = none)"
+    metric = {**wu.DEFAULTS, **wu.PRESETS["Metric"]}
+    assert wu.relabel("Liquid Rate (STB/day)", metric)[0] == "Liquid Rate (Sm3/d)"
+    assert wu.relabel("Dome pressure at 60 °F (psig)", metric)[0].endswith("(barg)")    # gauge stays gauge
+    assert wu.convert_text("Pr 3,000 psia at 9,000 ft MD and 210 °F", metric) == "Pr 206.8 bara at 2,743 m MD and 98.89 °C"
+    assert wu.is_default(wu.DEFAULTS) and not wu.is_default(metric)
+
+
+def test_unit_table_conversion():
+    from wellmodel import units as wu, ui_units as wuu
+    metric = {**wu.DEFAULTS, **wu.PRESETS["Metric"]}
+    df = pd.DataFrame({"Pressure (psia)": [14.696, 1014.696], "Rate (STB/d)": [100.0, 200.0], "Note": ["a", "b"]})
+    out = wuu.df_out(df, metric)
+    assert list(out.columns) == ["Pressure (bara)", "Rate (Sm3/d)", "Note"]
+    assert out["Pressure (bara)"].iloc[0] == pytest.approx(1.01325, rel=1e-5)
+    res = pd.DataFrame({"Result": ["Rate", "Cut"], "Value": ["1,000.0", "50"], "Units": ["STB/d", "%"]})
+    out = wuu.df_out(res, metric)
+    assert out["Units"].tolist() == ["Sm3/d", "%"] and out["Value"].iloc[0] == "158.99" and out["Value"].iloc[1] == "50"
+
+
+def test_unit_result_rows_converted():
+    """Result/Value tables whose row names carry the unit are converted row by row."""
+    from wellmodel import units as wu, ui_units as wuu
+    df = pd.DataFrame([("Solution node pressure (psia)", "2,363"), ("Stability", "Stable")], columns=["Result", "Value"])
+    out = wuu.df_out(df, {**wu.DEFAULTS, **wu.PRESETS["Oilfield, gauge pressure"]})
+    assert out["Result"].iloc[0] == "Solution node pressure (psig)" and out["Value"].iloc[0] == "2,348"
+    assert out["Value"].iloc[1] == "Stable"
+
