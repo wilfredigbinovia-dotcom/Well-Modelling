@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq
 
 from . import blackoil as bo
 from . import vlp as V
@@ -293,6 +294,11 @@ def ipr_pwf(curve, q):
     return np.where(np.asarray(q) <= qq.max() * (1 + 1e-9), out, np.nan)
 
 
+def ipr_rate(curve, pwf):
+    order = np.argsort(curve.pwf)
+    return np.interp(pwf, np.asarray(curve.pwf)[order], np.asarray(curve.q)[order])
+
+
 def _last_root(rates, diff):
     ok = np.isfinite(diff)
     r, d = rates[ok], diff[ok]
@@ -525,6 +531,7 @@ class DesignInput:
     valve_t_profile: str = "Flowing"      # valve temperatures: flowing traverse at the design rate
     unloading_gas: str = "Transfer pressure"   # PROSPER: gas that lowers Pt at the valve to Pt + transfer % (Pc - Pt)
     #                                            at the design liquid rate; "Minimum tubing pressure": the older method
+    operating_at_dp: bool = True          # final rate and gas from Pt = Pc - desired dP at the injection point
     annulus_t_flowing: bool = True        # lift gas in the annulus at the flowing tubing temperature (PROSPER);
     #                                       False: straight line from the surface gas temperature to the formation
     valve: str = next(iter(VALVES))
@@ -836,6 +843,46 @@ def _unloading_gas_transfer(path, fluid, inp: DesignInput, mds, q_design, pt_tar
     return np.minimum(out, inp.qgi_unload_max)
 
 
+def _operating_at_valve_dp(path, fluid, ipr, inp, inj_md, pc_inj, q_hint, qgi_max, correlation, p1, p2, u, hc, gas_sg):
+    """Operating point with the tubing pressure at the injection point = casing pressure - desired dP (Brown,
+    continuous-flow design): for each liquid rate the lift gas that gives that tubing pressure, the flowing
+    pressure below it at the formation GLR, and the rate where it meets the IPR. Returns (q, qgi) or None when
+    the gas needed exceeds the gas available or no consistent point exists."""
+    pt_t = pc_inj - inp.dp_valve
+    gs = np.geomspace(0.02, max(qgi_max * 3.0, 1.0), 36)
+
+    def gas_pwf(q):
+        lt = lifted_traverse(path, fluid, inp.top_p, {"q": np.full(gs.size, q), "wc": inp.wc, "gor": inp.gor}, gs,
+                             correlation, p1, p2, u, hc, fixed_md=np.full(gs.size, inj_md), gas_sg=gas_sg, passes=1)
+        pt = np.asarray(lt.inj_p, float)
+        if not np.isfinite(pt).any():
+            return None, None
+        k = int(np.nanargmin(pt))
+        if pt_t < pt[k] or pt_t > pt[0]:
+            return None, None
+        g = float(np.interp(-pt_t, -pt[:k + 1], gs[:k + 1]))
+        lt2 = lifted_traverse(path, fluid, inp.top_p, {"q": [q], "wc": inp.wc, "gor": inp.gor}, [g], correlation, p1,
+                              p2, u, hc, fixed_md=[inj_md], gas_sg=gas_sg, passes=1)
+        return g, float(lt2.P[0, -1])
+
+    def f(q):
+        g, pwf = gas_pwf(q)
+        if g is None or not np.isfinite(pwf):
+            return np.nan
+        return float(ipr_rate(ipr, pwf)) - q
+
+    qs = np.linspace(q_hint * 0.3, q_hint * 1.3, 9)
+    vals = [f(q) for q in qs]
+    for a, b, fa, fb in zip(qs[:-1], qs[1:], vals[:-1], vals[1:]):
+        if np.isfinite(fa) and np.isfinite(fb) and np.sign(fa) != np.sign(fb):
+            q = brentq(f, a, b, xtol=0.5)
+            g, _ = gas_pwf(q)
+            if g is not None and g <= qgi_max * (1 + 1e-6):
+                return q, g
+            return None
+    return None
+
+
 def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedorn_brown", p1=1.0, p2=1.0, u=8.0,
            hc: HeatCapacities | None = None, step=10.0, progress=None) -> DesignResult:
     """Continuous gas-lift design for a new well (PROSPER Design | Gaslift | New Well, casing-sensitive IPO valves,
@@ -1066,6 +1113,22 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
     if q_d < q_first * 0.998:
         msgs.append(f"Design rate reduced from {q_first:,.1f} to {q_d:,.1f} STB/d liquid to conform with the IPR "
                     "(rate check against the well inflow at the final injection point).")
+    if inp.check_ipr and inp.operating_at_dp:
+        # The operating gas is a result (Brown): tubing pressure at the injection point = casing - desired dP. When
+        # that needs less than the gas available, the well produces less with less gas - the valves stay spaced for
+        # the design gas (PROSPER's manual example: 1486 -> 1377 STB/d of oil with 3.28 of 4 MMscf/d).
+        opd = _operating_at_valve_dp(path, fluid, ipr, inp, inj_md, float(np.interp(inj_md, path.md, pc_op)), q_d,
+                                     qgi_d, correlation, p1, p2, u, hc, gas.sg)
+        if opd is not None and opd[1] < qgi_d * 0.999:
+            q_d, qgi_d = min(opd[0], q_first), opd[1]
+            lt = lifted_traverse(path, fluid, inp.top_p, {"q": [q_d], "wc": inp.wc, "gor": inp.gor}, [qgi_d],
+                                 correlation, p1, p2, u, hc, pc=pc_op, dp_valve=inp.dp_valve, max_md=max_md,
+                                 fixed_md=[inj_md], gas_sg=gas.sg)
+            pt_n, tt_n = lt.P[0], lt.T[0]
+            pwf = float(lt.P[0, -1])
+            msgs.append(f"Operating gas {qgi_d:.4g} MMscf/d: with the desired dP across the injection point the well "
+                        f"needs less than the gas available, and produces {q_d:,.1f} STB/d liquid (valves spaced "
+                        "for the design gas).")
     # operating point
     tv = float(np.interp(inj_md, path.md, path.tvd))
     pc_d = float(np.interp(inj_md, path.md, pc_op))
