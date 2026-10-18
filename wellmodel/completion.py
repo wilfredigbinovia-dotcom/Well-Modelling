@@ -76,7 +76,11 @@ def karakas_tariq(k, rw, lp, rp, spf, phasing, kv_kh=1.0, ld=0.0, kd=None, lc=0.
     if ld > 0 and lp > ld:                          # perforations reach past the damage
         lp_e = lp - (1 - kd / k) * ld
         rw_e = rw + (1 - kd / k) * ld
+        # PROSPER: horizontal (plane-flow) skin on the original geometry; vertical and wellbore skins on the
+        # damage-modified length and radius (reproduces PROSPER's perforation skin to 1e-6)
         p = kt_perforation_skin(rw_e, lp_e, rp, spf, phasing, kv_kh)
+        p["horizontal"] = kt_perforation_skin(rw, lp, rp, spf, phasing, kv_kh)["horizontal"]
+        p["perforation"] = p["horizontal"] + p["vertical"] + p["wellbore"]
         out.update(p)
         out["damage"] = 0.0
         total = p["perforation"]
@@ -88,8 +92,10 @@ def karakas_tariq(k, rw, lp, rp, spf, phasing, kv_kh=1.0, ld=0.0, kd=None, lc=0.
         total = sd + k / kd * p["perforation"]
     sc = 0.0
     if lc > 0 and kc:
-        k_around = k if (ld <= 0 or lp > ld) else kd      # rock surrounding the crushed zone
-        sc = (1.0 / spf) / lp * (k / kc - k / k_around) * np.log((rp + lc) / rp)
+        beyond = ld <= 0 or lp > ld
+        k_around = k if beyond else kd                    # rock surrounding the crushed zone
+        lp_c = lp - (1 - kd / k) * ld if (ld > 0 and lp > ld) else lp   # damage-modified length (as PROSPER)
+        sc = (1.0 / spf) / lp_c * (k / kc - k / k_around) * np.log((rp + lc) / rp)
     out["crushed zone"] = float(sc)
     out["total"] = float(total + sc)
     return out

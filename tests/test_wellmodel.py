@@ -1655,3 +1655,18 @@ def test_unit_result_rows_converted():
     assert out["Result"].iloc[0] == "Solution node pressure (psig)" and out["Value"].iloc[0] == "2,348"
     assert out["Value"].iloc[1] == "Stable"
 
+
+@pytest.mark.parametrize("ld, lc, eff, target", [
+    (8.0, 0.2, 0.9, 1.600337),   # PROSPER manual, step 4
+    (8.0, 0.0, 0.9, 0.967990),   # no crushed zone
+    (0.0, 0.2, 0.9, 0.573156),   # no damaged zone
+    (0.0, 0.0, 1.0, 0.088012),   # perforations only
+])
+def test_karakas_tariq_matches_prosper(ld, lc, eff, target):
+    """Karakas & Tariq completion skin against PROSPER (50 md, kv 5 md, 8 spf, 0.43 in, 9.2 in, 120 deg,
+    rw 0.354 ft, damaged zone 25 md, crushed zone 12.5 md)."""
+    from wellmodel import completion as wc
+    r = wc.karakas_tariq(50, 0.354, 9.2 / 12, 0.43 / 24, 8 * eff, 120, 0.1, ld / 12, 25, lc / 12, 12.5)
+    assert r["total"] == pytest.approx(target, abs=2e-6)
+    assert wc.deviation_skin(13, 100, 0.354, 0.1, anisotropic=True) == pytest.approx(-0.016550, abs=1e-6)
+
