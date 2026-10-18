@@ -435,6 +435,11 @@ def run_match():
         put("pvt_sel_visc", res.suggestion["visc_family"])
 
 
+def reset_match():
+    ss.pop("pvt_match", None)
+    ss.pop("pvt_match_sig", None)
+
+
 def grid_view(res: bo.MatchResult, prop: str, suggested: str | None):
     """Match grid as display strings ('—' for not calculated), suggested column highlighted."""
     df = res.table(prop)
@@ -759,10 +764,14 @@ with tabs[1]:
             st.warning(w, icon="⚠️")
 
         # ------------------------------------------------------------- match
+        has_data = data.bubble_point is not None or not data.clean().empty
         c = st.columns([1, 1, 4])
-        c[0].button("Match", type="primary", on_click=run_match, disabled=bool(problems),
-                    width="stretch")
-        c[1].button("Reset match", on_click=lambda: ss.pop("pvt_match", None), width="stretch")
+        c[0].button("Match", type="primary", on_click=run_match, disabled=bool(problems) or not has_data,
+                    width="stretch", help=None if has_data else "Enter a measured bubble point or lab table "
+                                                                 "points to match the correlations.")
+        c[1].button("Reset match", on_click=reset_match, width="stretch", disabled=ss.get("pvt_match") is None,
+                    help="Remove the match: the selected correlations are used as published.")
+        c[2].caption("Matching is optional - without it the selected correlations are used as published.")
         res: bo.MatchResult | None = ss.get("pvt_match")
         if res is not None and ss.get("pvt_match_sig") != signature(inp, data):
             st.warning("Inputs or lab data changed since the last match - press **Match** again.")
@@ -805,23 +814,39 @@ with tabs[1]:
                 st.dataframe(res.ranking("pb").round(4), hide_index=True, width="stretch")
                 st.markdown("**Viscosity families**")
                 st.dataframe(res.ranking("visc").round(4), hide_index=True, width="stretch")
+        elif has_data:
+            st.info("Press **Match** to compare the correlations with the lab data (optional).")
 
-            # ------------------------------------------------- selection
-            st.subheader("Selected correlations")
-            pb_opts = [f for f in bo.PB_FAMILIES if bo.available("pb", f)]
-            v_opts = [f for f in bo.VISC_FAMILIES if bo.available("visc", f)]
-            c = st.columns([1, 1, 1])
-            fam = sel(c[0], "Pb, Rs, Bo correlation", pb_opts, "pvt_sel_pb", format_func=bo.PB_FAMILIES.get)
-            vfam = sel(c[1], "Oil viscosity correlation", v_opts, "pvt_sel_visc", format_func=bo.VISC_FAMILIES.get)
+        # ------------------------------------------------- selection (always available)
+        st.subheader("Selected correlations")
+        pb_opts = [f for f in bo.PB_FAMILIES if bo.available("pb", f)]
+        v_opts = [f for f in bo.VISC_FAMILIES if bo.available("visc", f)]
+        c = st.columns([1, 1, 1])
+        fam = sel(c[0], "Pb, Rs, Bo correlation", pb_opts, "pvt_sel_pb", format_func=bo.PB_FAMILIES.get)
+        vfam = sel(c[1], "Oil viscosity correlation", v_opts, "pvt_sel_visc", format_func=bo.VISC_FAMILIES.get)
+        if res is not None:
             use_m = flag(c[2].checkbox, "Apply match parameters", "pvt_use_match")
-            params = {p: res.matches[(p, fam)] for p in ("pb", "rs", "bo")}
-            params["visc"] = res.matches[("visc", vfam)]
+        else:
+            c[2].checkbox("Apply match parameters", value=False, disabled=True, key="pvt_use_match_off",
+                          help="Available after a match.")
+            use_m = False
+        if problems:
+            ss.pop("pvt_model", None)
+            st.info("Fix the inputs above to calculate the PVT.")
+        else:
+            params = {}
+            if res is not None and use_m:
+                params = {p: res.matches[(p, fam)] for p in ("pb", "rs", "bo")}
+                params["visc"] = res.matches[("visc", vfam)]
             raw_model = bo.BlackOilModel(inp, fam, vfam, {})
-            model = bo.BlackOilModel(inp, fam, vfam, params if use_m else {})
+            model = bo.BlackOilModel(inp, fam, vfam, params)
             ss["pvt_model"] = model
-            st.pyplot(match_plot(raw_model, model, data), clear_figure=True)
-            st.caption("Dashed: correlation as published. Solid: with match parameters. "
-                       "Dotted line: measured bubble point.")
+            st.caption(f"Used by the IPR, VLP, Calculation and Design tabs: {bo.PB_FAMILIES[fam]} / "
+                       f"{bo.VISC_FAMILIES[vfam]}, " + ("with match parameters." if params else "as published (not matched)."))
+            if has_data:
+                st.pyplot(match_plot(raw_model, model, data), clear_figure=True)
+                st.caption("Dashed: correlation as published. Solid: with match parameters. "
+                           "Dotted line: measured bubble point.")
 
             st.subheader("Calculated PVT")
             t_calc = data.temperature
@@ -835,8 +860,6 @@ with tabs[1]:
                          hide_index=True, width="stretch")
             st.download_button("Download calculated PVT (CSV)", calc.to_csv(index=False).encode(),
                                "calculated_pvt.csv")
-        else:
-            st.info("Enter the inputs and lab data, then press **Match** to compare the correlations.")
 
 
 # =============================================================== tab 3: IPR
@@ -872,7 +895,7 @@ def oil_pvt_at(opts_now, pr, t_f):
                  "ct": max(co, 1e-7), "pb": res["psat"] or 14.7, "gor": res["sep"]["gor"]},
                 f"Equation of state ({ss.get('prp_name', 'PRP file')}), single-phase at reservoir pressure")
     model = ss.get("pvt_model")
-    label = "Black oil, matched correlations from the PVT tab"
+    label = "Black oil from the PVT tab"
     if model is None:
         inp, _ = current_inputs()
         if inp.check():
@@ -880,7 +903,8 @@ def oil_pvt_at(opts_now, pr, t_f):
         model = bo.BlackOilModel(inp, "standing", "beal", {})
         label = "Black oil from PVT tab inputs - not matched yet (Standing / Beal)"
     else:
-        label += f" ({bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]})"
+        label += (f" ({bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}, "
+                  f"{'matched' if model.params else 'not matched'})")
     tab = model.table(t_f, [pr, pr - 10])
     bo1, bo2 = tab["Oil FVF (RB/STB)"].to_numpy()
     rs1, rs2 = tab["Solution GOR (scf/STB)"].to_numpy()
@@ -2292,7 +2316,7 @@ def vlp_fluid(o, kind, p_max, t_min, t_max):
         if model is None:
             return None, "Complete the PVT Input Data tab (black oil)."
         fam = f"{bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}"
-        return wvlp.BlackOilFluid(model), f"Black oil ({fam}{', matched' if ss.get('pvt_model') else ', not matched'})"
+        return wvlp.BlackOilFluid(model), f"Black oil ({fam}{', matched' if model.params else ', not matched'})"
     inp = bo.PVTInputs(rsb=1, api=40, gas_sg=float(val("pvt_gas_sg", 0.70)), salinity_ppm=water.salinity_ppm,
                        h2s=water.h2s, co2=water.co2, n2=water.n2)
     api = float(val("pvt_cond_api", 50.0))
