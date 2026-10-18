@@ -362,7 +362,9 @@ class SandControlModel:
 
     # ------------------------------------------------------------------
     def details(self, q, p_sf):
-        """dict of arrays: dp (psi), skin (rate-dependent), darcy skin, D (1/(RB/d)), in-situ rate, velocity."""
+        """dict of arrays: dp (psi), skin (rate-dependent), darcy skin, D (1/(RB/d)), in-situ rate, velocity.
+        Fluid properties at the sand-face pressure (checked against PROSPER's Step 5 manual example: dP within
+        about 3.5 % at the solution point and 1 % at the AOF)."""
         Q, rho, mu = self.props(q, p_sf)
         if self.sc.kind == "gravel_pack_cased":
             A = self.area_open

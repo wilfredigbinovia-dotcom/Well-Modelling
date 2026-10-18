@@ -3,7 +3,8 @@ against the IPR at the bottom node, for a base case and for sensitivity combinat
 
 The VLP curve of every case is a vectorised traverse over its rate grid, so all cases sharing a flow path and U value
 run through the tubing in one pass. The solution is the intersection of the VLP and IPR curves at the bottom node,
-refined by regula falsi; intersections left of the VLP minimum are unstable (heading / loading region).
+refined by regula falsi; an intersection is stable when the VLP crosses the IPR from below (it may lie left of the
+VLP minimum if the IPR is steeper there); the other, left-hand intersection is unstable.
 
 Rates: oil wells liquid STB/d, gas wells MMscf/d. IPR curves are in their own units (oil STB/d, gas Mscf/d).
 """
@@ -234,9 +235,14 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
         note, pick = "", None
         if roots:
             k, q0 = roots[-1]
-            if q0 >= q_min * (1 - 1e-9) or allow_left:
+            # Stable when the VLP crosses the IPR from below (VLP - IPR rising with rate): a small rate increase
+            # then needs more pressure than the reservoir gives, so the flow returns to the intersection. This
+            # holds on the falling part of the VLP too, as long as the IPR falls faster (PROSPER reports such
+            # points); the unstable left-hand intersection is the one where VLP - IPR falls with rate.
+            stable_cross = diff[k + 1] > diff[k]
+            if stable_cross or allow_left:
                 pick = (k, q0)
-                if q0 < q_min:
+                if not stable_cross:
                     note = "left-hand (unstable) intersection"
             else:
                 note = "only a left-hand intersection - well unstable (left-hand intersection disallowed)"
@@ -290,7 +296,10 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
         r = results[i]
         r.q = float(q1)
         r.pwf = float(_ipr_at(r.ipr_curve, np.array([q1 * scale]))[0])
-        r.stable = r.q >= r.q_vlp_min * (1 - 1e-9)
+        k_ = int(np.searchsorted(r.rates, r.q))
+        lo_, hi_ = max(k_ - 1, 0), min(k_, len(r.rates) - 1)
+        d_lo, d_hi = r.vlp[lo_] - r.ipr_pwf[lo_], r.vlp[hi_] - r.ipr_pwf[hi_]
+        r.stable = bool(d_hi >= d_lo) if hi_ > lo_ else r.q >= r.q_vlp_min * (1 - 1e-9)
     for r in results:                       # wellhead temperatures (independent of pressure)
         path = paths[r.params.get("tubing_id")]
         qq = np.append(r.rates, r.q if r.q is not None else r.rates[-1])

@@ -1578,6 +1578,7 @@ with tabs[2]:
             gasp = {"mu_z": mu_z, "sg": sg, "mu_r": mu_r, "z_r": z_r, "t_f": t_f}
         else:
             pvt, why = oil_pvt_at(o, pr, t_f)
+            ss["ipr_pvt_ctx"] = (o, t_f)          # lets rebuild_ipr re-evaluate mu and Bo at another pressure
             if pvt is None:
                 st.info(why + " Complete the PVT Input Data tab to calculate the IPR.")
         # ------------------------------------------------------- model data
@@ -2473,6 +2474,14 @@ def rebuild_ipr(changes):
         if key not in inspect.signature(fn).parameters:
             raise ValueError(f"The {ss.get('ipr_meta', {}).get('model', 'current')} IPR has no '{key}' input.")
         b.arguments[key] = v
+    # A new reservoir pressure changes the oil viscosity and FVF the Darcy-type PI is evaluated with (PROSPER
+    # recalculates them at the reservoir pressure).
+    params = inspect.signature(fn).parameters
+    if "pr" in changes and "mu" in params and "bo" in params and ss.get("ipr_pvt_ctx") is not None:
+        o_, t_ = ss["ipr_pvt_ctx"]
+        pv_, _ = oil_pvt_at(o_, float(changes["pr"]), t_)
+        if pv_ is not None:
+            b.arguments["mu"], b.arguments["bo"] = pv_["mu"], pv_["bo"]
     c = fn(*b.args, **b.kwargs)
     if ss.get("ipr_sc_dp") is not None:
         c = wcomp.apply_sand_control(c, ss["ipr_sc_dp"])
@@ -3438,7 +3447,7 @@ def solution_panel(kind, r, det, regimes):
     rows += [(k_, v_) for k_, v_ in det.items() if k_ not in ("Wellhead pressure (psia)", "Wellhead temperature (°F)",
                                                               "Manifold pressure (psia)") and not k_.startswith("_")]
     rows += [(f"Regime - {k_}", f"{v_[0]} (dP {v_[1]:.1f} psi)") for k_, v_ in regimes.items()]
-    rows += [("Stability", "Stable" if r.stable else "UNSTABLE - left of the VLP minimum"),
+    rows += [("Stability", "Stable" if r.stable else "UNSTABLE - left-hand intersection (VLP crosses the IPR from above)"),
              ("Rate at VLP minimum", f"{r.q_vlp_min:,.4g} {'STB/d' if kind == 'oil' else 'MMscf/d'}")]
     out = pd.DataFrame(rows, columns=["Result", "Value"])
     out["Value"] = [_fmt_result(v_) if isinstance(v_, (int, float, np.floating)) else str(v_) for v_ in out["Value"]]
@@ -4116,8 +4125,8 @@ with tabs[5]:
                             st.caption("The surface choke is critical at the solution: the inflow at the manifold drops "
                                        "vertically at this rate, so the manifold pressure does not affect it.")
                         if flags == "Yes" and not r.stable:
-                            st.error("Stability flag: the solution lies left of the VLP minimum - flow is unstable "
-                                     "(heading / liquid loading).")
+                            st.error("Stability flag: the solution is the left-hand intersection - the VLP crosses the IPR "
+                                     "from above, so flow is unstable (heading / liquid loading).")
                     cc = st.columns([1.25, 1])
                     with cc[0]:
                         if len(res) == 1:
