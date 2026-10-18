@@ -1114,99 +1114,250 @@ def horizontal_inputs():
     return g, c[3]
 
 
+DEV_MODELS = ["None", "Cinco / Martin-Bronz", "Cinco (2) / Martin-Bronz",
+              "Cinco-Ley, Ramey & Miller (1975) - full solution", "Cinco-Ley deviation + Papatzacos"]
+
+
 def skin_panel(o, k, rw, h, gas_or_oil):
-    """Mechanical/geometrical + deviation/partial-penetration skin. Returns (total, breakdown dict)."""
-    st.markdown("**Skin**")
+    """Mechanical/geometrical + deviation/partial-penetration skin (PROSPER 2.7.7). Returns (total, breakdown)."""
+    st.markdown("**Mechanical / geometrical skin**")
     cased = o.completion == "cased_hole"
     mech_opts = (["Enter skin by hand", "Karakas & Tariq", "MacLeod"] if cased
                  else ["Enter skin by hand", "Hawkins damaged zone"])
     c = st.columns(3)
-    mech = sel(c[0], "Mechanical/geometrical skin", mech_opts, "ipr_mech",
-                          help="Choices follow the completion in the Options summary. Locke's nomograph method "
-                               "is not available.")
-    dev_opts = ["None", "Cinco-Ley deviation + Papatzacos partial penetration"]
-    dev = sel(c[1], "Deviation/partial penetration skin", dev_opts, "ipr_devpp")
+    mech = sel(c[0], "Method", mech_opts, "ipr_mech",
+               help="Choices follow the completion in the Options summary. Karakas & Tariq (1991): perforation "
+                    "(horizontal, vertical, wellbore), damaged and crushed zones. MacLeod (1983): damaged and crushed "
+                    "zones. Locke's nomograph method is not available.")
     parts = {}
     if mech == "Enter skin by hand":
-        parts["Mechanical (entered)"] = num(c[2], "Skin", "ipr_skin", 0.0, -6.0, 500.0, 0.5)
+        parts["Mechanical (entered)"] = num(c[1], "Skin", "ipr_skin", 0.0, -6.0, 500.0, 0.5)
     else:
-        c = st.columns(4)
         kd = ld = kc = lc = 0.0
-        if mech in ("Karakas & Tariq", "MacLeod"):
-            dp_ = num(c[0], "Perforation diameter (in)", "ipr_pd", 0.4, 0.05, 2.0, 0.05)
+        perf = mech in ("Karakas & Tariq", "MacLeod")
+        if perf:
+            c = st.columns(4)
+            dp_ = num(c[0], "Perforation diameter (in)", "ipr_pd", 0.4, 0.05, 2.0, 0.05, help="Entry hole diameter.")
             spf = num(c[1], "Shots per foot", "ipr_spf", 4.0, 0.5, 40.0, 1.0)
-            lp = num(c[2], "Perforation length (in)", "ipr_lp", 10.0, 0.5, 60.0, 0.5)
-            ph = sel(c[3], "Shot phasing (deg)", [0, 45, 60, 90, 120, 180], "ipr_phasing", 90,
-                                help="0 = all shots in one direction (360°)")
+            lp = num(c[2], "Perforation length (in)", "ipr_lp", 10.0, 0.5, 60.0, 0.5,
+                     help="Effective perforation length in the formation.")
+            eff = num(c[3], "Perforation efficiency", "ipr_peff", 1.0, 0.01, 1.0, 0.05, "%.2f",
+                      help="Fraction of the perforations that are open (active).")
+            c = st.columns(4)
+            if mech == "Karakas & Tariq":
+                ph = sel(c[0], "Shot phasing (deg)", [0, 45, 60, 90, 120, 180], "ipr_phasing", 90,
+                         help="0 = all shots in one direction (360°)")
+                kv = num(c[1], "Vertical permeability (md)", "ipr_kv", float(k), 1e-4, 1e6)
+            else:
+                h_perf = num(c[0], "Perforation interval (ft)", "ipr_hperf", float(h), 0.1, 1e5)
+            c = st.columns(4)
+        else:
             c = st.columns(4)
         ld = num(c[0], "Damaged zone thickness (in)", "ipr_ld", 6.0 if mech == "Hawkins damaged zone" else 0.0,
                  0.0, 120.0, 0.5)
         kd = num(c[1], "Damaged zone permeability (md)", "ipr_kd", max(k * 0.2, 0.001), 0.0001, 1e5, 1.0)
-        if mech in ("Karakas & Tariq", "MacLeod"):
+        if perf:
             lc = num(c[2], "Crushed zone thickness (in)", "ipr_lc", 0.5, 0.0, 5.0, 0.1)
             kc = num(c[3], "Crushed zone permeability (md)", "ipr_kc", max(k * 0.2, 0.001), 0.0001, 1e5, 1.0)
-        kv_kh = num(st.columns(4)[0], "Vertical / horizontal permeability", "ipr_kvkh", 1.0, 0.001, 10.0, 0.05) \
-            if mech == "Karakas & Tariq" else 1.0
         if mech == "Karakas & Tariq":
-            r = wcomp.karakas_tariq(k, rw, lp / 12, dp_ / 24, spf, ph, kv_kh, ld / 12, kd, lc / 12, kc)
+            r = wcomp.karakas_tariq(k, rw, lp / 12, dp_ / 24, spf * eff, ph, kv / k, ld / 12, kd, lc / 12, kc)
             parts.update({"Perforation (K&T)": r["perforation"] if r["damage"] == 0 else k / kd * r["perforation"],
                           "Damaged zone": r["damage"], "Crushed zone": r["crushed zone"]})
         elif mech == "MacLeod":
-            r = wcomp.macleod(k, rw, lp / 12, dp_ / 24, spf, ld / 12, kd, lc / 12, kc)
+            r = wcomp.macleod(k, rw, lp / 12, dp_ / 24, spf, ld / 12, kd, lc / 12, kc, eff, h, min(h_perf, h))
             parts.update({"Damaged zone": r["damage"], "Crushed zone": r["crushed zone"]})
         else:
             parts["Damaged zone (Hawkins)"] = wcomp.hawkins(k, rw, ld / 12, kd)
+    st.markdown("**Deviation / partial penetration skin**")
+    dev = sel(st.columns(3)[0], "Method ", DEV_MODELS, "ipr_devpp",
+              help="Cinco / Martin-Bronz: Cinco-Ley deviation correlation, isotropic, to 65°, plus Brons & Marting "
+                   "partial penetration. Cinco (2) / Martin-Bronz: the deviation correlation with anisotropy, to 75°. "
+                   "Full solution: Cinco-Ley, Ramey & Miller (1975, SPE 5589), infinite-conductivity slanted, "
+                   "partially-penetrating well - slant, penetration and the position of the interval together. "
+                   "Wong-Clifford is not available.")
     if dev != "None":
         c = st.columns(4)
-        th = num(c[0], "Well deviation (deg)", "ipr_dev", 0.0, 0.0, 75.0, 1.0)
-        hp = num(c[1], "Perforated interval (ft)", "ipr_hpp", h, 0.1, 1e4, 1.0)
-        zt = num(c[2], "Top of reservoir to top of perforations (ft)", "ipr_ztop", 0.0, 0.0, 1e4, 1.0)
-        kvkh2 = num(c[3], "Vertical / horizontal permeability ", "ipr_kvkh2", 1.0, 0.001, 10.0, 0.05)
+        prosper = dev.endswith("Martin-Bronz")
+        lim = 65.0 if dev.startswith("Cinco /") else 75.0
+        th = num(c[0], "Deviation angle (deg)", "ipr_dev", 0.0, 0.0, 89.0 if not prosper else lim, 1.0,
+                 help="Angle from the vertical.")
+        if prosper:
+            frac = num(c[1], "Partial penetration fraction", "ipr_ppf", 1.0, 0.01, 1.0, 0.05, "%.3f",
+                       help="Perforated interval / net pay, both in TVD.")
+            hp, zt = frac * h, 0.0
+        else:
+            hp = num(c[1], "Perforated interval, TVD (ft)", "ipr_hpp", h, 0.1, 1e4, 1.0)
+            zt = num(c[2], "Top of reservoir to top of perforations, TVD (ft)", "ipr_ztop", 0.0, 0.0, 1e4, 1.0)
+        kv2 = num(c[3], "Formation vertical permeability (md)", "ipr_kv2", float(k), 1e-4, 1e6,
+                  help="Cinco / Martin-Bronz uses it for the partial penetration skin only (the deviation "
+                       "correlation is isotropic); the other models use it for both.")
+        kvkh2 = kv2 / k
         if hp + zt > h + 1e-6:
-            st.warning("Perforated interval extends below the reservoir.")
-        parts["Deviation (Cinco-Ley)"] = wcomp.deviation_skin(th, h, rw, kvkh2)
-        parts["Partial penetration (Papatzacos)"] = wcomp.partial_penetration_skin(h, min(hp, h), zt, rw, kvkh2)
+            st.warning("The perforated interval extends below the reservoir.")
+        try:
+            if prosper:
+                parts["Deviation (Cinco" + (")" if lim == 65.0 else " 2)")] = wcomp.deviation_skin(
+                    th, h, rw, kvkh2, anisotropic=lim == 75.0)
+                parts["Partial penetration (Brons-Marting)"] = wcomp.brons_marting(h, min(hp, h), rw, kvkh2)
+            elif dev.startswith("Cinco-Ley, Ramey"):
+                r = wcomp.cinco_slant_pp(th, h, min(hp, h), zt, rw, kvkh2)
+                parts["Deviation (Cinco-Ley et al.)"] = r["slant"]
+                parts["Partial penetration (Cinco-Ley et al.)"] = r["penetration"]
+            else:
+                parts["Deviation (Cinco-Ley)"] = wcomp.deviation_skin(th, h, rw, kvkh2)
+                parts["Partial penetration (Papatzacos)"] = wcomp.partial_penetration_skin(h, min(hp, h), zt, rw,
+                                                                                          kvkh2)
+        except ValueError as e:
+            st.error(str(e))
     total = float(sum(parts.values()))
-    st.caption("Skin: " + " · ".join(f"{k_} {v:+.2f}" for k_, v in parts.items()) + f"  →  **total {total:+.2f}**")
+    st.caption("Skin: " + " · ".join(f"{k_} {v:+.3f}" for k_, v in parts.items()) + f"  →  **total {total:+.3f}**")
     return total, parts
 
 
-def sand_control_panel(o, fluid, h_default):
+def skin_dp_plot(q, dps, qunit):
+    """PROSPER-style skin pressure drop plot: pressure drop of the total skin and of each component against rate."""
+    fig, ax = plt.subplots(figsize=(7.5, 4.2))
+    cols = list(wplt.SERIES) + ["#9467bd", "#8c564b", "#e377c2", "#17becf"]
+    i = 0
+    for name, dp in dps.items():
+        if name != "Total skin" and not np.any(np.abs(dp) > 1e-9):
+            continue                                   # components with zero skin are not drawn
+        ax.plot(q, dp, lw=2.2 if name == "Total skin" else 1.4,
+                color=wplt.INK if name == "Total skin" else cols[i % len(cols)], label=name)
+        i += name != "Total skin"
+    ax.axhline(0, color=wplt.INK2, lw=0.6)
+    ax.set_xlabel(f"Rate ({qunit})"); ax.set_ylabel("Pressure drop (psi)")
+    ax.set_xlim(0, float(np.max(q))); ax.grid(alpha=0.3, ls="--"); ax.legend(fontsize=8)
+    ax.set_title("Skin pressure drop", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def _opt_num(col, label, key, help=None):
+    """Optional number (blank = not entered) for PROSPER's 'leave blank to calculate' fields."""
+    txt = col.text_input(label, key=wkey(key), help=help, **dflt(key, value=""))
+    ss["_v_" + key] = txt
+    txt = (txt or "").strip()
+    if not txt:
+        return None
+    try:
+        return float(txt)
+    except ValueError:
+        col.caption(":red[not a number - ignored]")
+        return None
+
+
+def sand_control_panel(o, fluid, h_default, res_known=None):
+    """Sand control inputs (PROSPER 2.7.8.2). Returns (SandControl, (k, h, rw), multiphase flag)."""
     kind = o.sand_control
     if kind == "none":
-        return wcomp.SandControl("none")
+        return wcomp.SandControl("none"), None, True
     st.subheader("Sand control")
     if kind == "gravel_pack":
         kind = "gravel_pack_cased" if o.completion == "cased_hole" else "gravel_pack_open"
     sc = wcomp.SandControl(kind)
-    st.caption(f"{sc.label()} - from the Options summary.")
-    c = st.columns(4)
-    p = {"interval": num(c[0], "Completed interval (ft)", "sc_int", h_default, 0.1, 1e4, 1.0)}
-    if kind == "gravel_pack_cased":
-        p["perf_diameter_in"] = num(c[1], "Perforation diameter (in)", "sc_pd", 0.75, 0.1, 3.0, 0.05)
-        p["spf"] = num(c[2], "Shots per foot", "sc_spf", 12.0, 0.5, 40.0, 1.0)
-        p["perf_efficiency"] = num(c[3], "Perforation efficiency (fraction open)", "sc_eff", 0.8, 0.01, 1.0, 0.05)
-        c = st.columns(4)
-        p["gravel_perm"] = num(c[0], "Gravel pack permeability (md)", "sc_kg", 120000.0, 100.0, 1e7, 1000.0)
-        p["pack_length_in"] = num(c[1], "Gravel pack length - screen to end of cement (in)", "sc_L", 4.0, 0.1, 40.0, 0.5)
-    elif kind in ("gravel_pack_open", "pre_packed_screen"):
-        lab = "Gravel pack" if kind == "gravel_pack_open" else "Pre-pack"
-        p["gravel_perm"] = num(c[1], f"{lab} permeability (md)", "sc_kg" if kind == "gravel_pack_open" else "sc_kpp",
-                               120000.0 if kind == "gravel_pack_open" else 50000.0, 100.0, 1e7, 1000.0)
-        p["outer_radius_in"] = num(c[2], "Outer radius - hole or screen (in)", "sc_ro",
-                                   4.25 if kind == "gravel_pack_open" else 2.75, 0.5, 20.0, 0.25)
-        p["thickness_in"] = num(c[3], f"{lab} thickness (in)", "sc_th", 1.25 if kind == "gravel_pack_open" else 0.5,
-                                0.05, 10.0, 0.05)
-    elif kind == "wire_wrapped_screen":
-        p["screen_od_in"] = num(c[1], "Screen OD (in)", "sc_od", 5.5, 1.0, 12.0, 0.125)
-        p["slot_width_in"] = num(c[2], "Slot (gauge) width (in)", "sc_sw", 0.012, 0.001, 0.2, 0.001, "%.3f")
-        p["wire_width_in"] = num(c[3], "Wire width (in)", "sc_ww", 0.09, 0.01, 0.5, 0.01)
+    st.caption(f"{sc.label()} - from the Options summary. The IPR is calculated to the sand face; the completion "
+               "adds dP = 141.2 Q µ (S + D Q) / (k H) with the in-situ rate and the fluid properties recalculated at "
+               "the sand-face pressure (PROSPER).")
+    if res_known:
+        k_, h_, rw_ = res_known["k"], res_known["h"], res_known["rw"]
     else:
-        p["slots_per_ft"] = num(c[1], "Slots per foot", "sc_spf2", 30.0, 1.0, 500.0, 1.0)
-        p["slot_width_in"] = num(c[2], "Slot width (in)", "sc_sw2", 0.02, 0.001, 0.5, 0.001, "%.3f")
-        p["slot_length_in"] = num(c[3], "Slot length (in)", "sc_sl", 2.0, 0.1, 12.0, 0.1)
+        c = st.columns(4)
+        k_ = num(c[0], "Reservoir permeability (md)", "sc_k", float(val("ipr_k", 50.0)), 0.001, 1e5)
+        h_ = num(c[1], "Reservoir thickness (ft)", "sc_h", float(val("ipr_h", 60.0)), 0.1, 1e4)
+        rw_ = num(c[2], "Wellbore radius (ft)", "sc_rw", float(val("ipr_rw", 0.354)), 0.05, 5.0, None, "%.3f")
+        st.caption("This IPR model has no permeability/thickness: they are needed here to express the sand-control "
+                   "drop as a skin.")
+    p = {}
+    multiphase = True
+    if kind in ("gravel_pack_cased", "gravel_pack_open"):
+        left, right = st.columns([2.2, 1])
+        with left:
+            c = st.columns(3)
+            p["gravel_perm"] = num(c[0], "Gravel pack permeability (md)", "sc_kg", 60000.0, 100.0, 1e7, 1000.0,
+                                   help="In-situ permeability of the gravel (about half the lab value).")
+            p["pack_length_in"] = num(c[1], "Gravel pack length (in)", "sc_L", 4.0 if kind == "gravel_pack_cased" else 1.5,
+                                      0.05, 40.0, 0.25, help="Distance from the screen OD to the sand face.")
+            p["interval"] = num(c[2], "Perforation interval, TVD (ft)", "sc_int", h_default, 0.1, 1e4, 1.0,
+                                help="Used for the flow area / velocities only.")
+            c = st.columns(3)
+            if kind == "gravel_pack_cased":
+                p["perf_diameter_in"] = num(c[0], "Perforation diameter (in)", "sc_pd", 0.75, 0.1, 3.0, 0.05,
+                                            help="Diameter of the perforation tunnel.")
+                p["spf"] = num(c[1], "Shot density (1/ft)", "sc_spf", 12.0, 0.5, 40.0, 1.0)
+                p["perf_efficiency"] = num(c[2], "Perforation efficiency", "sc_eff", 0.8, 0.01, 1.0, 0.05, "%.2f",
+                                           help="Proportion of perforations that are open and effective.")
+                c = st.columns(3)
+                p["deviation"] = num(c[0], "Deviation (deg)", "sc_dev", 0.0, 0.0, 85.0, 1.0,
+                                     help="Converts the TVD interval to MD for the flow area.")
+            bm = sel(c[1], "Beta (turbulence) method", ["Calculated", "Entered"], "sc_bm",
+                     help="Calculated: beta = 1.47e7 / Kg^0.55 (1/ft).")
+            if bm == "Entered":
+                p["beta"] = num(c[2], "Beta (1/ft)", "sc_beta", float(round(1.47e7 / p["gravel_perm"] ** 0.55)), 0.0, 1e12)
+            if fluid == "oil":
+                multiphase = sel(st.columns(3)[0], "Method (oil only)", ["Multi Phase", "Single Phase"], "sc_phase",
+                                 help="Single Phase: liquid properties only (the classic method). Multi Phase: "
+                                      "phase-weighted properties including free gas released at the sand face.") \
+                    == "Multi Phase"
+        with right:
+            st.markdown("Typical gravel permeabilities (lab, md)")
+            st.dataframe(pd.DataFrame(wcomp.GRAVEL_PERMEABILITY, columns=["Gravel type", "Mesh", "Lab perm. (md)"]),
+                         hide_index=True, width="stretch", height=320)
+    else:
+        c = st.columns(4)
+        p["interval"] = num(c[0], "Production interval (ft)", "sc_int", h_default, 0.1, 1e4, 1.0)
+        if kind == "pre_packed_screen":
+            p["screen_inner_radius"] = num(c[1], "Screen inner radius (ft)", "sc_rsi", 0.2, 0.01, 5.0, None, "%.4f")
+            p["screen_outer_radius"] = num(c[2], "Screen outer radius (ft)", "sc_rso", 0.25, 0.01, 5.0, None, "%.4f")
+            p["screen_perm"] = num(c[3], "Screen permeability (md)", "sc_kpp", 500.0, 0.01, 1e7)
+            c = st.columns(4)
+            p["screen_beta"] = _opt_num(c[0], "Screen beta (1/ft)", "sc_bpp",
+                                        help="Blank: calculated (1.47e7 / k^0.55); 0: ignored.")
+        elif kind == "wire_wrapped_screen":
+            p["screen_outer_radius"] = num(c[1], "Screen outer radius (ft)", "sc_rso_w", 0.25, 0.01, 5.0, None, "%.4f")
+            c = st.columns(4)
+        else:
+            p["liner_inner_radius"] = num(c[1], "Liner inner radius (ft)", "sc_ri", 0.25, 0.01, 5.0, None, "%.4f")
+            p["liner_outer_radius"] = num(c[2], "Liner outer radius (ft)", "sc_ro2", 0.29, 0.01, 5.0, None, "%.4f")
+            p["slot_density"] = num(c[3], "Slot density (1/ft)", "sc_sden", 100.0, 0.01, 1000.0)
+            c = st.columns(4)
+            p["slot_height_in"] = num(c[0], "Slot height (in)", "sc_sh", 2.5, 0.01, 48.0)
+            p["slot_width_in"] = num(c[1], "Slot width (in)", "sc_sw2", 0.02, 0.001, 1.0, None, "%.3f")
+            p["screen_outer_radius"] = num(c[2], "Screen outer radius (ft, 0 = none)", "sc_rss", 0.0, 0.0, 5.0, None,
+                                           "%.4f", help="Only for a screen inside the liner; must be below the liner "
+                                                        "inner radius.")
+            c = st.columns(4)
+        p["outside_perm"] = _opt_num(c[1], "Outside permeability (md)", "sc_kout",
+                                     help="Material between the screen/liner and the sand face. Blank: formation sand "
+                                          "(the reservoir permeability).")
+        p["outside_beta"] = _opt_num(c[2], "Outside beta (1/ft)", "sc_bout",
+                                     help="Blank: calculated (1.47e7 / k^0.55); 0: ignored.")
+        if fluid == "oil":
+            multiphase = sel(c[3], "Method (oil only)", ["Multi Phase", "Single Phase"], "sc_phase") == "Multi Phase"
     sc.params = p
-    return sc
+    return sc, (k_, h_, rw_), multiphase
+
+
+def sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, multiphase):
+    """In-situ property function for the sand-control dP (properties at the sand-face pressure)."""
+    if fluid == "oil":
+        if o.method != "eos":
+            m = blackoil_model(o)
+            if m is not None:
+                return wcomp.props_from_fluid(wvlp.BlackOilFluid(m), "oil", t_f,
+                                              {"wc": wc, "gor": float(m.inp.rsb)}, multiphase), \
+                    "black oil at the sand-face pressure"
+        return wcomp.props_constant(pvt["bo"], pvt["rho"], pvt["mu"], "oil"), "oil properties at reservoir pressure"
+    if o.method != "eos":
+        inp = bo.PVTInputs(rsb=1, api=40, gas_sg=float(gasp["sg"]), salinity_ppm=float(val("pvt_sal", 50000.0)),
+                           h2s=float(val("pvt_h2s", 0.0)), co2=float(val("pvt_co2", 0.0)), n2=float(val("pvt_n2", 0.0)))
+        return wcomp.props_from_fluid(wvlp.WetGasFluid(inp, float(val("pvt_cond_api", 50.0))), "gas", t_f,
+                                      {"wgr": wgr or 0.0, "cgr": cgr or 0.0}), "wet gas at the sand-face pressure"
+    tr = t_f + 459.67
+    pr_ = float(val("ipr_pr", 4000.0))
+    bg = 0.02827 * gasp["z_r"] * tr / pr_
+    return wcomp.props_constant(bg, 28.9625 * gasp["sg"] * pr_ / (gasp["z_r"] * 10.7316 * tr), gasp["mu_r"], "gas"), \
+        "gas properties at reservoir pressure"
 
 
 def multilayer_table(fluid, with_dp):
@@ -1242,15 +1393,6 @@ def zones_table():
                                index=pd.RangeIndex(1, 7, name="Zone (heel → toe)"))
     return track(key, st.data_editor(ss[key], key=key + "_ed", num_rows="dynamic", width="stretch", column_config={
         "Type": st.column_config.SelectboxColumn(options=["Perforated", "Open Hole", "Blank"], required=True)}))
-
-
-def sc_props(fluid, pvt, gasp, pr, t_f):
-    if fluid == "oil":
-        return {"mu": pvt["mu"], "bo": pvt["bo"], "rho": pvt["rho"]}
-    mu_r, z_r, sg = gasp["mu_r"], gasp["z_r"], gasp["sg"]
-    tr = t_f + 459.67
-    return {"mu": mu_r, "z": z_r, "sg": sg, "t_f": t_f, "pr": pr,
-            "rho_g": 28.9625 * sg * pr / (z_r * 10.7316 * tr), "bg": 0.02827 * z_r * tr / pr}
 
 
 with tabs[2]:
@@ -1543,16 +1685,22 @@ with tabs[2]:
 
             # ----------------------------------------------------- sand control
             raw_curve = curve
-            sc = sand_control_panel(o, fluid, float(val("ipr_h", 60.0)))
+            sc, sc_res, sc_multi = sand_control_panel(o, fluid, float(val("ipr_h", 60.0)),
+                                                      r if model in VERTICAL_SKIN_MODELS else None)
             if curve is not None and err is None and sc.kind != "none":
                 try:
-                    dp_fn = wcomp.sand_control_dp(sc, fluid, sc_props(fluid, pvt, gasp, pr, t_f))
+                    props_, props_note = sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, sc_multi)
+                    dp_fn = wcomp.sand_control_dp(sc, props_, *sc_res)
+                    st.caption(f"Sand-control dP with {props_note}.")
                     curve = wcomp.apply_sand_control(curve, dp_fn)
                     ss["ipr_sc_dp"] = dp_fn
                     for attr in ("layer_rates", "profile", "profile_heel_pressure", "isochronal", "c_iso"):
+                        if attr == "layer_rates" and hasattr(raw_curve, attr) and \
+                                len(raw_curve.layer_rates) != len(curve.q):
+                            continue                  # per-point layer rates belong to the sand-face curve
                         if hasattr(raw_curve, attr):
                             setattr(curve, attr, getattr(raw_curve, attr))
-                except (ValueError, KeyError) as e:
+                except (ValueError, KeyError, ZeroDivisionError) as e:
                     err = f"Sand control: {e}"
 
             # ----------------------------------------------------------- results
@@ -1585,19 +1733,43 @@ with tabs[2]:
                 if hasattr(curve, "profile"):
                     st.pyplot(profile_plot(curve), clear_figure=True)
                 table = curve.table(cgr=cgr, wgr=wgr) if gas else curve.table(wc=wc, gor=pvt.get("gor"))
+                skin_dps = {}
                 if kh_for_skin and skin_parts:
                     s_tot = sum(skin_parts.values())
                     if gas:
                         coef = 1422 * (t_f + 459.67) * gasp["mu_r"] * gasp["z_r"] * s_tot / kh_for_skin
-                        table["dP skin (psi)"] = np.sqrt(table["Pwf (psia)"] ** 2 + coef * curve.q) - table["Pwf (psia)"]
+                        dp_t = np.sqrt(np.maximum(table["Pwf (psia)"].to_numpy() ** 2 + coef * curve.q, 0.0)) \
+                            - table["Pwf (psia)"].to_numpy()
+                        per_s = dp_t / s_tot if abs(s_tot) > 1e-12 else 0 * dp_t
                     else:
-                        table["dP skin (psi)"] = 141.2 * pvt["mu"] * pvt["bo"] * s_tot / kh_for_skin * curve.q
+                        per_s = 141.2 * pvt["mu"] * pvt["bo"] / kh_for_skin * np.asarray(curve.q, float)
+                        dp_t = per_s * s_tot
+                    table["dP skin (psi)"] = dp_t
+                    skin_dps["Total skin"] = dp_t
+                    if len(skin_parts) > 1:
+                        for name_, s_ in skin_parts.items():
+                            table[f"dP {name_} (psi)"] = per_s * s_
+                            skin_dps[name_] = per_s * s_
                 if hasattr(curve, "dp_sand_control"):
+                    table["Sand-face pressure (psia)"] = curve.p_sandface
                     table["dP sand control (psi)"] = curve.dp_sand_control
+                    if getattr(curve, "sc_skin", None) is not None:
+                        table["Sand control skin"] = curve.sc_skin
+                        table["Sand control D (1/(1000 RB/d))"] = curve.sc_d * 1000
+                    if getattr(curve, "sc_velocity", None) is not None:
+                        table["Velocity at casing (ft/s)"] = curve.sc_velocity
                 lr = getattr(curve, "layer_rates", None)
                 if lr is not None:
                     for col in lr.columns:
                         table[f"{col} rate"] = lr[col].to_numpy() / (1e3 if gas else 1)
+                if hasattr(curve, "dp_sand_control") and skin_dps:
+                    skin_dps["Sand control"] = np.asarray(curve.dp_sand_control, float)
+                if skin_dps:
+                    with st.expander("Skin pressure drop", expanded=False):
+                        st.pyplot(skin_dp_plot(np.asarray(curve.q, float) / (1e3 if gas else 1), skin_dps,
+                                               "MMscf/d" if gas else "STB/d"), clear_figure=True)
+                        st.caption("Pressure drop across each skin component at each rate (oil: 141.2 q µ B s / kh; "
+                                   "gas: the total skin drop shared in proportion to each component's skin).")
                 with st.expander("IPR table", expanded=False):
                     st.dataframe(table.style.format(precision=2), hide_index=True, width="stretch")
                 if hasattr(curve, "isochronal"):

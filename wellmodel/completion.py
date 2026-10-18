@@ -7,22 +7,25 @@ Karakas & Tariq (1991, SPE 18247)  perforation skin: horizontal (phasing),
 MacLeod (1983)                     damaged zone (Hawkins) + crushed zone around
     perforation tunnels: (1/(Lp n')) (k/kc - k/kd) ln(rc/rp).
 Hawkins (1956)                     damaged zone: (k/kd - 1) ln(rd/rw).
-Cinco-Ley, Miller & Ramey (1975)   deviation skin
-    s = -(t'/41)^2.06 - (t'/56)^1.865 log10(hD/100),
-    t' = atan(sqrt(kv/kh) tan t) in degrees, hD = (h/rw) sqrt(kh/kv); valid to 75 deg.
+Cinco-Ley, Miller & Ramey (1975)   deviation skin correlation
+    s = -(t'/41)^2.06 - (t'/56)^1.865 log10(hD/100); "Cinco (2)" (anisotropic, to 75 deg):
+    t' = atan(sqrt(kv/kh) tan t), hD = (h/rw) sqrt(kh/kv); "Cinco" (isotropic, to 65 deg): t' = t, hD = h/rw.
+Brons & Marting (1961)             partial penetration (PROSPER "Martin-Bronz").
+Cinco-Ley, Ramey & Miller (1975)   SPE 5589 full solution: infinite-conductivity slanted, partially
+    penetrating line source in a slab (segment fluxes, Eqs. 4-6) - slant + penetration + interval location.
 Papatzacos (1987)                  partial penetration skin (closed form).
 
-Sand control (extra drawdown between sand face and wellbore)
-------------------------------------------------------------
-Cased-hole gravel pack   linear flow through gravel-filled perforation tunnels
-    oil  dp  = 9.08e-13 beta Bo^2 rho L q^2 / A^2 + mu Bo L q / (1.127e-3 kg A)
-    gas  dp2 = 1.247e-10 beta SG T Z L q^2 / A^2 + 8.93e3 mu T Z L q / (kg A)
-    beta = 1.47e7 / kg^0.55 (1/ft), A = open perforation area (ft2), L (ft),
-    q in STB/d (oil) or Mscf/d (gas)  (Jones, Blount & Glaze; Golan & Whitson).
-Open-hole gravel pack and pre-packed screen: radial Darcy + Forchheimer flow
-    across the pack annulus (same coefficients as the Jones radial equations).
-Wire-wrapped screen and slotted liner: orifice flow through the open slot area,
-    dp = rho v^2 / (2 g Cd^2). Plugging is not modelled.
+Sand control (PROSPER 2.7.8.2 / 2.19.2.6): dP between the sand face and the wellbore,
+dP = 141.2 Q mu / (k H) (S + D Q), in-situ rate and properties at the sand-face pressure
+------------------------------------------------------------------------------------
+Cased-hole gravel pack   Jones linear flow through gravel-filled perforation tunnels:
+    dP = a Q^2 + b Q, a = 9.08e-13 beta rho L / A^2, b = mu L / (1.127e-3 kg A),
+    A = pi (d/24)^2 spf (interval / cos dev) efficiency, beta = 1.47e7 / kg^0.55.
+Open-hole gravel pack    radial flow through the pack between screen and sand face.
+Pre-packed screen        Darcy (k/k_pp) ln(Rso/Rsi) + (k/k_out) ln(Rw/Rso); non-Darcy Do beta (1/r1 - 1/r2).
+Wire-wrapped screen      (k/k_out) ln(Rw/Rso) and its non-Darcy term.
+Slotted liner            radial flow centred on the well (Roe, Rse), linear flow through the slots and radial
+                         flow converging to them (PROSPER's Rosl / Risl / Roe / Rse construction).
 """
 from __future__ import annotations
 
@@ -96,22 +99,103 @@ def hawkins(k, rw, ld, kd):
     return float((k / kd - 1) * np.log((rw + ld) / rw)) if ld > 0 else 0.0
 
 
-def macleod(k, rw, lp, rp, spf, ld=0.0, kd=None, lc=0.0, kc=None):
+def macleod(k, rw, lp, rp, spf, ld=0.0, kd=None, lc=0.0, kc=None, efficiency=1.0, h=None, h_perf=None):
+    """McLeod (1983): damaged zone (Hawkins) plus the crushed zone around the perforation tunnels,
+        s_c = h / (Lp n) (k/kc - k/kd) ln(rc/rp),   n = spf x efficiency x perforated interval
+    (h / n = 1 / spf when the whole formation is perforated with every shot open)."""
     kd = k if (kd is None or ld <= 0) else kd
     sd = hawkins(k, rw, ld, kd)
-    sc = (1.0 / spf) / lp * (k / kc - k / kd) * np.log((rp + lc) / rp) if (lc > 0 and kc) else 0.0
+    ratio = 1.0 / (spf * efficiency)
+    if h is not None and h_perf:
+        ratio *= h / h_perf
+    sc = ratio / lp * (k / kc - k / kd) * np.log((rp + lc) / rp) if (lc > 0 and kc) else 0.0
     return {"damage": sd, "crushed zone": float(sc), "total": float(sd + sc)}
 
 
-def deviation_skin(theta_deg, h, rw, kv_kh=1.0):
-    """Cinco-Ley, Miller & Ramey (1975)."""
+DEV_LIMIT_ISO, DEV_LIMIT_ANISO = 65.0, 75.0      # PROSPER: Cinco valid to 65 deg, Cinco (2) to 75 deg
+
+
+def deviation_skin(theta_deg, h, rw, kv_kh=1.0, anisotropic=True):
+    """Cinco-Ley, Miller & Ramey (1975) deviation (slant) pseudo-skin correlation
+        s_theta = -(t'/41)^2.06 - (t'/56)^1.865 log10(hD/100).
+    anisotropic=True (PROSPER "Cinco (2)"): t' = atan(sqrt(kv/kh) tan t), hD = (h/rw) sqrt(kh/kv), valid to 75 deg.
+    anisotropic=False (PROSPER "Cinco"): isotropic, t' = t, hD = h/rw, valid to 65 deg."""
     if theta_deg <= 0:
         return 0.0
-    if theta_deg > 75:
-        raise ValueError("Deviation skin correlation is valid up to 75 degrees.")
-    tp = np.degrees(np.arctan(np.sqrt(kv_kh) * np.tan(np.radians(theta_deg))))
-    hd = h / rw * np.sqrt(1 / kv_kh)
+    lim = DEV_LIMIT_ANISO if anisotropic else DEV_LIMIT_ISO
+    if theta_deg > lim + 1e-9:
+        raise ValueError(f"The {'Cinco (2)' if anisotropic else 'Cinco'} deviation skin is valid up to {lim:g} degrees.")
+    if anisotropic:
+        tp = np.degrees(np.arctan(np.sqrt(kv_kh) * np.tan(np.radians(theta_deg))))
+        hd = h / rw * np.sqrt(1 / kv_kh)
+    else:
+        tp, hd = theta_deg, h / rw
     return float(-(tp / 41) ** 2.06 - (tp / 56) ** 1.865 * np.log10(hd / 100))
+
+
+def brons_marting(h, hp, rw, kv_kh=1.0):
+    """Brons & Marting (1961) partial-penetration pseudo-skin (PROSPER "Martin-Bronz"), interval open at the top
+    or bottom of the formation:  s_p = (1/b - 1) [ln hD - G(b)],  b = hp/h,  hD = (h/rw) sqrt(kh/kv),
+    G(b) = 2.948 - 7.363 b + 11.45 b^2 - 4.675 b^3."""
+    b = min(max(hp / h, 1e-6), 1.0)
+    if b >= 1.0 - 1e-9:
+        return 0.0
+    hd = h / rw * np.sqrt(1.0 / kv_kh)
+    g = 2.948 - 7.363 * b + 11.45 * b * b - 4.675 * b ** 3
+    return float((1 / b - 1) * (np.log(hd) - g))
+
+
+def cinco_slant_pp(theta_deg, h, hp, z_top, rw, kv_kh=1.0, n_seg=None, n_images=5):
+    """Cinco-Ley, Ramey & Miller (1975, SPE 5589) pseudo-skin of a partially-penetrating slanted well of infinite
+    conductivity in an infinite slab: the line source is split into M segments whose fluxes make the pseudo-skin
+    (Eq. 4) equal at every segment midpoint (Eqs. 5-6). h formation thickness, hp the vertical (TVD) height of
+    the completed interval, z_top the vertical distance from the top of the formation to the top of the interval,
+    rw wellbore radius (ft). Anisotropy by the usual scaling (z * sqrt(kh/kv), tan t * sqrt(kv/kh)).
+    Returns dict(total, slant, penetration): s_theta+p, s_theta = s_theta+p - s_p, s_p (the same interval vertical)."""
+    def solve(theta):
+        th = np.radians(theta)
+        sc = np.sqrt(1.0 / kv_kh)
+        hD = h / rw * sc
+        hvD = min(hp, h) / rw * sc                       # vertical extent of the interval
+        tan_e = np.tan(th) / sc
+        th_e = np.arctan(tan_e)
+        c, s = np.cos(th_e), np.sin(th_e)
+        hwD = hvD / c                                     # length along the (scaled) axis
+        zwD = hD - (z_top / rw * sc + hvD / 2)            # middle of the interval, from the bottom
+        M = n_seg or int(np.clip(np.floor(hwD), 4, 60))
+        seg = hwD / M
+        t = (np.arange(M) + 0.5) * seg - hwD / 2          # along-axis position of segment midpoints
+        zwi = zwD + t * c
+        xi = t * s
+        zj, xj = zwi, xi                                  # observation points: segment midpoints on the axis
+        G = np.zeros((M, M))
+        V = np.zeros(M)
+        for n in range(-n_images, n_images + 1):
+            A = (zj[:, None] - zwD) * tan_e - xi[None, :]
+            B = zj[:, None] + 2 * n * hD - zwi[None, :]
+            C = zj[:, None] + 2 * n * hD + zwi[None, :]
+            hh = seg / 2
+
+            def lnr(u_hi, u_lo, w):
+                return np.log((u_hi + np.sqrt(u_hi ** 2 + 1 + w ** 2)) / (u_lo + np.sqrt(u_lo ** 2 + 1 + w ** 2)))
+            t1 = lnr(hh - A * s - B * c, -hh - A * s - B * c, -B * s + A * c)
+            t2 = lnr(hh + A * s - C * c, -hh + A * s - C * c, C * s + A * c)
+            G += 0.5 * hD / seg * (t1 + t2)                 # segment i carries the share x_i of the rate
+            u = zj + 2 * n * hD
+            V += 0.5 * np.log((u + hD + np.sqrt((u + hD) ** 2 + 1)) / (u - hD + np.sqrt((u - hD) ** 2 + 1)))
+        # unknowns: x_i = share of the well rate from segment i (sum 1) and s:  sum_i G_ji x_i - V_j = s
+        K = np.zeros((M + 1, M + 1))
+        K[:M, :M] = G
+        K[:M, M] = -1.0
+        K[M, :M] = 1.0
+        rhs = np.concatenate([V, [1.0]])
+        sol = np.linalg.solve(K, rhs)
+        return float(sol[M])
+    if hp >= h - 1e-9 and theta_deg <= 0:
+        return {"total": 0.0, "slant": 0.0, "penetration": 0.0}
+    s_tot = solve(theta_deg)
+    s_p = solve(0.0) if theta_deg > 0 else s_tot
+    return {"total": s_tot, "slant": s_tot - s_p, "penetration": s_p}
 
 
 def partial_penetration_skin(h, hp, z_top, rw, kv_kh=1.0):
@@ -129,98 +213,209 @@ def partial_penetration_skin(h, hp, z_top, rw, kv_kh=1.0):
 
 
 # ============================================================ sand control
+# After PROSPER (User Guide 2.7.8.2 and Appendix 2.19.2.6). The IPR is calculated to the sand face (r_w); the
+# completion adds dP = (141.2 Q mu / k H) (S + D Q) between the sand face and the wellbore, where Q is the in-situ
+# rate (RB/d) and the fluid properties (density, viscosity, FVF) are recalculated at the sand-face pressure.
+# Non-Darcy terms use Do = 9.08e-13 / (4 pi^2 141.2) rho k H / (mu hp^2) = 1.629e-16 rho k H / (mu hp^2)
+# (rho in lb/ft3 - PROSPER prints 1.0205e-14 with rho as specific gravity), beta = 1.47e7 / k^0.55 (1/ft).
+SC_KINDS = {"none": "None", "gravel_pack_cased": "Gravel pack (cased hole)",
+            "gravel_pack_open": "Gravel pack (open hole)", "pre_packed_screen": "Pre-packed screen",
+            "wire_wrapped_screen": "Wire-wrapped screen", "slotted_liner": "Slotted liner"}
+GRAVEL_PERMEABILITY = [("Ottawa sand", "12/20", 500000), ("Ottawa sand", "20/40", 150000),
+                       ("Ottawa sand", "30/50", 90000), ("Ottawa sand", "40/60", 60000),
+                       ("Ottawa sand", "50/70", 30000), ("Carbolite", "20/40", 350000),
+                       ("Carbolite", "16/20", 500000), ("Isopac", "20/40", 110000)]   # lab values, md
+DO_CONST = 9.08e-13 / (4 * np.pi ** 2 * 141.2)        # 1.629e-16
+RB_FT3 = 5.6146
+
+
 @dataclass
 class SandControl:
     kind: str                 # none | gravel_pack_cased | gravel_pack_open | pre_packed_screen | wire_wrapped_screen | slotted_liner
     params: dict = field(default_factory=dict)
 
     def label(self):
-        return {"none": "None", "gravel_pack_cased": "Gravel pack (cased hole)",
-                "gravel_pack_open": "Gravel pack (open hole)", "pre_packed_screen": "Pre-packed screen",
-                "wire_wrapped_screen": "Wire-wrapped screen", "slotted_liner": "Slotted liner"}[self.kind]
+        return SC_KINDS[self.kind]
 
 
 def _beta_gravel(kg):
     return 1.47e7 / kg ** 0.55
 
 
-def sand_control_dp(sc: SandControl, fluid: str, props: dict):
-    """Return a function giving the sand-control 'drawdown' at rate q:
-    oil -> dp (psi) at q STB/d (liquid); gas -> d(p^2) (psi^2) at q Mscf/d.
-    props: oil {mu, bo, rho}; gas {mu, z, sg, t_f, rho_g (lb/ft3 at Pr), bg (ft3/scf)}."""
-    p = sc.params
+def _beta(value, k):
+    """PROSPER convention: blank (None) = calculated from the permeability, 0 = ignored, else as entered."""
+    return _beta_gravel(k) if value is None else float(value)
+
+
+def props_from_fluid(fluid, kind, t_f, ratios, multiphase=True):
+    """In-situ properties at the sand face from a VLP fluid (vlp.BlackOilFluid / WetGasFluid / EOSTableFluid).
+    Returns props(q, p) -> (Q RB/d, rho lb/ft3, mu cp); q is STB/d of liquid (oil) or Mscf/d (gas).
+    Oil, single phase (PROSPER 'Single Phase'): the liquid only - the free gas released at the sand face is
+    ignored; 'Multi Phase': oil, water and free gas, volume-weighted viscosity and mass-weighted density."""
+    def props(q, p):
+        q0 = np.atleast_1d(np.asarray(q, float))
+        q = np.maximum(q0, 1e-6)                       # properties at a vanishing rate stay defined
+        p = np.broadcast_to(np.maximum(np.asarray(p, float), 14.7), q.shape)
+        case = {"q": q / 1000.0 if kind == "gas" else q, **{k: np.full(q.shape, v) for k, v in ratios.items()}}
+        st = fluid.state(p, np.full(q.shape, t_f), case)
+        ql, qg = np.maximum(st["ql"], 0.0), np.maximum(st["qg"], 0.0)
+        if kind == "oil" and not multiphase:
+            qg = 0.0 * qg
+        qt = np.maximum(ql + qg, 1e-30)
+        rho = (ql * st["rho_l"] + qg * st["rho_g"]) / qt
+        mu = (ql * st["mu_l"] + qg * st["mu_g"]) / qt
+        return qt * 86400.0 / RB_FT3 * (q0 / q), rho, mu
+    return props
+
+
+def props_constant(fvf, rho, mu, kind="oil"):
+    """Constant properties (fvf RB/STB for oil, ft3/scf for gas)."""
+    def props(q, p):
+        q = np.atleast_1d(np.asarray(q, float))
+        qr = q * fvf if kind == "oil" else q * 1000.0 * fvf / RB_FT3
+        return qr, np.full(q.shape, float(rho)), np.full(q.shape, float(mu))
+    return props
+
+
+class SandControlModel:
+    """dP across a sand-control completion as a function of rate and sand-face pressure."""
+
+    def __init__(self, sc: SandControl, props, k, h, rw):
+        self.sc, self.props, self.k, self.h, self.rw = sc, props, float(k), float(h), float(rw)
+        p, kind = sc.params, sc.kind
+        self.notes = []
+        self.area_open = None
+        if kind == "gravel_pack_cased":
+            hp_md = p["interval"] / max(np.cos(np.radians(p.get("deviation", 0.0))), 1e-6)
+            self.area_open = np.pi * (p["perf_diameter_in"] / 24) ** 2 * p["spf"] * hp_md * p["perf_efficiency"]
+            self.L = p["pack_length_in"] / 12
+            self.kg = p["gravel_perm"]
+            self.beta = _beta(p.get("beta"), self.kg)
+            self.hp = p["interval"]
+            return
+        self.hp = p["interval"]
+        k_out = p.get("outside_perm") or self.k                # blank: formation sand outside the screen
+        b_out = _beta(p.get("outside_beta"), k_out)
+        f = self.k / self.hp * self.h / 1.0                   # k H / hp (Darcy skin of a radial shell over hp)
+        rw = self.rw
+        if kind == "gravel_pack_open":
+            rs = rw - p["pack_length_in"] / 12
+            if rs <= 0:
+                raise ValueError("The gravel pack length must be smaller than the wellbore radius.")
+            kg = p["gravel_perm"]
+            bg_ = _beta(p.get("beta"), kg)
+            self.parts = {"gravel pack": (f / kg * np.log(rw / rs), bg_ * (1 / rs - 1 / rw))}
+        elif kind == "pre_packed_screen":
+            rsi, rso = p["screen_inner_radius"], p["screen_outer_radius"]
+            if not 0 < rsi < rso <= rw:
+                raise ValueError("Need 0 < screen inner radius < screen outer radius <= wellbore radius.")
+            kpp = p["screen_perm"]
+            bpp = _beta(p.get("screen_beta"), kpp)
+            s1, g1 = self.k * self.h / self.hp / kpp * np.log(rso / rsi), bpp * (1 / rsi - 1 / rso)
+            s2, g2 = self.k * self.h / self.hp / k_out * np.log(rw / rso), b_out * (1 / rso - 1 / rw)
+            self.parts = {"screen (pre-pack)": (s1, g1), "screen to sand face": (s2, g2)}
+        elif kind == "wire_wrapped_screen":
+            rso = p["screen_outer_radius"]
+            if not 0 < rso <= rw:
+                raise ValueError("Need 0 < screen outer radius <= wellbore radius.")
+            self.parts = {"screen to sand face": (self.k * self.h / self.hp / k_out * np.log(rw / rso),
+                                                  b_out * (1 / rso - 1 / rw))}
+        elif kind == "slotted_liner":
+            ri, ro, rs = p["liner_inner_radius"], p["liner_outer_radius"], p.get("screen_outer_radius") or 0.0
+            hs, ws = p["slot_height_in"] / 12, p["slot_width_in"] / 12
+            if not 0 < ri < ro <= rw:
+                raise ValueError("Need 0 < liner inner radius < liner outer radius <= wellbore radius.")
+            if rs and rs >= ri:
+                raise ValueError("The screen outer radius must be smaller than the liner inner radius (0 = no screen).")
+            spc = p["slot_density"] * hs                       # slots around the circumference
+            if spc <= 0:
+                raise ValueError("Slot density and slot height must be positive.")
+            slo, sli = 2 * np.pi * ro / spc, 2 * np.pi * ri / spc
+            rosl = rw - ro if slo / 2 > rw - ro else slo / 2
+            risl = (ri - rs if sli / 2 > ri - rs else sli / 2) if rs else 0.0
+            roe = np.sqrt(ro ** 2 + 0.5 * spc * rosl ** 2)
+            rse = np.sqrt(ri ** 2 + 0.5 * spc * risl ** 2) if rs else 0.0
+            kH = self.k * self.h / self.hp / k_out
+            s_rad = kH * (np.log(rw / roe) if rw > roe else 0.0) + (kH * np.log(rse / rs) if rs else 0.0)
+            s_l1 = np.pi * (ro - ri) / ws
+            s_l2 = np.log(2 * risl / ws) if rs and risl > ws / 2 else 0.0
+            s_l3 = np.log(2 * rosl / ws) if rosl > ws / 2 else 0.0
+            s_slot = 2 * kH / spc * (s_l1 + s_l2 + s_l3)       # flow shared among spc slots, through k_out
+            g_sl = 39.5 * b_out * (ro - ri) / (spc * ws) ** 2
+            g_osl = 4 * b_out / spc ** 2 * (2 / ws - 1 / rosl) if rosl > 0 else 0.0
+            g_isl = 4 * b_out / spc ** 2 * (2 / ws - 1 / risl) if rs and risl > 0 else 0.0
+            g_oe = b_out * (1 / roe - 1 / rw) if rw > roe else 0.0
+            g_se = b_out * (1 / rs - 1 / rse) if rs else 0.0
+            self.parts = {"radial flow (well)": (s_rad, g_oe + g_se), "slots": (s_slot, g_sl + g_osl + g_isl)}
+            self.geom = {"slots around circumference": spc, "Rosl (ft)": rosl, "Risl (ft)": risl, "Roe (ft)": roe,
+                         "Rse (ft)": rse}
+        else:
+            raise KeyError(kind)
+        self.s_d = sum(v[0] for v in self.parts.values())
+        self.g_nd = sum(v[1] for v in self.parts.values())
+
+    # ------------------------------------------------------------------
+    def details(self, q, p_sf):
+        """dict of arrays: dp (psi), skin (rate-dependent), darcy skin, D (1/(RB/d)), in-situ rate, velocity."""
+        Q, rho, mu = self.props(q, p_sf)
+        if self.sc.kind == "gravel_pack_cased":
+            A = self.area_open
+            a = 9.08e-13 * self.beta * rho * self.L / A ** 2
+            b = mu * self.L / (1.127e-3 * self.kg * A)
+            dp = a * Q ** 2 + b * Q
+            c = 141.2 * mu / (self.k * self.h)
+            s_d = b / c
+            d = a / c
+            v = Q * RB_FT3 / 86400 / A
+            return {"dp": dp, "skin": s_d + d * Q, "darcy skin": s_d, "D": d, "Q": Q, "velocity": v, "a": a, "b": b}
+        c = 141.2 * mu / (self.k * self.h)
+        do = DO_CONST * rho * self.k * self.h / (mu * self.hp ** 2)
+        d = do * self.g_nd
+        dp = c * Q * (self.s_d + d * Q)
+        return {"dp": dp, "skin": self.s_d + d * Q, "darcy skin": self.s_d + 0 * Q, "D": d, "Q": Q,
+                "velocity": None}
+
+    def __call__(self, q, p_sf):
+        return self.details(q, p_sf)["dp"]
+
+
+def sand_control_dp(sc: SandControl, props, k=None, h=None, rw=None):
+    """Sand-control dP model: callable dp(q, p_sf) (psi). props(q, p) -> (Q RB/d, rho, mu); see props_from_fluid.
+    k (md), h (ft) and rw (ft) of the reservoir (the dP is reported as a skin on k h)."""
     if sc.kind == "none":
-        return lambda q: 0.0 * np.asarray(q, float)
-    if sc.kind == "gravel_pack_cased":
-        n_open = p["spf"] * p["interval"] * p["perf_efficiency"]
-        A = n_open * np.pi * (p["perf_diameter_in"] / 24) ** 2       # ft2
-        L = p["pack_length_in"] / 12
-        kg, beta = p["gravel_perm"], _beta_gravel(p["gravel_perm"])
-        if fluid == "oil":
-            a = 9.08e-13 * beta * props["bo"] ** 2 * props["rho"] * L / A ** 2
-            b = props["mu"] * props["bo"] * L / (1.127e-3 * kg * A)
-        else:
-            tr = props["t_f"] + RANKINE
-            a = 1.247e-10 * beta * props["sg"] * tr * props["z"] * L / A ** 2
-            b = 8.93e3 * props["mu"] * tr * props["z"] * L / (kg * A)
-        return lambda q: a * np.asarray(q, float) ** 2 + b * np.asarray(q, float)
-    if sc.kind in ("gravel_pack_open", "pre_packed_screen"):
-        ro = p["outer_radius_in"] / 12
-        ri = ro - p["thickness_in"] / 12
-        if ri <= 0:
-            raise ValueError("Pack thickness must be smaller than the outer radius.")
-        h, kg = p["interval"], p["gravel_perm"]
-        beta = _beta_gravel(kg)
-        if fluid == "oil":
-            b = 141.2 * props["mu"] * props["bo"] * np.log(ro / ri) / (kg * h)
-            a = 2.30e-14 * beta * props["bo"] ** 2 * props["rho"] * (1 / ri - 1 / ro) / h ** 2
-        else:
-            tr = props["t_f"] + RANKINE
-            b = 1422 * tr * props["mu"] * props["z"] * np.log(ro / ri) / (kg * h)
-            a = 3.161e-12 * beta * props["sg"] * tr * props["z"] * (1 / ri - 1 / ro) / h ** 2
-        return lambda q: a * np.asarray(q, float) ** 2 + b * np.asarray(q, float)
-    if sc.kind in ("wire_wrapped_screen", "slotted_liner"):
-        if sc.kind == "wire_wrapped_screen":
-            open_frac = p["slot_width_in"] / (p["slot_width_in"] + p["wire_width_in"])
-            A = open_frac * np.pi * p["screen_od_in"] / 12 * p["interval"]
-        else:
-            A = p["slots_per_ft"] * p["interval"] * (p["slot_width_in"] / 12) * (p["slot_length_in"] / 12)
-        cd = p.get("cd", 0.6)
-        if fluid == "oil":
-            vol = lambda q: np.asarray(q, float) * props["bo"] * 5.6146 / 86400
-            rho = props["rho"]
-            return lambda q: rho * (vol(q) / A) ** 2 / (2 * 32.174 * cd ** 2) / 144
-        vol = lambda q: np.asarray(q, float) * 1000 * props["bg"] / 86400
-        rho, pr = props["rho_g"], props["pr"]
-        # convert dp to d(p^2) about the sand-face pressure ~ Pr: d(p^2) ~ 2 p dp
-        return lambda q: 2 * pr * rho * (vol(q) / A) ** 2 / (2 * 32.174 * cd ** 2) / 144
-    raise KeyError(sc.kind)
+        return lambda q, p=None: 0.0 * np.asarray(q, float)
+    return SandControlModel(sc, props, k if k else 100.0, h if h else 50.0, rw if rw else 0.354)
 
 
 def apply_sand_control(curve, dp_fn):
-    """Re-solve an IPRCurve with an extra sand-control drawdown in series.
-    For each wellbore pressure pwf find q with q = IPR(p_sf), p_sf = pwf + dp(q)
-    (oil) or p_sf^2 = pwf^2 + dp2(q) (gas)."""
+    """IPR at the wellbore with the sand-control dP in series. Each point of the sand-face IPR (p_sf, q) moves to
+    pwf = p_sf - dP(q, p_sf), with the fluid properties at the sand-face pressure (PROSPER); the curve ends where
+    pwf reaches zero."""
     from .inflow import IPRCurve
-    gas = curve.fluid == "gas"
-
-    def psf(pwf, q):
-        d = float(dp_fn(q))
-        return np.sqrt(pwf ** 2 + d) if gas else pwf + d
-
-    qs, dps = [], []
-    for pw in curve.pwf:
-        qmax = float(curve.rate(pw))
-        if qmax <= 0:
-            qs.append(0.0); dps.append(0.0)
-            continue
-        f = lambda q: float(curve.rate(min(psf(pw, q), curve.pr))) - q
-        q = brentq(f, 0.0, qmax, xtol=1e-6) if f(qmax) < 0 else qmax
-        qs.append(q)
-        dps.append(psf(pw, q) - pw)
-    qs = np.array(qs)
-    out = IPRCurve(curve.model, curve.fluid, curve.pr, curve.pwf.copy(), qs, dict(curve.params),
+    order = np.argsort(-np.asarray(curve.pwf, float))
+    psf = np.asarray(curve.pwf, float)[order]
+    q = np.asarray(curve.q, float)[order]
+    if len(psf) < 80:                                  # refine so the end of the curve is resolved
+        pf = np.linspace(psf[0], psf[-1], 160)
+        q = np.interp(pf, psf[::-1], q[::-1]) if curve.rate_fn is None else np.asarray(curve.rate(pf), float)
+        psf = pf
+    dp = np.nan_to_num(np.asarray(dp_fn(q, psf), float), nan=0.0)
+    pw = psf - dp
+    keep = pw >= 0.0
+    k = int(np.argmax(~keep)) if not keep.all() else len(pw)
+    pw_o, q_o, dp_o, psf_o = list(pw[:k]), list(q[:k]), list(dp[:k]), list(psf[:k])
+    if 0 < k < len(pw):                                # interpolate the zero-pwf end (AOF)
+        f = pw[k - 1] / (pw[k - 1] - pw[k])
+        q_o.append(q[k - 1] + f * (q[k] - q[k - 1])); pw_o.append(0.0)
+        dp_o.append(dp[k - 1] + f * (dp[k] - dp[k - 1])); psf_o.append(psf[k - 1] + f * (psf[k] - psf[k - 1]))
+    out = IPRCurve(curve.model, curve.fluid, curve.pr, np.array(pw_o), np.array(q_o), dict(curve.params),
                    list(curve.notes), curve.tests, None)
-    out.dp_sand_control = np.array(dps)
+    out.dp_sand_control = np.array(dp_o)
+    out.p_sandface = np.array(psf_o)
+    if hasattr(dp_fn, "details"):
+        det = dp_fn.details(out.q, out.p_sandface)
+        out.sc_skin = np.asarray(det["skin"], float)
+        out.sc_velocity = None if det.get("velocity") is None else np.asarray(det["velocity"], float)
+        out.sc_d = np.asarray(det["D"], float)
     out.params["AOF without sand control"] = curve.aof
     return out

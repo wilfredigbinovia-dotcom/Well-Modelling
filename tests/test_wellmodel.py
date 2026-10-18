@@ -441,11 +441,63 @@ def test_sand_control_reduces_rate_consistently():
     c = iflow.darcy(3000, 2000, 100, 60, 160, 31.62, 0.354, 0, 0.8, 1.3)
     sc = wcomp.SandControl("gravel_pack_cased", dict(spf=12, interval=60, perf_efficiency=0.8,
                                                      perf_diameter_in=0.75, pack_length_in=4, gravel_perm=120000))
-    dp = wcomp.sand_control_dp(sc, "oil", {"mu": 0.8, "bo": 1.3, "rho": 45})
+    dp = wcomp.sand_control_dp(sc, wcomp.props_constant(1.3, 45.0, 0.8), 100, 60, 0.354)
     c2 = wcomp.apply_sand_control(c, dp)
-    assert c2.aof < c.aof
+    assert c2.aof < c.aof and c2.pwf[-1] == pytest.approx(0.0)
     i = 30                                   # sand-face pressure reproduces the original IPR
-    assert c.rate(c2.pwf[i] + c2.dp_sand_control[i]) == pytest.approx(c2.q[i], rel=1e-4)
+    assert c.rate(c2.pwf[i] + c2.dp_sand_control[i]) == pytest.approx(c2.q[i], rel=1e-3)
+    # PROSPER's Jones form: a = 9.08e-13 beta Bo^2 rho L / A^2, b = mu Bo L / (1.127e-3 kg A), Q in STB/d
+    A = np.pi * (0.75 / 24) ** 2 * 12 * 60 * 0.8
+    beta = 1.47e7 / 120000 ** 0.55
+    a = 9.08e-13 * beta * 1.3 ** 2 * 45 * (4 / 12) / A ** 2
+    b = 0.8 * 1.3 * (4 / 12) / (1.127e-3 * 120000 * A)
+    assert float(dp(np.array([3000.0]), 2000.0)[0]) == pytest.approx(a * 3000 ** 2 + b * 3000, rel=1e-9)
+    det = dp.details(np.array([3000.0]), 2000.0)
+    assert det["skin"][0] == pytest.approx((a * 3000 ** 2 + b * 3000) * 100 * 60 / (141.2 * 3000 * 1.3 * 0.8))
+
+
+def test_screens_and_slotted_liner_skins():
+    props = wcomp.props_constant(1.2, 50.0, 1.0)
+    k, h, rw = 100.0, 50.0, 0.354
+    # wire-wrapped screen, formation sand outside: Darcy skin ln(rw/rso)
+    ww = wcomp.sand_control_dp(wcomp.SandControl("wire_wrapped_screen", dict(interval=50, screen_outer_radius=0.25,
+                                                                            outside_beta=0)), props, k, h, rw)
+    assert ww.details(np.array([1.0]), 2000.0)["skin"][0] == pytest.approx(np.log(rw / 0.25), rel=1e-6)
+    # pre-packed screen: two radial shells; non-Darcy Do beta (1/r1 - 1/r2)
+    pp = wcomp.sand_control_dp(wcomp.SandControl("pre_packed_screen", dict(
+        interval=50, screen_inner_radius=0.2, screen_outer_radius=0.25, screen_perm=500.0, outside_perm=20000.0)),
+        props, k, h, rw)
+    d = pp.details(np.array([1000.0]), 2000.0)
+    s_darcy = k / 500 * np.log(0.25 / 0.2) + k / 20000 * np.log(rw / 0.25)
+    do = wcomp.DO_CONST * 50 * k * h / (1.0 * 50 ** 2)
+    dd = do * (1.47e7 / 500 ** 0.55 * (1 / 0.2 - 1 / 0.25) + 1.47e7 / 20000 ** 0.55 * (1 / 0.25 - 1 / rw))
+    assert d["darcy skin"][0] == pytest.approx(s_darcy, rel=1e-9) and d["D"][0] == pytest.approx(dd, rel=1e-9)
+    assert d["dp"][0] == pytest.approx(141.2 * 1200 * 1.0 / (k * h) * (s_darcy + dd * 1200), rel=1e-9)
+    # slotted liner: more slots or wider slots -> less skin; partial interval -> more skin
+    def sl(**kw):
+        p = dict(interval=50, liner_inner_radius=0.25, liner_outer_radius=0.29, slot_density=3.0, slot_height_in=4.0,
+                 slot_width_in=0.02)
+        p.update(kw)
+        return wcomp.sand_control_dp(wcomp.SandControl("slotted_liner", p), props, k, h, rw).details(
+            np.array([1000.0]), 2000.0)["skin"][0]
+    base = sl()
+    assert base > 0 and sl(slot_density=12.0) < base and sl(slot_width_in=0.05) < base and sl(interval=25) > base
+    assert sl(screen_outer_radius=0.2) > base
+    with pytest.raises(ValueError):
+        sl(screen_outer_radius=0.3)
+
+
+def test_sand_control_properties_at_sand_face():
+    *_, oil = _vlp_setup()
+    props_m = wcomp.props_from_fluid(oil, "oil", 200.0, {"wc": 0.0, "gor": float(oil.inp.rsb)}, multiphase=True)
+    props_s = wcomp.props_from_fluid(oil, "oil", 200.0, {"wc": 0.0, "gor": float(oil.inp.rsb)}, multiphase=False)
+    q = np.array([1000.0])
+    qa, rho_a, _ = props_m(q, 5000.0)                  # undersaturated: one phase, both methods agree
+    qb, rho_b, _ = props_s(q, 5000.0)
+    assert qa[0] == pytest.approx(qb[0]) and rho_a[0] == pytest.approx(rho_b[0])
+    qm, rho_m, _ = props_m(q, 800.0)                   # below the bubble point: free gas in 'Multi Phase' only
+    qs, rho_s, _ = props_s(q, 800.0)
+    assert qm[0] > qs[0] and rho_m[0] < rho_s[0]
 
 
 # ------------------------------------------------------- advanced inflow
@@ -1499,3 +1551,35 @@ def test_gaslift_design_new_well():
     vc = wgl.annulus_volume(secs, top, res.inj_md)
     stab = wgl.design_stability(res, path, oil, gas, curve, vc)
     assert stab["F1"] > 0 and np.isfinite(vc)
+
+
+# ------------------------------------------------------------ deviation / partial penetration skins
+@pytest.mark.parametrize("hd,zr,pen,th,expected", [
+    (100, .5, .25, 0, 6.611), (100, .5, .25, 45, 4.245), (100, .5, .25, 75, -0.451), (100, .5, 1, 45, -1.178),
+    (100, .5, 1, 75, -3.577), (100, .95, .1, 60, 12.662), (100, .75, .5, 0, 3.067), (100, .6, .1, 75, 3.739),
+    (1000, .5, .25, 45, 8.593), (1000, .875, .25, 60, 6.163), (1000, .5, 1, 45, -1.850),
+    (1000, .95, .1, 75, 10.755), (1000, .5, .75, 60, -2.380)])
+def test_cinco_ley_full_solution_tables(hd, zr, pen, th, expected):
+    """Cinco-Ley, Ramey & Miller (1975, SPE 5589) Tables 1 and 2 (s_theta+p)."""
+    from wellmodel import completion as wc
+    h, rw = float(hd), 1.0
+    hp = pen * h
+    z_top = h - (zr * h + hp / 2)
+    assert wc.cinco_slant_pp(th, h, hp, z_top, rw)["total"] == pytest.approx(expected, abs=0.03)
+
+
+def test_deviation_and_brons_marting_skins():
+    from wellmodel import completion as wc
+    # correlation against the full solution for a fully penetrating well (hD = 100)
+    assert wc.deviation_skin(45, 100, 1.0, anisotropic=False) == pytest.approx(-1.178, abs=0.05)
+    assert wc.deviation_skin(75, 1000, 1.0) == pytest.approx(-5.282, abs=0.15)
+    with pytest.raises(ValueError):
+        wc.deviation_skin(70, 100, 1.0, anisotropic=False)          # Cinco (isotropic) valid to 65 deg
+    # isotropic version ignores kv/kh; the anisotropic one does not
+    assert wc.deviation_skin(40, 100, 0.354, 0.1, anisotropic=False) == wc.deviation_skin(40, 100, 0.354, 1.0)
+    assert wc.deviation_skin(40, 100, 0.354, 0.1) > wc.deviation_skin(40, 100, 0.354, 1.0)
+    # Brons & Marting with the interval at the top: SPE 5589 Table 1, theta 0, top completions
+    assert wc.brons_marting(100, 25, 1.0) == pytest.approx(8.641, rel=0.02)
+    assert wc.brons_marting(100, 50, 1.0) == pytest.approx(3.067, rel=0.02)
+    assert wc.brons_marting(100, 100, 1.0) == 0.0
+    assert wc.brons_marting(100, 50, 1.0, 0.1) > wc.brons_marting(100, 50, 1.0)
