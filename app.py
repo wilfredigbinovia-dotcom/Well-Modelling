@@ -38,6 +38,7 @@ from wellmodel import liftcurves as wlc
 from wellmodel import gradient as wgrad
 from wellmodel import choke as wchoke
 from wellmodel import gaslift as wgl
+from wellmodel import complementary as wcx
 from wellmodel import units as wu
 from wellmodel import ui_units as wuu
 try:                                    # PROSPER-style grids with per-cell locking; optional dependency
@@ -2923,7 +2924,8 @@ with tabs[4]:
                         for c_ in corrs:
                             try:
                                 grads_[c_] = wgrad.gradient_table(path, fluid, case_i, travs[c_][0][i],
-                                                                  travs[c_][1][i], c_, 1.0, 1.0, u_cur, labels_)
+                                                                  travs[c_][1][i], c_, 1.0, 1.0, u_cur, labels_,
+                                                                  comp=comp_current())
                             except (ValueError, FloatingPointError, KeyError) as e:
                                 st.warning(f"{VLP_LABELS[c_]}: gradient results not available ({e}).")
                         if grads_:
@@ -3460,6 +3462,60 @@ def solution_panel(kind, r, det, regimes):
     return out
 
 
+def comp_current():
+    """Complementary-calculation options (Calculation tab, Options) from the stored inputs."""
+    return wcx.CompOptions(sand_density=float(val("comp_rho_s", 2.65)), sand_rate=float(val("comp_w", 0.0)),
+                           c_factor=float(val("comp_c", 400.0)), s_factor=float(val("comp_s", 0.05)),
+                           turner=float(val("comp_turner", 2.04)), wall=str(val("comp_wall", "Carbon steel")),
+                           deformation=str(val("comp_def", "Ductile")), particle_mm=float(val("comp_dp", 250.0)) / 1000,
+                           geometry_factor=float(val("comp_gf", 2.0)), reducer_angle=float(val("comp_ang", 45.0)),
+                           inhibited_rate=float(val("comp_irc", 0.0)), inhibitor_eff=float(val("comp_eff", 0.0)),
+                           alkalinity=float(val("comp_alk", 0.0)))
+
+
+def comp_panel():
+    """PROSPER System | Solids / calculation Options: inputs of the complementary calculations."""
+    with st.expander("Options - grain size, erosion, liquid loading, corrosion"):
+        st.caption("Reported along the well in the gradient results and, as the worst value along the well, in the "
+                   "solution details. Grain size: largest sand grain the flow carries (Wasp, Kenny & Gandhi; oil and "
+                   "gas forms). Erosional velocity: API RP 14E, Ve = C / sqrt(rho_m); with a sand rate also the "
+                   "ConocoPhillips form Ve = S D sqrt(rho_m) / sqrt(W), the smaller one used. Liquid loading: Turner, "
+                   "Vt = C sigma^0.25 (rho_l - rho_g)^0.25 / rho_g^0.5 against the superficial gas velocity.")
+        c = st.columns(3)
+        num(c[0], "Sand density (g/cm3)", "comp_rho_s", 2.65, 1.0, 5.0, None, "%.3f")
+        num(c[1], "Turner constant", "comp_turner", 2.04, 0.1, 50.0, None, "%.3f",
+            help="2.04 with interfacial tension in dyne/cm (PROSPER); Turner's paper prints 20.4.")
+        c = st.columns(3)
+        num(c[0], "Sand production rate (lbm/day)", "comp_w", 0.0, 0.0, 1e6, None, "%.4g",
+            help="0: API 14E only. Above 0 the ConocoPhillips sand-laden velocity is also computed.")
+        num(c[1], "C-factor", "comp_c", 400.0, 1.0, 5000.0, None, "%.4g",
+            help="API RP 14E: 100 continuous, 125 intermittent, 150-200 inhibited; PROSPER default 400.")
+        num(c[2], "S-factor", "comp_s", 0.05, 1e-4, 10.0, None, "%.4g",
+            help="ConocoPhillips geometry factor (pipe: 0.05).")
+        st.markdown("**Erosion rate - DNV-RP-O501** (needs a sand production rate)")
+        c = st.columns(3)
+        mats = list(wcx.WALL_MATERIALS)
+        wall = sel(c[0], "Wall material", mats, "comp_wall", "Carbon steel",
+                   help="DNV-RP-O501 Table 3-2 (density, K, n).")
+        sel(c[1], "Deformation", ["Ductile", "Brittle"], "comp_def", wcx.WALL_MATERIALS[wall][3],
+            help="Angle dependency F(alpha): ductile for steels and polymers, brittle for carbides and ceramics.")
+        num(c[2], "Particle diameter (micron)", "comp_dp", 250.0, 1.0, 5000.0, None, "%.4g",
+            help="Not a PROSPER input; DNV default 250 micron. Used by the bend and reducer models.")
+        c = st.columns(3)
+        num(c[0], "Geometry factor GF", "comp_gf", 2.0, 1.0, 4.0, None, "%.3g",
+            help="Not a PROSPER input; DNV recommends 2 when unknown (1 reproduces the DNV worked examples).")
+        num(c[1], "Reducer angle (deg)", "comp_ang", 45.0, 1.0, 90.0, None, "%.3g",
+            help="Contraction angle of tubing ID reductions and restrictions (not a PROSPER input).")
+        st.markdown("**Corrosion rate - NORSOK M-506** (needs water and CO2 in the PVT)")
+        c = st.columns(3)
+        num(c[0], "Inhibited rate (0.001 in/yr)", "comp_irc", 0.0, 0.0, 1e5, None, "%.4g")
+        num(c[1], "Inhibitor efficiency (percent)", "comp_eff", 0.0, 0.0, 100.0, None, "%.4g",
+            help="CR = IRC x EFF + URC x (1 - EFF), URC the NORSOK uninhibited rate (PROSPER).")
+        num(c[2], "Alkalinity, pH buffer (kg/kg)", "comp_alk", 0.0, 0.0, 0.05, None, "%.4g",
+            help="Bicarbonate in the produced water (mass fraction). 0: unbuffered water, lowest pH.")
+    return comp_current()
+
+
 CALC_MODES = ["System analysis (IPR + VLP)", "Gradient traverse", "Lift curves (VFP tables)", "Choke performance"]
 
 
@@ -3636,7 +3692,8 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
             out = []
             with st.spinner("Calculating traverses..."):
                 for q in rates:
-                    det, reg, prof = wsys.solution_details(path, fluid, kind, base, q, corr, p1, p2, hc, surface)
+                    det, reg, prof = wsys.solution_details(path, fluid, kind, base, q, corr, p1, p2, hc, surface,
+                                                          comp=comp_current())
                     out.append((q, det, reg, prof))
             ss["trav_res"] = {"sig": sig, "res": out, "path": path}
         except (ValueError, KeyError, TypeError) as e:
@@ -3838,6 +3895,7 @@ with tabs[5]:
     elif CHOKE:
         choke_mode(o)
     else:
+        comp_panel()
         kind = "gas" if o.is_gas else "oil"
         gmd, gt = eqd["geothermal"]
         tests_ = ss.get("vlp_tests_" + kind)
@@ -4161,7 +4219,8 @@ with tabs[5]:
                         if r.q is not None:
                             det_, reg_, prof_ = wsys.solution_details(out["paths"][r.params.get("tubing_id")], fluid, kind,
                                                                       r.params, r.q, out["corr"], out["p1"], out["p2"],
-                                                                      eqd["heat_capacities"], surface=out.get("surface"))
+                                                                      eqd["heat_capacities"], surface=out.get("surface"),
+                                                                      comp=comp_current())
                             surf_tab_ = det_.pop("_surface", None)
                             st.markdown("**Solution**")
                             st.dataframe(solution_panel(kind, r, det_, reg_), hide_index=True, width="stretch",

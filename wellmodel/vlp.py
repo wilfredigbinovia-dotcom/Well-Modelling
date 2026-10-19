@@ -154,12 +154,21 @@ class BlackOilFluid:
         self.m = model
         self.inp = model.inp
 
+    def pb_at(self, t, gor):
+        """Bubble point (psia) of the wellstream at temperature t and total GOR."""
+        m, inp = self.m, self.inp
+        return np.maximum(m._m("pb").apply(bo.pb_raw(m.family, inp, np.maximum(gor, 1.0), t)
+                                           * bo.impurity_factor(inp, t)), 14.7)
+
+    def oil_water_viscosity(self, p, t, gor):
+        """(oil, water) viscosity (cp) - for the NORSOK emulsion viscosity."""
+        return self._props(p, t, gor)[2], _water(self.inp, p, t)[2]
+
     def _props(self, p, t, gor):
         m, inp, fam, vf = self.m, self.inp, self.m.family, self.m.visc_family
         rs_sat = m._m("rs").apply(bo._rs_corr(fam, inp, p, t))
         rs = np.clip(rs_sat, 0.0, gor)
-        pb_g = np.maximum(m._m("pb").apply(bo.pb_raw(fam, inp, np.maximum(gor, 1.0), t) * bo.impurity_factor(inp, t)),
-                          14.7)
+        pb_g = self.pb_at(t, gor)
         above = rs_sat >= gor
         bo_s = bo.bo_sat(fam, inp, rs, t)
         bo_ = np.where(above, bo.bo_sat(fam, inp, gor, t) * bo.bo_undersat_factor(fam, inp, p, pb_g, np.maximum(gor, 1.0), t),

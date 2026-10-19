@@ -119,7 +119,7 @@ def _restriction_split(fluid, case, p_in, t, d_in):
 
 
 # ------------------------------------------------------------------ table
-def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.nan, labels=None):
+def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.nan, labels=None, comp=None):
     """Gradient results for one traverse.
 
     case: one-case fluid dict (arrays of length 1); P, T: node pressures/temperatures of that case from
@@ -156,7 +156,7 @@ def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.na
         else:
             e, f, hl = corr(*args)
         seg.append(dict(ph=ph, vsl=vsl, vsg=vsg, rho_l=rho_l, rho_g=rho_g, sig=sig, lam=lam, hl=float(hl[0]),
-                        e=p1 * float(e[0]), f=p2 * float(f[0]), L=L, i=i))
+                        e=p1 * float(e[0]), f=p2 * float(f[0]), L=L, i=i, pm=pm, tm=tm))
     dpg = np.array([s_["e"] * s_["L"] for s_ in seg])
     dpf = np.array([s_["f"] * s_["L"] for s_ in seg])
     g_below = np.r_[np.cumsum(dpg[::-1])[::-1], 0.0]          # loss from each node down to the bottom node
@@ -216,6 +216,15 @@ def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.na
             "Oil Formation Volume Factor (RB/STB)": ph["bo"], "Water Formation Volume Factor (RB/STB)": ph["bw"],
             "Gas Formation Volume Factor (ft3/scf)": ph["bg"] if s_["vsg"] > 0 else np.nan,
         }
+        if comp is not None:
+            from .complementary import node_values
+            mu_ns = lam * ph["mu_l"] + (1 - lam) * (ph["mu_g"] if np.isfinite(ph["mu_g"]) else 0.0)
+            fg = ph["free_gas"] if np.isfinite(ph["free_gas"]) else rates.get("Gas Rate (MMscf/day)", np.nan)
+            rec.update(node_values(kind, s_["vsl"] + s_["vsg"], s_["vsg"], rho_mix_ns, mu_ns, s_["rho_l"],
+                                   s_["rho_g"], s_["sig"], path.d_h[i] * 12, fg, comp))
+            from .complementary import path_values
+            st_ = fluid.state(np.array([s_["pm"]]), np.array([s_["tm"]]), case)
+            rec.update(path_values(path, i, fluid, kind, case, st_, s_["pm"], s_["tm"], comp))
         if node in path.restrictions:
             d_in = path.restrictions[node]
             p_out, dp = _restriction_split(fluid, case, p_in, T[node], d_in)

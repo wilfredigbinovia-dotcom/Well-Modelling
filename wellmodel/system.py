@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from . import complementary as CX
 from . import surface as SF
 from . import vlp as V
 from .correlations import CORRELATIONS, NEEDS_GLR, no_slip
@@ -381,8 +382,18 @@ def rate_table(kind, r: CaseResult) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- details
+def _free_gas(fluid, kind, s, case, p, t):
+    """Free gas at the node in MMscf/d: in-situ gas mass rate over the gas density at standard conditions."""
+    rho_g = float(s["rho_g"][0])
+    qg = float(s["qg"][0])                                   # ft3/s in situ
+    sg = getattr(getattr(fluid, "inp", None), "gas_sg", None)
+    if not sg or not np.isfinite(rho_g):
+        return np.nan
+    return qg * rho_g * 86400.0 / (V.RHO_AIR_SC * sg) / 1e6
+
+
 def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, hc=None,
-                     surface: SurfaceSetup | None = None):
+                     surface: SurfaceSetup | None = None, comp=None):
     """Traverse at the solution rate with a breakdown of pressure losses, velocities and restriction regimes.
     With surface equipment, det also carries the manifold and the surface losses, and the regimes dict the choke."""
     hc = hc or HeatCapacities()
@@ -405,6 +416,8 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
     corr = CORRELATIONS[correlation]
     rows, dpg, dpf, transit = [], 0.0, 0.0, 0.0
     vms, ves = [], []
+    comp_ = comp if comp is not None else CX.CompOptions()
+    comp_rows = []
     for i in range(len(path.md) - 1):
         pm, tm, L = 0.5 * (P[i] + P[i + 1]), 0.5 * (T[i] + T[i + 1]), path.seg_len[i]
         s = fluid.state(np.array([pm]), np.array([tm]), case)
@@ -424,7 +437,12 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         dpf += p2 * float(f[0]) * L
         vm = vsl + vsg
         rho_ns = lam * float(s["rho_l"][0]) + (1 - lam) * float(s["rho_g"][0])
-        ve = EROSION_C / np.sqrt(max(rho_ns, 1e-6))
+        mu_ns = lam * float(s["mu_l"][0]) + (1 - lam) * float(s["mu_g"][0])
+        cv = CX.node_values(kind, vm, vsg, rho_ns, mu_ns, float(s["rho_l"][0]), float(s["rho_g"][0]),
+                            float(s["sig"][0]), path.d_h[i] * 12, _free_gas(fluid, kind, s, case, pm, tm), comp_)
+        cv.update(CX.path_values(path, i, fluid, kind, case, s, pm, tm, comp_))
+        comp_rows.append(cv)
+        ve = cv["Erosional Velocity (ft/s)"]
         transit += L / max(vm, 1e-9)
         vms.append(vm)
         ves.append(ve)
@@ -434,7 +452,11 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
                      "Superficial liquid velocity (ft/s)": vsl, "Superficial gas velocity (ft/s)": vsg,
                      "Mixture velocity (ft/s)": vm, "Erosional velocity (ft/s)": ve,
                      "In-situ density (lb/ft3)": hl0 * float(s["rho_l"][0]) + (1 - hl0) * float(s["rho_g"][0]),
-                     "Elevation gradient (psi/ft)": p1 * float(e[0]), "Friction gradient (psi/ft)": p2 * float(f[0])})
+                     "Elevation gradient (psi/ft)": p1 * float(e[0]), "Friction gradient (psi/ft)": p2 * float(f[0]),
+                     "Max. grain size diameter (in)": cv["Max. Grain Size Diameter (in)"],
+                     "Liquid loading velocity (ft/s)": cv["Liquid Loading Velocity (ft/s)"],
+                     "Erosion rate (mm/year)": cv["Erosion Rate (mm/year)"],
+                     "Corrosion rate (0.001 in/yr)": cv["Corrosion Rate (0.001 in/yr)"]})
     regimes = {}
     for r in surf_rows or []:
         if r["Type"] == "Choke":
@@ -456,6 +478,7 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         "Max. erosional velocity (ft/s)": max(ves), "Min. erosional velocity (ft/s)": min(ves),
         "Max. velocity / erosional velocity": max(v / e for v, e in zip(vms, ves)),
         "Max. pressure (psia)": float(P.max()), "Min. pressure (psia)": float(P.min()),
+        **CX.summary(comp_rows),
     }
     if surf_rows:
         det["_surface"] = surface_table(surf_rows)

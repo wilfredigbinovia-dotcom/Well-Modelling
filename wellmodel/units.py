@@ -164,7 +164,8 @@ def split_label(label):
 
 
 FIXED_UNITS = {"%", "percent", "1/ft", "fraction", "days", "sp. gravity", "API", "ppm", "deg", "hours",
-               "$/STB", "$/Mscf", "Mscf/d/psi^2n"}
+               "$/STB", "$/Mscf", "Mscf/d/psi^2n", "lbm/day",
+               "mm/year", "mm/ton", "0.001 in/yr", "kg/kg", "micron", "Pa"}
 
 
 def fixed_unit(label):

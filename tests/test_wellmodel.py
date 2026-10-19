@@ -1691,3 +1691,51 @@ def test_camco_r20_r_values():
     v = wgl.VALVES["Camco R-20 Normal (1.5-in)"]
     assert float(v.r(16)) == pytest.approx(0.066) and float(v.r(24)) == pytest.approx(0.147)
     assert v.ports[-1] == 36
+
+
+def test_complementary_calculations():
+    """Grain size (PROSPER's Wasp-Kenny-Gandhi oil and gas forms), API 14E / ConocoPhillips erosional velocity,
+    Turner - checked against hand calculations of the published equations."""
+    from wellmodel import complementary as CX
+    # oil form: the diameter returned must give back the flow velocity in the CGS equation
+    d = CX.grain_diameter_oil(10.0, 1.0, 50.0, 2.65)
+    r = d * 2.54 / 2
+    assert CX._v_oil_cgs(r, 0.01, 50.0 / 62.428, 2.65) == pytest.approx(10.0 * 30.48, rel=1e-8)
+    # gas form: d = 3 rho Cd V^2 / (4 (rho_s - rho) g)
+    rho_s = 2.65 * 62.428
+    assert CX.grain_diameter_gas(20.0, 5.0) == pytest.approx(3 * 5 * 0.85 * 400 / (4 * (rho_s - 5) * 32.2) * 12, rel=1e-12)
+    o = CX.CompOptions(c_factor=100.0)
+    assert CX.erosional_velocity(25.0, 4.0, o) == pytest.approx(20.0)
+    # sand: ConocoPhillips Ve = S D sqrt(rho) / sqrt(W) (m/s, mm, kg/m3, kg/d), smaller of the two
+    o2 = CX.CompOptions(c_factor=1e6, s_factor=0.05, sand_rate=100.0)
+    ve = 0.05 * 4.0 * 25.4 * (25.0 * 16.0185) ** 0.5 / (100.0 / 2.20462) ** 0.5 * 3.28084
+    assert CX.erosional_velocity(25.0, 4.0, o2) == pytest.approx(ve, rel=1e-6)
+    assert CX.turner_velocity(60.0, 67.0, 5.0, 2.04) == pytest.approx(2.04 * 60 ** 0.25 * 62 ** 0.25 / 5 ** 0.5)
+    v = CX.node_values("oil", 10.0, 2.0, 40.0, 0.8, 50.0, 5.0, 30.0, 4.0, 1.0, o)
+    assert np.isnan(v["Liquid Loading Velocity (ft/s)"])          # Turner only for gas wells
+    v = CX.node_values("gas", 30.0, 29.0, 8.0, 0.02, 60.0, 7.0, 50.0, 2.441, 5.0, o)
+    assert v["Gas Velocity / Loading Velocity"] == pytest.approx(29.0 / CX.turner_velocity(50.0, 60.0, 7.0, 2.04))
+
+
+def test_dnv_erosion_and_norsok_corrosion():
+    from wellmodel import complementary as CX
+    o = CX.CompOptions(geometry_factor=1.0)
+    # DNV-RP-O501 bend example: D 0.1 m, Vsl 5, Vsg 10, rho 800/100, mu 1e-3/1.5e-5, R 1.5 D, dp 250 micron
+    rho, mu = (5 * 800 + 10 * 100) / 15, (5 * 1e-3 + 10 * 1.5e-5) / 15
+    e_y = CX.erosion_bend(15.0, 0.1, 1.5, rho, mu, 250e-6, 1.0, o)          # mm/y at 1 kg/s
+    e_ton = e_y / (365.25 * 86400 / 1000)
+    assert abs(e_ton - 0.014) / 0.014 < 0.05
+    # PROSPER caps the grain diameter at 1 inch
+    v = CX.node_values("oil", 60.0, 50.0, 20.0, 0.1, 45.0, 5.0, 20.0, 4.0, 10.0, CX.CompOptions())
+    assert v["Max. Grain Size Diameter (in)"] <= 1.0
+    # NORSOK: pure water, 1 bar CO2, 25 degC -> pH ~3.9; bicarbonate raises it
+    assert abs(CX.norsok_ph(25.0, 14.5, 1.0) - 3.92) < 0.05
+    assert CX.norsok_ph(60.0, 14.5, 1.0, 0.01) > 5.5
+    # eq. 1 at a table temperature: Kt fCO2^0.62 (S/19)^... f(pH)
+    assert abs(CX.norsok_rate(60.0, 1.0, 19.0, 4.5) - 10.695 * (1.836 - 0.1818 * 4.5)) < 1e-9
+    # f(pH) continuity at the table breaks (checks the exponential forms at 80 and 90 degC)
+    for t, ph in ((80.0, 4.6), (90.0, 4.57), (90.0, 5.62), (5.0, 4.6)):
+        assert abs(CX.f_ph(t, ph - 1e-9) - CX.f_ph(t, ph)) < 0.03
+    # interpolation between 60 and 80 degC lies between the two
+    a, b, m = (CX.norsok_rate(t, 2.0, 30.0, 4.8) for t in (60.0, 80.0, 70.0))
+    assert min(a, b) <= m <= max(a, b)
