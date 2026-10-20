@@ -1739,3 +1739,601 @@ def test_dnv_erosion_and_norsok_corrosion():
     # interpolation between 60 and 80 degC lies between the two
     a, b, m = (CX.norsok_rate(t, 2.0, 30.0, 4.8) for t in (60.0, 80.0, 70.0))
     assert min(a, b) <= m <= max(a, b)
+
+
+def test_intermittent_gas_lift_brown_examples():
+    from wellmodel import intermittent as I
+    from wellmodel.gaslift import LiftGas
+    ct = 0.00387
+    # Brown B p.311-313: 6000 ft, Pvo 575, load 425, top of slug 90, Pr 700, PI 0.3, Gs 0.40
+    f = lambda p: 0.3 * (700 - p)
+    for sv, rec, q_b, cyc_b in ((False, 0.5, 81.0, 28.75), (False, 0.7, 92.4, 35.6), (True, 0.5, 89.1, 25.9)):
+        w = I.weighted_bhp(575, 425, 90, 6000, rec, 0.40, ct, f, 9, 3, sv)
+        assert abs(f(w["p_avg"]) - q_b) / q_b < 0.01
+        assert abs(w["cycle"] - cyc_b) / cyc_b < 0.01
+    # gas per cycle against Brown's Fig 3G readings (gamma 0.65, 80 F + 1.6 F/100 ft, Gs 0.3689, 7 %/1000 ft)
+    for pc, L, pwh, book in [(1080, 7600, 100, 7200), (1155, 7600, 100, 7400), (1014, 9113, 100, 7800),
+                             (947, 8000, 50, 6400), (753, 9700, 100, 6000)]:
+        v = I.gas_per_cycle(LiftGas(sg=0.65), pc, pwh, L, (pc - 200 - pwh) / 0.3689, 0.3689, 7.0, 1.995,
+                            lambda d: 80 + 0.016 * d)
+        assert abs(v / book - 1) < 0.04
+    # analytical spacing, Brown 3.4354 (Table 3.493): 2300, 4232, 5792, 7040, operating 7600 at Pso 875
+    well = I.IGLWell(1.995, 2.375, 6.366, 7600, 1500, lambda q: 0.2 * max(1500 - q, 0), lambda d: 109 + 0.00763 * d,
+                     t_surface=109)
+    inp = I.IGLInput(p_ko=1050, p_wh=80, g_s=0.40, g_kill=0.40, g_u=0.064, spacing="Analytical (Brown 3.4354)",
+                     max_depth=7600, standing_valve=False)
+    d, pso = I.space_valves(inp, LiftGas(sg=0.7), well)
+    assert np.allclose(d, [2300, 4232, 5792, 7040, 7600], atol=2)
+    assert list(pso) == [1000, 975, 950, 925, 875]
+    r = I.design(inp, LiftGas(sg=0.7), well)
+    v1 = r.valves.iloc[0]
+    assert abs(v1["Opening pressure at depth (psig)"] - 1060) < 6 and abs(v1["Test-rack opening at 60 °F (psig)"] - 950) < 6
+    assert r.gas["Operating port"] == "5/16"                      # time cycle, R required ~0.12 (Brown 0.1212)
+    assert abs(r.gas["Casing pressure drop to supply the gas (psi)"] - 74) < 4
+    assert I.choose_port(I.IGL_VALVES["Brown 1.5-in unbalanced (Ab 0.77 in2)"], 0.2242)[0] == 28   # 7/16 (choke)
+    # Brown's detailed design (B p.313-316): 5000 ft, Pr 775, PI 0.3, 7/16 port, Pvo - load 150, standing valve
+    well = I.IGLWell(1.995, 2.375, 4.892, 5000, 775, lambda p: 0.3 * max(775 - p, 0), lambda d: 74 + 0.01 * d,
+                     t_surface=74)
+    inp = I.IGLInput(p_ko=650, p_wh=65, op_drop=25, g_s=0.40, g_u=0.04, well_killed=False, max_depth=5000,
+                     load="Pvo - dP", dp_load=150, fallback=8.0, operating_port=28)
+    r = I.design(inp, LiftGas(sg=0.60), well)
+    assert abs(r.valves["Depth (ft)"].iloc[0] - 3060) < 10                   # static fluid level
+    assert abs(r.cycle["Cycle time (min)"] - 29.4) < 0.6
+    assert abs(r.cycle["Liquid rate (B/D)"] - 110.7) / 110.7 < 0.02
+
+
+def test_prosper_intermittent_tutorial24():
+    from wellmodel import intermittent as I
+    from wellmodel.gaslift import LiftGas
+    # constant surface closing pressure spacing (PROSPER Tutorial 24): 3628.44, 4912.52, 6179.47, 7429.51 ft
+    t = I.constant_psc_spacing(1500, 250, 800, 0.46, 0.1, 0.047246, 7500, 600)
+    assert np.allclose(t["Valve Depth (ft)"].iloc[1:], [3628.44, 4912.52, 6179.47, 7429.51], atol=0.1)
+    assert np.allclose(t["Closing Pressure (psig)"].iloc[1:], [971.428, 1032.1, 1091.95, 1151.01], atol=0.05)
+    # White et al. chain with PROSPER's slug pressure: slug velocity, fall back, cycle, rate (Tutorial 24)
+    r = I.white_cycle(1828.18, 250, 6830, 2930, 24, 4.052, (1469.1 - 250) / 2930, 2.26026, friction=False)
+    assert abs(r["Slug Velocity (ft/s)"] - 6.75477) < 2e-3
+    assert abs(r["Fall Back (ft)"] - 1712.43) < 0.5 and abs(r["Time To Surface (s)"] - 830.884) < 0.5
+    assert abs(r["Daily Production Rate (STB/d)"] - 2019.22) < 1.0
+    assert abs(r["Gas Injection Rate, in situ (MMcf/day)"] - 0.052262) < 2e-5
+    # calibrated bubble velocity against the PROSPER runs (vs, slug pressure, water cut -> vb)
+    for vs, pt, wc, vb in ((9.19631, 1303.91, 0, 2.38803), (6.16121, 1511.81, 100, 2.23641), (7.65177, 1406.09, 50,
+                           2.30255), (6.75477, 1469.1, 80, 2.26026), (3.19376, 1438.53, 80, 2.20222),
+                          (12.001, 1142.6, 0, 2.531)):
+        assert abs(I.bubble_velocity_prosper(vs, pt, wc) - vb) < 0.003
+    # a slug heavier than the injection pressure is not lifted (PROSPER: convergence failure)
+    assert "note" in I.white_cycle(1828.18, 250, 6830, 3930, 24, 4.052, 0.41607, 2.26)
+
+
+def test_intermittent_optiflow_and_system():
+    from wellmodel import intermittent as I
+    from wellmodel.gaslift import LiftGas, ValveType
+    # Takacs Example 6-3 (Opti-Flow): 1478 2395 3333 4291 5270 5789 6315 (6849 -> 7000) ft
+    T = lambda d: 80 + 90 * d / 7000
+    v = ValveType("RP-6", 0.77, 40, (20,), ((19.9, 0.126), (20.1, 0.126)))
+    tab, lst = I.optiflow_spacing(LiftGas(sg=0.6), 700, 50, 0.42, 800, 7000, 7000, T, valve=v, port_64=20)
+    assert abs(lst - 5095) < 1
+    book = [1478, 2395, 3333, 4291, 5270, 5789, 6315]
+    assert np.all(np.abs(tab["Depth (ft)"].to_numpy()[:7] / book - 1) < 0.02)
+    assert tab["Depth (ft)"].iloc[-1] == 7000
+    assert list(tab["Surface opening pressure (psig)"].iloc[:4]) == [680, 660, 640, 620]
+    assert abs(tab["Dome at depth (psig)"].iloc[0] - 636) < 6
+    # PROSPER system run (WC 0 %, Pr 2000 psig): 3490.6 STB/d at 1142.7 psig, liquid level 5049.5 ft
+    class Oil:
+        def state(self, p, t, case):
+            return {"rho_l": np.array([0.3366 * 144]), "mu_l": np.array([1.0])}
+    J = 3490.6 / (2000 - 1142.7)
+    sol, crv = I.prosper_system(Oil(), LiftGas(sg=0.68), 1500, 250, 600, 7430, 24, 4.052, 0,
+                                lambda d: float(np.interp(d, [0, 600, 9275], [60, 40, 210])),
+                                lambda p: J * max(2000 - p, 0), t_fluid=210)
+    assert abs(sol["Daily Production Rate (STB/d)"] / 3490.6 - 1) < 0.03
+    assert abs(sol["Flowing BHP (psig)"] - 1142.7) < 15
+    assert abs(sol["Liquid Level (ft below surface)"] - 5049.5) < 60
+
+
+def test_esp_design_prosper_tutorial26():
+    from wellmodel import esp as E
+    # PROSPER Tutorial 26 pump duty (psia, RB/d) fed to the design
+    d = E.Duty(8000.0, 2074.33, 1788.87, 2986.95, 209.244, 9706.52, 9044.1, 9300.9, 2823224.0, 0.86592, 3194.73,
+               189.19, 447.918, 800.0, 0.13422, 0.11834, 184.654)
+    pump = E.PUMPS["Centrilift GC10000 (5.13 in)"]
+    r = E.design(d, pump, E.MOTORS["Centrilift 544 300HP 1675V 105A"], E.CABLES["#1 Copper"], 60.0, 9000.0)
+    ref = {"Number Of Stages": 113, "Power Required (hp)": 288.91, "Pump Efficiency (%)": 65.9152,
+           "Current Used (amps)": 102.149, "Motor Efficiency (%)": 84.0352, "Motor Speed (rpm)": 3450.38,
+           "Voltage Drop Along Cable (Volts)": 291.125, "Voltage Required @ Surface (Volts)": 1966.13,
+           "Surface KVA": 347.86, "Torque On Shaft (lb.ft)": 439.774, "Motor Power Factor (fraction)": 0.8113}
+    for k, v in ref.items():
+        assert abs(r[k] / v - 1) < 0.01, (k, r[k], v)
+    # affinity laws and the recommended range
+    assert abs(pump.head_stage(9000 * 50 / 60, 50) - pump.head_stage(9000) * (50 / 60) ** 2) < 1e-9
+    assert pump.range_at(50) == (4400 * 50 / 60, 12000 * 50 / 60)
+    # candidate list: the GC10000 suits this duty and casing
+    c = E.candidate_pumps(d, E.PUMPS, 60.0, 6.0, 6.4)
+    assert bool(c["Suitable"].iloc[0])
+
+
+def test_esp_operate_and_options():
+    from wellmodel import esp as E, options as O
+    mot, cab = E.MOTORS["Centrilift 544 300HP 1675V 105A"], E.CABLES["#1 Copper"]
+    # PROSPER Tutorial 26 system runs: (frequency, pump hp, avg cable T) -> load %, amps, rpm, V drop, V surface, kVA
+    for f, hp, tc, ref in ((50, 163.75, 182.7, (65.50, 78.14, 2919.9, 221.95, 1617.78, 219.01)),
+                           (60, 281.00, 187.8, (93.67, 100.01, 3455.0, 286.71, 1961.71, 339.93)),
+                           (70, 452.37, 192.6, (129.25, 139.58, 3933.5, 403.69, 2357.86, 570.82))):
+        r = E.operate(hp, mot, cab, f, 9000.0, tc)
+        got = (r["Motor load (%)"], r["Motor amps (A)"], r["Motor speed (rpm)"], r["Voltage drop along cable (V)"],
+               r["Voltage at surface (V)"], r["Surface kVA"])
+        for g_, r_ in zip(got[:2] + got[2:], ref):
+            tol = 0.035 if f == 70 else 0.015          # 70 Hz: motor curves extrapolated beyond 100 % load
+            assert abs(g_ / r_ - 1) < tol, (f, g_, r_)
+    assert any(i.level == "error" for i in O.WellOptions(artificial_lift="esp", flow_type="annular").validate())
+    assert not O.WellOptions(artificial_lift="esp").errors
+
+
+def test_esp_pump_in_traverse_and_lift_curves():
+    from wellmodel import esp as E, liftcurves as LC
+    *_, path, fluid = _vlp_setup()
+    esp = {"pump_md": 9000.0, "pump": E.PUMPS["Centrilift GC10000 (5.13 in)"], "stages": 60, "freq": 60.0,
+           "wear": 0.0, "sep": 0.0, "chp": 264.7}
+    case = {"q": np.array([3000.0, 6000.0]), "wc": np.array([0.5, 0.5]), "gor": np.array([400.0, 400.0])}
+    o = E.bhp_with_pump(path, fluid, 300.0, case, esp, "hagedorn_brown")
+    assert np.all(np.isfinite(o["bhp"])) and np.all(o["pdp"] > o["pip"]) and np.all(o["bhp"] > o["pip"])
+    # the intake solve inverts the stage march
+    pdp, *_ = E.pump_gain(fluid, o["pip"], o["t_intake"], case, esp["pump"], 60, 60.0)
+    assert np.allclose(pdp, o["pdp"], atol=0.5)
+    # the pump lowers the BHP needed against natural flow at the same top pressure
+    P, _ = wvlp.traverse(path, fluid, np.array([300.0, 300.0]), case, "hagedorn_brown")
+    assert np.all(o["bhp"] < P[:, -1] - 300)
+    # a gas separator takes gas out of the tubing stream
+    case_g = {**case, "gor": np.array([1200.0, 1200.0])}      # free gas at the intake
+    o2 = E.bhp_with_pump(path, fluid, 300.0, case_g, {**esp, "sep": 0.6}, "hagedorn_brown")
+    assert np.all(o2["gor_above"] < 1200.0)
+    assert np.allclose(E.bhp_with_pump(path, fluid, 300.0, case, {**esp, "sep": 0.6}, "hagedorn_brown")["gor_above"],
+                       400.0)                                  # undersaturated at the intake: nothing to separate
+    # lift curves with the pump equal the point calculation
+    axes, bhp, _ = LC.vfp_table(path, fluid, "oil", "hagedorn_brown", 1.0, 1.0, 8.0, [3000.0, 6000.0], [300.0],
+                                [50.0], [400.0], esp=esp)
+    assert np.allclose(bhp[0, 0, 0], o["bhp"], rtol=1e-6)
+    # annulus liquid level (PROSPER ignores the gas column): PIP = CHP + G_l (pump - level)
+    lvl = E.liquid_level(fluid, float(o["pip"][0]), float(o["t_intake"][0]), {k: v[:1] for k, v in case.items()},
+                         8000.0, 264.7)
+    g_l = float(fluid.state(o["pip"][:1], o["t_intake"][:1], {k: v[:1] for k, v in case.items()})["rho_l"][0]) / 144
+    assert abs(264.7 + g_l * (8000.0 - lvl) - o["pip"][0]) < 0.5 or lvl in (0.0, 8000.0)
+    assert E.liquid_level(fluid, 264.7, 200.0, {k: v[:1] for k, v in case.items()}, 8000.0, 264.7) == 8000.0
+
+
+def test_esp_discharge_temperature_and_frequency_axis():
+    from wellmodel import esp as E, liftcurves as LC
+    *_, path, fluid = _vlp_setup()
+    mot = E.MOTORS["Centrilift 544 300HP 1675V 105A"]
+    esp = {"pump_md": 9000.0, "pump": E.PUMPS["Centrilift GC10000 (5.13 in)"], "stages": 60, "freq": 60.0,
+           "wear": 0.0, "sep": 0.0, "motor": mot}
+    case = {"q": np.array([3000.0, 6000.0]), "wc": np.array([0.5, 0.5]), "gor": np.array([400.0, 400.0])}
+    o = E.bhp_with_pump(path, fluid, 300.0, case, esp, "hagedorn_brown")
+    # the tubing starts at the discharge temperature: intake + (motor input - hydraulic power) / (w cp)
+    w, cp = fluid.mass_cp(case, wvlp.HeatCapacities())
+    load = 100 * o["pump_hp"] / mot.hp
+    eff = np.interp(load, mot.load, mot.eff) / 100
+    dt = (o["pump_hp"] / eff - o["hyd_hp"]) * 2544.43 / (w * cp)
+    assert np.allclose(o["t_discharge"], o["t_intake"] + dt, atol=0.3) and np.all(dt > 0.5)
+    above = E.sub_path(path, path.md[0], 9000.0)
+    _, T = wvlp.traverse(above, fluid, np.array([300.0, 300.0]), case, "hagedorn_brown", t_bottom=o["t_discharge"])
+    assert np.allclose(T[:, -1], o["t_discharge"])
+    # frequency (ALQ) axis: each slice equals the single-frequency table
+    flo, fr = [3000.0, 6000.0], [50.0, 60.0, 70.0]
+    axes, bhp, _ = LC.vfp_table(path, fluid, "oil", "hagedorn_brown", 1.0, 1.0, 8.0, flo, [300.0], [50.0], [400.0],
+                                esp=esp, alq=fr)
+    assert bhp.shape == (1, 1, 1, 3, 2) and list(axes[3]) == fr
+    for l_, f in enumerate(fr):
+        _, b1, _ = LC.vfp_table(path, fluid, "oil", "hagedorn_brown", 1.0, 1.0, 8.0, flo, [300.0], [50.0], [400.0],
+                                esp={**esp, "freq": f})
+        assert np.allclose(bhp[0, 0, 0, l_], b1[0, 0, 0], rtol=1e-6, equal_nan=True)
+    assert np.all(np.diff(bhp[0, 0, 0, :, 0]) < 0)          # faster pump, lower BHP needed
+    txt = LC.eclipse_vfpprod("oil", axes, bhp, 2, 9000.0)
+    assert "ALQ = ESP frequency" in txt and "  50 60 70 /" in txt and "  1 1 1 3  " in txt
+    csv = LC.vfp_csv("oil", axes, bhp)
+    assert len(csv) == 6 and "ESP frequency (Hz)" in csv
+    assert not any("below THP" in m for m in LC.vfp_checks(axes, bhp, esp=True))
+    # blank (pumped-off) points are filled along the rate axis for Eclipse
+    filled = LC._fill_rates(np.array([[np.nan, 2.0, 3.0, np.nan]]), np.array([1.0, 2.0, 3.0, 4.0]))
+    assert np.allclose(filled, [[1.0, 2.0, 3.0, 4.0]])
+
+
+def _t05_oil():
+    """PROSPER Tutorial 05 black oil (Glaso / Beal) with its PVT match (as matched in this tool)."""
+    LM = wbo.LinearMatch
+    inp = wbo.PVTInputs(rsb=800, api=37, gas_sg=0.76, salinity_ppm=23000, watson_k=12.1)
+    m = wbo.BlackOilModel(inp, "glaso", "beal", {"pb": LM(1.0088023910638688, 30.40249925068713),
+                                                  "rs": LM(0.9897021187921035, -10.672322109894141),
+                                                  "bo": LM(0.9922440213035324, 0.003696465060738859),
+                                                  "visc": LM(1.0016368891706189, 0.00461525632814706)})
+    return wvlp.BlackOilFluid(m)
+
+
+def _t11_layers(rough=0.0006):
+    G = 14.696
+    base = dict(type="Perforated", r_flow=0.3175, rough_in=rough, model="Darcy", area=400, ca=31.6, rw=0.354, api=37)
+    blank = lambda md, tvd: dict(type="Blank", md=md, tvd=tvd, r_flow=0.3175, rough_in=rough)
+    return [dict(base, md=9305, tvd=9025, pr=5200 + G, gor=800, gas_sg=0.75, wc=0.05, k=71, skin=2.4),
+            blank(9318, 9035),
+            dict(base, md=9350, tvd=9060, pr=5320 + G, gor=800, gas_sg=0.75, wc=0.005, k=65, skin=1.0),
+            blank(9370, 9075),
+            dict(base, md=9405, tvd=9100, pr=5325 + G, gor=800, gas_sg=0.76, wc=0.074, k=100, skin=1.5)]
+
+
+def test_multilayer_dp_prosper_tutorial11():
+    from scipy.optimize import brentq
+    G = 14.696
+    oil = _t05_oil()
+    c = iadv.multilayer_wellbore("oil", _t11_layers(), 9275, 9000, 210.0, oil, "pe2_style", n=30)
+    # PROSPER Tutorial 11 IPR at TOP (total liquid STB/d, TOP psig)
+    for q, p in ((2992.98, 4884.53), (8978.9, 4117.63), (14964.7, 3348.03), (20950.7, 2450.93), (23943.6, 1880.91)):
+        assert abs((np.interp(q, c.q, c.pwf) - G) / p - 1) < 0.006, (q, np.interp(q, c.q, c.pwf) - G, p)
+    # layer 1: pressure at its bottom and rate (negative = crossflow into it near shut-in)
+    lt = c.layer_table[c.layer_table.Layer == 1].sort_values("TOP pressure (psia)")
+    at_ = lambda col, p_top: np.interp(p_top + G, lt["TOP pressure (psia)"], lt[col])
+    for p_top, q1, p1 in ((5076.27, 253.526, 5083.88), (4692.8, 1090.79, 4700.4), (4309.35, 1928.06, 4316.92)):
+        assert abs(at_("Liquid rate (STB/d)", p_top) / q1 - 1) < 0.005
+        assert abs(at_("Layer pressure (psia)", p_top) - G - p1) < 0.1
+    assert at_("Liquid rate (STB/d)", 5266.64) < -150                        # PROSPER -162.3
+    # Darcy PI from each layer's own Bo and viscosity: PROSPER's skin dP gives B mu = 0.5509 for layer 1
+    assert abs(c.params["Layer 1 PI (STB/d/psi)"] / 2.1835 - 1) < 0.005
+    # blended water cut and GOR follow the layer contributions (PROSPER solution: 764.8 / 16283.4 water)
+    mx = c.mix(16283.4)
+    assert abs(mx["wc"][0] - 764.8 / 16283.4) < 2e-4 and abs(mx["gor"][0] - 800) < 1e-6
+    # system at 500 psig wellhead with PROSPER's PE2 match: 16283.4 STB/d at 3143.2 psig
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 600},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 4.052,
+             "Tubing Inside Roughness (in)": 0.0006, "Casing Inside Diameter (in)": 6.4},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.72},
+            {"Type": "Tubing", "Measured Depth (ft)": 9000, "Tubing Inside Diameter (in)": 4.052,
+             "Tubing Inside Roughness (in)": 0.0006, "Casing Inside Diameter (in)": 6.4},
+            {"Type": "Casing", "Measured Depth (ft)": 9275, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 9275], [0, 9275], [0, 600, 9275], [60, 40, 210])
+
+    def vlp(q):
+        m = c.mix(q)
+        P, _ = wvlp.traverse(path, oil, np.array([500 + G]), {"q": np.array([q]), "wc": m["wc"], "gor": m["gor"]},
+                             "pe2_style", 1.03108, 1.00278, 8.580277)
+        return float(P[0, -1])
+    q = brentq(lambda q_: vlp(q_) - np.interp(q_, c.q, c.pwf), 8000, 25000, xtol=0.5)
+    assert abs(q / 16283.4 - 1) < 0.01 and abs((vlp(q) - G) / 3143.2 - 1) < 0.01
+    split = iadv.layer_split(c, vlp(q))
+    for lay_, ref in (("Layer 1", 4384.6), ("Layer 3", 4854.3), ("Layer 5", 7044.4)):
+        assert abs(float(split.loc[split.Layer == lay_, "Liquid rate (STB/d)"].iloc[0]) / ref - 1) < 0.01
+    assert abs(float(split.loc[split.Layer == "Total", "Liquid rate (STB/d)"].iloc[0]) - q) < 0.01 * q
+    # the system analysis takes the water cut and GOR from the layers at each rate (the case's own are ignored)
+    from wellmodel import system as wsys
+    res, _ = wsys.solve_cases(lambda tid: path, oil, "oil", {"whp": 500 + G, "u": 8.580277, "wc": 50.0, "gor": 300.0},
+                              [{}], lambda ch: c, "pe2_style", 1.03108, 1.00278)
+    r = res[0]
+    assert abs(r.q / 16283.4 - 1) < 0.01 and abs(r.params["wc"] - 4.697) < 0.02 and abs(r.params["gor"] - 800) < 1e-6
+
+
+def test_multilayer_dp_zero_roughness_and_gas():
+    G = 14.696
+    oil = _t05_oil()
+    # zero roughness: no wellbore losses - every layer sees the TOP pressure, the total is the sum of the layer IPRs
+    c = iadv.multilayer_wellbore("oil", _t11_layers(0.0), 9275, 9000, 210.0, oil, "beggs_brill", n=12)
+    lt = c.layer_table
+    assert np.allclose(lt["Layer pressure (psia)"], lt["TOP pressure (psia)"], atol=1e-6)
+    tot = lt.groupby("Point")["Liquid rate (STB/d)"].sum().to_numpy()
+    assert np.allclose(np.maximum(tot, 0), c.q, rtol=1e-9, atol=1e-6)
+    # gas: C and n layers with their own CGR and WGR; the blended ratios are the rate-weighted ones
+    gas = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.7), 50.0)
+    lay = [dict(type="Perforated", md=9305, tvd=9025, r_flow=0.25, rough_in=0.0006, pr=4000, model="C and n",
+                c=0.01, n=0.85, cgr=10.0, wgr=2.0),
+           dict(type="Perforated", md=9350, tvd=9060, r_flow=0.25, rough_in=0.0006, pr=4100, model="C and n",
+                c=0.008, n=0.9, cgr=30.0, wgr=8.0)]
+    g = iadv.multilayer_wellbore("gas", lay, 9275, 9000, 200.0, gas, "beggs_brill", n=12)
+    assert g.aof > 0 and np.all(np.diff(g.q) >= -1e-6)
+    k = len(g.q) // 2
+    pts = g.layer_table[g.layer_table.Point == k + 1]
+    q1, q2 = pts["Gas rate (Mscf/d)"].to_numpy()
+    m = g.mix(g.q[k])
+    assert abs(m["cgr"][0] - (10 * q1 + 30 * q2) / (q1 + q2)) < 0.05
+    assert abs(m["wgr"][0] - (2 * q1 + 8 * q2) / (q1 + q2)) < 0.05
+
+
+def test_gas_pvt_prosper_tutorial02():
+    from wellmodel import gaspvt as gp
+    inp = gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300)
+    # PROSPER T02 PVT table (Lee et al): T F, p psig -> density, viscosity, Bg, Z, pseudo-pressure
+    ref = [(60, 2518.42, 9.97219, 0.018589, 0.0044677, 0.7695, 528055968), (160, 293.158, 0.8025, 0.013262, 0.055517,
+           0.97456, 6663472), (160, 4187.37, 11.1873, 0.02194, 0.0039824, 0.95422, 1070977664),
+           (250, 5300, None, None, None, None, None)][:3]
+    for t, p, rho, mu, bg, z, mp in ref:
+        zz, bgg, rr, mm = gp.gas_props(inp, np.array([p + 14.696]), np.array([float(t)]))
+        assert abs(zz[0] / z - 1) < 0.008 and abs(rr[0] / rho - 1) < 0.008 and abs(bgg[0] / bg - 1) < 0.009
+        assert abs(mm[0] / mu - 1) < 0.01
+        assert abs(gp.pseudo_pressure(inp, p + 14.696, t)[0] / mp - 1) < 0.02
+    # Carr et al within 5 %
+    carr = gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "carr", 166, 5300)
+    _, _, _, mc = gp.gas_props(carr, np.array([4187.37 + 14.696]), np.array([160.0]))
+    assert abs(mc[0] / 0.022067 - 1) < 0.05
+    # condensed water: minimum WGR within 6 % of PROSPER's 0.27114; free water where the gas cannot hold 1 STB/MMscf
+    assert abs(gp.minimum_wgr(inp) / 0.27114 - 1) < 0.06
+    vap, liq = gp.water_split(inp, np.array([293.158, 849.474]) + 14.696, np.array([160.0, 160.0]), 1.0)
+    assert liq[0] == 0 and liq[1] > 0 and abs(vap + liq - 1).max() < 1e-12
+    # wellstream gravity (PROSPER's densities imply 0.58322)
+    assert abs(float(inp.wellstream_sg()) - 0.58322) < 2e-4
+
+
+def test_gas_well_vlp_prosper_tutorial02():
+    """PE2 in a gas well: Duns & Ros mist friction with the film roughness, no-slip holdup in transition, water-gas
+    IFT from Macleod-Sugden, condensed water vapour. PROSPER gradient: 2592.5 psig at 73.432 MMscf/d, friction
+    868.97, gravity 203.54 psi."""
+    from wellmodel import gaspvt as gp, system as wsys, correlations as C
+    G = 14.696
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.0},
+            {"Type": "Tubing", "Measured Depth (ft)": 5000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 5400, "Casing Inside Diameter (in)": 6.0,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5400],
+                                [0, 1500, 1980, 2450, 2883, 3300, 3721, 4140, 4560, 4900], [0, 1500, 5400], [45, 75, 166])
+    gi = gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300)
+    fl = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.58, salinity_ppm=100000, co2=0.5, n2=2), 50.0, "lee", gi)
+    det, _, prof = wsys.solution_details(path, fl, "gas", {"whp": 1500 + G, "u": 3.0, "wgr": 1.0, "sep_gor": 1e6},
+                                         73.432, "pe2_style")
+    assert abs((det["Bottom node pressure (psia)"] - G) / 2592.5 - 1) < 0.015
+    assert abs(det["dP friction - production string (psi)"] / 868.97 - 1) < 0.03
+    assert abs(det["dP gravity - production string (psi)"] / 203.54 - 1) < 0.02
+    assert abs(det["Wellhead temperature (°F)"] - 152.5) < 0.5
+    # PROSPER node 2 (125 ft): friction gradient 0.221 psi/ft on its own state
+    a = lambda x: np.array([x])
+    _, f, hl = C._dr_mist(a(0.032), a(100.450), a(65.742), a(4.434), a(0.5487), a(0.0151), a(56.6077), 0.3298,
+                          0.0006 / 12, 1.0)
+    assert abs(f[0] / 0.221 - 1) < 0.01
+    assert abs(float(wvlp.sigma_water_gas(65.742, 4.434)) / 56.6077 - 1) < 0.015
+
+
+def test_petroleum_experts_gas_ipr_prosper_tutorial02():
+    """PROSPER T02 IPR runs: AOF (MMscf/d) for time, area, shape factor, wellbore radius and connate water."""
+    from wellmodel import gaspvt as gp, inflow as winf
+    G = 14.696
+    inp = gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300)
+    pr = 5300 + G
+    grid = np.linspace(G, 5600, 2000)
+    mg = gp.pseudo_pressure(inp, grid, 166.0)
+    m_fn = lambda p: np.interp(p, grid, mg)
+    z3 = gp.gas_props(inp, np.array([pr - 5, pr, pr + 5]), np.full(3, 166.0))[0]
+    mu_r = float(gp.gas_props(inp, np.array([pr]), np.array([166.0]))[3][0])
+    cg = 1 / pr - (z3[2] - z3[0]) / 10 / z3[1]
+    cases = [(.25, 50, 500, 31.6, .354, 100.369), (0, 5, 500, 31.6, .354, 138.188), (0, 5000, 2000, 31.6, .354, 134.151),
+             (0, 5000, 500, 10, .354, 134.825), (0, 5000, 500, 31.6, .5, 153.513), (.1, 50, 500, 31.6, .354, 123.828),
+             (.4, 50, 500, 31.6, .354, 70.902)]
+    for swc, t, A, ca, rw, aof in cases:
+        cv = winf.petex_gas(pr, 166, 25, 55, A, ca, rw, 55, t, .15, swc, 2.0, m_fn, mu_r, cg, 0.58)
+        assert abs(cv.aof / 1000 / aof - 1) < 0.01, (swc, t, A, ca, rw, cv.aof)
+    base = winf.petex_gas(pr, 166, 25, 55, 500, 31.6, .354, 55, 50, .15, .25, 2.0, m_fn, mu_r, cg, 0.58)
+    # base table: 73.956 MMscf/d at 2706.1 psig; D 6.4065e-5 shown by PROSPER
+    assert abs(float(base.rate(np.array([2706.1 + G]))[0]) / 73956 - 1) < 0.01
+    assert abs(base.params["Non-Darcy flow factor D (1/(Mscf/d))"] / 6.4065e-5 - 1) < 0.01
+    # transient at 1 day (Swc 0, D entered 0): PROSPER drainage term 7.848 (Carr viscosity run)
+    tr = winf.petex_gas(pr, 166, 25, 55, 500, 31.6, .354, 55, 1, .15, 0.0, 2.0, m_fn, mu_r, cg, 0.58, d_entered=0.0)
+    assert tr.params["Flow regime"] == "transient" and abs(tr.params["Drainage term X"] - 7.848) < 0.03
+
+
+def test_gas_system_prosper_tutorial02():
+    """Tutorial 02 system at 1500 psig: PROSPER 73.342 MMscf/d at 2594.5 psig (shallow IPR/VLP crossing: small
+    pressure differences move the rate - here +3.6 %)."""
+    from wellmodel import system as wsys
+    import json
+    from wellmodel import gaspvt as gp, inflow as winf
+    G = 14.696
+    inp = gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300)
+    pr = 5300 + G
+    grid = np.linspace(G, 5600, 2000)
+    mg = gp.pseudo_pressure(inp, grid, 166.0)
+    z3 = gp.gas_props(inp, np.array([pr - 5, pr, pr + 5]), np.full(3, 166.0))[0]
+    mu_r = float(gp.gas_props(inp, np.array([pr]), np.array([166.0]))[3][0])
+    cv = winf.petex_gas(pr, 166, 25, 55, 500, 31.6, .354, 55, 50, .15, .25, 2.0, lambda p: np.interp(p, grid, mg), mu_r,
+                        1 / pr - (z3[2] - z3[0]) / 10 / z3[1], 0.58)
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.0},
+            {"Type": "Tubing", "Measured Depth (ft)": 5000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 5400, "Casing Inside Diameter (in)": 6.0,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5400],
+                                [0, 1500, 1980, 2450, 2883, 3300, 3721, 4140, 4560, 4900], [0, 1500, 5400], [45, 75, 166])
+    fl = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.58, salinity_ppm=100000, co2=0.5, n2=2), 50.0, "lee", inp)
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "gas", {"whp": 1500 + G, "u": 3.0, "wgr": 1.0, "sep_gor": 1e6}, [{}],
+                              lambda ch: cv, "pe2_style")
+    assert abs(res[0].q / 73.342 - 1) < 0.05 and abs((res[0].pwf - G) / 2594.5 - 1) < 0.02
+    # the example project file loads (Options / PVT / Equipment / IPR / system inputs for this tutorial)
+    proj = json.load(open(__file__.replace("tests/test_wellmodel.py", "examples/T02_Basic_Gas_Well.wellmodel.json")))
+    assert proj["inputs"]["ipr_model_gas"] == "Petroleum Experts"
+
+
+def test_gas_pvt_matching_tutorial06():
+    """PROSPER Tutorial 06 lab data at 166 F: after matching, Z and Lee viscosity reproduce the lab points; the
+    parameters are applied by gas_props (density follows Z)."""
+    import dataclasses
+    from wellmodel import gaspvt as gp
+    G = 14.696
+    inp = gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300)
+    lab = pd.DataFrame({"Pressure (psia)": np.array([5300, 3020, 2140, 1000]) + G,
+                        "Z factor": [1.03183, .9053, .89365, .9287], "Gas viscosity (cp)": [.024644, .01869, .01648, .014213],
+                        "Gas FVF (ft3/scf)": [.0034174, .005239, .006733, .016213]})
+    m = gp.match_gas(inp, [(166.0, lab)])
+    assert set(m) == {"z", "bg", "lee", "carr"}
+    # Lee already fits the lab data (PROSPER: P1 0.99882, P2 -1.6e-5)
+    assert abs(m["lee"].p1 - 1) < 0.03 and m["lee"].raw_error_pct < 1
+    z0, bg0, rho0, _ = gp.gas_props(inp, lab["Pressure (psia)"].values, np.full(4, 166.0))
+    mi = dataclasses.replace(inp, match=m)
+    z, bg, rho, mu = gp.gas_props(mi, lab["Pressure (psia)"].values, np.full(4, 166.0))
+    assert np.abs(z / lab["Z factor"].values - 1).max() < 0.004
+    assert np.abs(mu / lab["Gas viscosity (cp)"].values - 1).max() < 0.004
+    assert np.allclose(rho * bg, rho0 * bg0)          # density follows the matched FVF
+
+
+def test_gas_system_prosper_tutorial06_matched():
+    """Tutorial 06 run in PROSPER (user's file) with the PVT match applied, at 1500 psig: 61.746 MMscf/d at
+    3277.0 psig, BHP at 5400 ft 3247.5 psig on the traverse at that rate. The PROSPER PVT | Calculate table at 166 F
+    gives its effective match on our correlations: Z 1.05769/-0.05280, Lee 0.98600/1.836e-4, FVF (on the matched-Z
+    FVF) 0.98732/+0.015111 - an FVF match well off p-Z-T (2-5 x), and PROSPER's gas density = standard density /
+    matched FVF (1.792 lb/ft3 at the wellhead)."""
+    import dataclasses
+    from wellmodel import system as wsys, gaspvt as gp, inflow as winf
+    from wellmodel.blackoil import LinearMatch as LM
+    G = 14.696
+    inp = dataclasses.replace(gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300),
+                              match={"z": LM(1.05769, -0.0527965), "bg": LM(0.9873151, 0.01511095),
+                                     "lee": LM(0.985998, 1.83581e-4)})
+    # PROSPER PVT table at 166 F: FVF and density
+    p = np.array([15, 1405.79, 3074.74, 5300]) + G
+    z, bg, rho, mu = gp.gas_props(inp, p, np.full(4, 166.0))
+    assert np.abs(bg / [0.60194, 0.026294, 0.020238, 0.018501] - 1).max() < 0.005
+    assert np.abs(rho / [0.074015, 1.6944, 2.20144, 2.40807] - 1).max() < 0.01
+    assert np.abs(mu / [0.013164, 0.01491, 0.018838, 0.024643] - 1).max() < 0.003
+    assert gp.fvf_consistency(inp) > 1.0
+    pr = 5300 + G
+    grid = np.linspace(G, 5600, 2000)
+    mg = gp.pseudo_pressure(inp, grid, 166.0)
+    assert abs(np.interp(3277 + G, grid, mg) / 717929177 - 1) < 0.01
+    z3 = gp.gas_props(inp, np.array([pr - 5, pr, pr + 5]), np.full(3, 166.0))[0]
+    mu_r = float(gp.gas_props(inp, np.array([pr]), np.array([166.0]))[3][0])
+    cv = winf.petex_gas(pr, 166, 25, 55, 500, 31.6, .354, 55, 50, .15, .25, 2.0, lambda p_: np.interp(p_, grid, mg),
+                        mu_r, 1 / pr - (z3[2] - z3[0]) / 10 / z3[1], 0.58)
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.0},
+            {"Type": "Tubing", "Measured Depth (ft)": 5000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 5400, "Casing Inside Diameter (in)": 6.0,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5400],
+                                [0, 1500, 1980, 2450, 2883, 3300, 3721, 4140, 4560, 4900], [0, 1500, 5400], [45, 75, 166])
+    fl = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.58, salinity_ppm=100000, co2=0.5, n2=2), 50.0, "lee",
+                          inp, gpvt=inp)
+    P, _ = wvlp.traverse(path, fl, 1500 + G, {"q": 61.746, "wgr": 1.0, "cgr": 1.0, "sep_gor": 1e6}, "pe2_style", u=3.0)
+    assert abs((np.ravel(P)[-1] - G) / 3247.5 - 1) < 0.02
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "gas", {"whp": 1500 + G, "u": 3.0, "wgr": 1.0, "sep_gor": 1e6},
+                              [{}], lambda ch: cv, "pe2_style")
+    assert abs(res[0].q / 61.746 - 1) < 0.03 and abs((res[0].pwf - G) / 3277.0 - 1) < 0.01
+
+
+def test_gas_well_test_matching_prosper_t07():
+    """Three gas well tests (gauge at 4250 ft) on the Tutorial 06 well, PVT as the user's PROSPER file (see the T06
+    test). Workflow: U from the tests (~3.13, the model's 3), Match VLP (PE2), Adjust IPR (skin, latest test), then
+    a system sensitivity on top-node pressure and WGR. PROSPER (user's run): PE2 P1 0.76821, P2 0.93288 (P1 is
+    poorly determined - gravity is ~70 psi of ~1,700 - and the regression here pulls it towards 1), skin 1.28714,
+    AOF 103.746 MMscf/d; e.g. 1500 psig and WGR 1: 64.433 MMscf/d at 3266.1 psig; WGR 50: 56.956 at 3526.5;
+    1000 psig, WGR 0: 70.265 at 3022.1; WGR 50: 60.750 at 3363.5. The water response needs PE2's mist friction on
+    the no-slip mixture momentum (gas-only friction: WGR 50 under-predicted by 570-660 psi)."""
+    import dataclasses
+    from scipy.optimize import brentq
+    from wellmodel import system as wsys, gaspvt as gp, inflow as winf
+    from wellmodel.blackoil import LinearMatch as LM
+    G = 14.696
+    inp = dataclasses.replace(gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300),
+                              match={"z": LM(1.05769, -0.0527965), "bg": LM(0.9873151, 0.01511095),
+                                     "lee": LM(0.985998, 1.83581e-4)})
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.0},
+            {"Type": "Tubing", "Measured Depth (ft)": 5000, "Tubing Inside Diameter (in)": 3.958,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 5400, "Casing Inside Diameter (in)": 6.0,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 1500, 2000, 2500, 3000, 3500, 4000, 4250, 4500, 5000, 5400],
+                                [0, 1500, 1980, 2450, 2883, 3300, 3721, 3930.5, 4140, 4560, 4900], [0, 1500, 5400],
+                                [45, 75, 166])
+    fl = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.58, salinity_ppm=100000, co2=0.5, n2=2), 50.0, "lee",
+                          inp, gpvt=inp)
+    tab = pd.DataFrame({"Test Point Comment": ["Test 1", "Test 2", "Test 3"],
+                        "Tubing Head Pressure (psia)": np.array([430, 2680, 1420]) + G,
+                        "Tubing Head Temperature (deg F)": [151.63, 146, 149.95],
+                        "Water Gas Ratio (STB/MMscf)": [1.0] * 3, "Condensate Gas Ratio (STB/MMscf)": [1.0] * 3,
+                        "Gas Rate (MMscf/day)": [72.773, 50.411, 64.459], "Gauge Depth (Measured) (feet)": [4250] * 3,
+                        "Gauge Pressure (psia)": np.array([2589.6, 3613.64, 2913.8]) + G,
+                        "Reservoir Pressure (psia)": np.array([5300, 5240, 5200]) + G})
+    tests, issues = wvlp.clean_tests(tab, "gas", 0, 5400)
+    assert not issues and np.allclose(tests["cgr"], 1.0)
+    u = wvlp.estimate_u(path, fl, tests)["U (BTU/h/ft2/F)"]
+    assert np.allclose(u, 3.13, atol=0.02)
+    m = wvlp.match(path, fl, tests, "pe2_style", 3.0)
+    assert 0.9 < m.p1 < 1.1 and abs(m.p2 / 0.93288 - 1) < 0.03 and np.abs(m.residuals).max() < 30
+    grid = np.linspace(G, 5600, 2000)
+    mg = gp.pseudo_pressure(inp, grid, 166.0)
+    mfn = lambda p_: np.interp(p_, grid, mg)
+
+    def ipr(pr, skin):
+        z3 = gp.gas_props(inp, np.array([pr - 5, pr, pr + 5]), np.full(3, 166.0))[0]
+        mu_r = float(gp.gas_props(inp, np.array([pr]), np.array([166.0]))[3][0])
+        return winf.petex_gas(pr, 166, 25, 55, 500, 31.6, .354, 55, 50, .15, .25, skin, mfn, mu_r,
+                              1 / pr - (z3[2] - z3[0]) / 10 / z3[1], 0.58)
+    t3 = tests.iloc[[2]]
+    bhp3 = float(wvlp.vlp_curve(path, fl, t3.iloc[0], [t3["q"].iloc[0]], "pe2_style", m.p1, m.p2, 3.0)[0])
+    skin = brentq(lambda s: float(ipr(float(t3["pr"].iloc[0]), s).rate(bhp3)) - 1000 * t3["q"].iloc[0], -2, 10)
+    cv = ipr(5300 + G, skin)
+    assert abs(skin - 1.28714) < 0.15 and abs(cv.aof / 103746 - 1) < 0.01
+    ref = {1000: [(0, 70.265, 3022.1), (50, 60.750, 3363.5)], 1500: [(1, 64.433, 3266.1), (50, 56.956, 3526.5)]}
+    for whp, lst in ref.items():
+        res, _ = wsys.solve_cases(lambda tid: path, fl, "gas", {"whp": whp + G, "u": 3.0, "wgr": 1.0, "sep_gor": 1e6},
+                                  [{"wgr": w} for w, _, _ in lst], lambda ch: cv, "pe2_style", m.p1, m.p2)
+        for (w, q, pw), r in zip(lst, res):
+            assert abs(r.q / q - 1) < 0.025, (whp, w, r.q, q)
+            assert abs((r.pwf - G) / pw - 1) < 0.02, (whp, w, r.pwf - G, pw)
+
+
+def test_retrograde_condensate_eos_prosper_t37():
+    """PROSPER Tutorial 37 (fully compositional retrograde condensate, PR EoS from a PRP file, three-stage separator
+    train), user's PROSPER run: AOF 150.011 MMscf/d; system at 2500 psig, PE5: 33.401 MMscf/d at 4976.50 psig.
+    PROSPER's IPR table gives a = 7337, b = 0.012986 (ours 7351, 0.012983): the difference was M(P), which PROSPER
+    integrates with the equilibrium gas below the dew point."""
+    import json
+    from wellmodel import eos as E, system as wsys, inflow as winf
+    G = 14.696
+    root = __file__.replace("tests/test_wellmodel.py", "examples/")
+    f = E.EOSFluid(E.parse_prp(open(root + "T37_Retrograde_Condensate_EoS.prp").read()))
+    psat, kind = f.saturation_pressure(300.0)
+    assert kind == "dew" and abs(psat - 4611) < 20
+    sep = f.separator_train()
+    assert abs(sep["gor"] / 7432.66 - 1) < 0.01                   # PROSPER's separator-train GOR
+    pr, t = 6000 + G, 300.0
+    grid = np.linspace(G, pr + 50, 150)
+    props = []                      # reservoir fluid above the dew point, equilibrium gas below (as PROSPER)
+    for x in grid:
+        r = f.flash(float(x), t)
+        props.append(r.vapour if r.phases == "2P" else f.phase_props(f.z, float(x), t))
+    mu = np.array([o.viscosity for o in props])
+    z = np.array([o.z for o in props])
+    fi = 2 * (grid - G) / (mu * z)
+    m = np.concatenate([[0], np.cumsum(np.diff(grid) * 0.5 * (fi[1:] + fi[:-1]))])
+    zz = np.interp([pr - 5, pr, pr + 5], grid, z)
+    cv = winf.petex_gas(pr, t, 25, 100, 340, 31.6, .354, 100, 50, .25, .2, 5.0, lambda p: np.interp(p, grid, m),
+                        float(np.interp(pr, grid, mu)), 1 / pr - (zz[2] - zz[0]) / 10 / zz[1], sep["gas_gravity"])
+    assert abs(cv.aof / 150011 - 1) < 0.01                        # 150.3 (single-phase fluid below Pdew: 144.3)
+    # PROSPER's IPR table: M(P) and rates (e.g. 63.162 MMscf/d at 4023.68 psig, 126.325 at 1888.71)
+    assert abs(np.interp(4023.68 + G, grid, m) / 877662336 - 1) < 0.006
+    assert abs(cv.rate(4023.68 + G) / 63162 - 1) < 0.005 and abs(cv.rate(1888.71 + G) / 126325 - 1) < 0.005
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 11800, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0018},
+            {"Type": "Casing", "Measured Depth (ft)": 12000, "Casing Inside Diameter (in)": 8.3,
+             "Casing Inside Roughness (in)": 0.0018}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 12000], [0, 12000], [0, 12000], [70, 300])
+    fl = wvlp.EOSTableFluid("gas", wvlp.eos_grid(f, 7000, 60, 300), float(f.z @ f.mw),
+                            float(sep["stages"]["Gas (scf per lbmol feed)"].sum()), float(sep["stb_per_lbmol"]),
+                            float(sep["oil_density"]), wbo.PVTInputs(rsb=1, api=40, gas_sg=0.7, salinity_ppm=20000))
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "gas", {"whp": 2500 + G, "u": 5.0, "wgr": 0.0, "sep_gor": sep["gor"]},
+                              [{}], lambda ch: cv, "pe5_style")
+    print("T37 system", res[0].q, res[0].pwf - G)
+    assert abs(res[0].q / 33.401 - 1) < 0.03 and abs((res[0].pwf - G) / 4976.5 - 1) < 0.01
+    proj = json.load(open(root + "T37_Retrograde_Condensate_Well.wellmodel.json"))
+    assert proj["widgets"]["opt_method"] == "eos" and proj["inputs"]["sys_corr"] == "pe5_style"

@@ -432,12 +432,12 @@ def multirate_jones_gas(pr, tests, fit_pr=None):
 
 
 # ---------------------------------------------------------- pseudo-pressure
-def pseudo_pressure_fn(mu_z: Callable, p_max: float, n: int = 300):
+def pseudo_pressure_fn(mu_z: Callable, p_max: float, n: int = 300, gauge: bool = False):
     """Return psi(p) = 2 int_0^p p/(mu Z) dp (psi^2/cp) as an interpolating function.
-    mu_z(p) returns (mu, z) arrays."""
+    mu_z(p) returns (mu, z) arrays. gauge=True: PROSPER's M(P), with the gauge pressure p - 14.696 in the integrand."""
     p = np.linspace(0.0, p_max * 1.05, n)
     mu, z = mu_z(np.maximum(p, 14.7))
-    integrand = 2 * p / (mu * z)
+    integrand = 2 * (np.maximum(p - 14.696, 0.0) if gauge else p) / (mu * z)
     psi = np.concatenate([[0.0], np.cumsum(0.5 * (integrand[1:] + integrand[:-1]) * np.diff(p))])
     return lambda x: np.interp(x, p, psi)
 
@@ -476,7 +476,7 @@ def multirate_forchheimer_pseudo(pr, tests, psi):
 # ================================================================ catalogue
 OIL_MODELS = ["P.I. Entry", "Vogel", "Composite", "Darcy", "Fetkovich", "Multi-rate Fetkovich",
               "Jones", "Multi-rate Jones", "Transient", "External entry"]
-GAS_MODELS = ["Jones", "Forchheimer", "Back pressure", "C and n", "Multi-rate C and n",
+GAS_MODELS = ["Petroleum Experts", "Jones", "Forchheimer", "Back pressure", "C and n", "Multi-rate C and n",
               "Multi-rate Jones", "Forchheimer with pseudo-pressure",
               "Multi-rate Forchheimer with pseudo-pressure", "External entry"]
 NOT_YET = {
@@ -490,3 +490,58 @@ NOT_YET = {
             "SkinAide", "Dual Porosity", "Horizontal Well with transverse fractures",
             "Modified Isochronal"],
 }
+
+
+# ============================================================ Petroleum Experts gas IPR
+PETEX_PSS_OFFSET = 0.4932   # PROSPER's stabilised drainage term = Dietz term + this (fitted: area, CA, rw runs)
+# gas relative permeability at connate water (straight-line kr with PROSPER's end-point degradation), from PROSPER
+# runs at Swc = 0, 0.1, 0.25, 0.4 (Tutorial 02): cubic through those points, linear beyond 0.4
+_KRG_SWC = (0.0, 0.10, 0.25, 0.40)
+_KRG_VAL = (1.0, 0.8988, 0.7328, 0.5227)
+
+
+def petex_krg(swc):
+    """Gas relative permeability at connate water saturation (PROSPER Petroleum Experts IPR, fitted)."""
+    swc = float(np.clip(swc, 0.0, 0.95))
+    if swc <= 0.4:
+        c = np.polyfit(_KRG_SWC, _KRG_VAL, 3)
+        return float(np.polyval(c, swc))
+    slope = (_KRG_VAL[3] - _KRG_VAL[2]) / (_KRG_SWC[3] - _KRG_SWC[2])
+    return float(max(_KRG_VAL[3] + slope * (swc - 0.4), 0.01))
+
+
+def petex_gas(pr, t_f, k, h, area_acres, ca, rw, hp, t_days, phi, swc, skin, m_fn, mu_r, cg_r, sg_sep,
+              d_entered=None, perm="total", cw=3e-6):
+    """PROSPER's Petroleum Experts IPR for dry and wet gas:
+        M(Pr) - M(Pwf) = 1422 T / (k_g h) [ (X + S) q + D q^2 ]        (q Mscf/d, M = PROSPER's gauge m(p))
+    k_g = k krg(Swc) (gas permeability at connate water; with perm="gas" the entered k is k_g).
+    X = min(transient, stabilised): transient 0.5 [ln(k_g t / (phi mu ct rw^2)) - 7.4316] (t hours, mu and ct at
+    Pr, ct = Sg cg + Sw cw); stabilised = Dietz term 0.5 ln(4A/(gamma CA rw^2)) + 0.4932 (PROSPER's, fitted).
+    D (calculated, PROSPER / Dake 8.24 with 1637): D = 3.161e-12 beta T g / (mu hp^2 rw) * k h / (1637 T),
+    beta = 2.73e10 / k_g^1.1045, g the separator gas gravity, mu at Pr, k absolute.
+    Validated on PROSPER Tutorial 02 IPR runs (time, area, shape factor, wellbore radius, Swc, D): see tests."""
+    tr = t_f + RANKINE
+    krg = petex_krg(swc) if perm == "total" else 1.0
+    k_abs = k if perm == "total" else k / max(petex_krg(swc), 1e-6)
+    kg = k_abs * krg
+    dietz = dietz_term(area_acres, ca, rw)
+    x_pss = dietz + PETEX_PSS_OFFSET
+    ct = (1 - swc) * cg_r + swc * cw
+    x_tr = 0.5 * (np.log(kg * t_days * 24.0 / (phi * mu_r * ct * rw * rw)) - 7.4316) if t_days > 0 else np.inf
+    x = float(min(x_tr, x_pss))
+    beta = 2.73e10 / kg ** 1.1045
+    d_calc = 3.161e-12 * beta * tr * sg_sep / (mu_r * hp * hp * rw) * k_abs * h / (1637.0 * tr)
+    d = d_calc if d_entered is None else float(d_entered)
+    c = 1422.0 * tr / (kg * h)
+    a, b = c * (x + skin), c * d
+    mr = float(m_fn(pr))
+
+    def f(pwf):
+        dm = np.maximum(mr - m_fn(np.clip(pwf, 0, None)), 0.0)
+        return dm / a if b <= 1e-30 else (-a + np.sqrt(a * a + 4 * b * dm)) / (2 * b)
+    curve = _curve_from_rate("Petroleum Experts", "gas", pr, f, {
+        "Gas relative permeability": krg, "Gas permeability (md)": kg, "Drainage term X": x,
+        "Flow regime": "transient" if x_tr < x_pss else "stabilised", "Non-Darcy flow factor D (1/(Mscf/d))": d,
+        "a (laminar)": a, "b (turbulent)": b, "M(Pr) (psi^2/cp)": mr})
+    curve.notes.append("M(P) as PROSPER: 2 int (p - 14.696)/(mu Z) dp at reservoir temperature.")
+    return curve

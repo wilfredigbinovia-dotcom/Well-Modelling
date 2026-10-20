@@ -1,0 +1,130 @@
+*
+* Petroleum Experts - PRP Export File
+*
+*
+*Export File Signature
+*#PetexPRP
+*Export File Version
+*#17
+*
+* !!!!!!!!!!!!!!!!!!!! FILE DETAILS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+*  FILE NAME : K:\IPM1250\samples\prosper\T37_Retrograde_Condensate_EoS.prp
+*  Exported  : Wed Nov 11 13:15:18 2020
+* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+*
+*
+* Equation Type 0 - Peng Robinson 1 - SRK
+0 
+*
+*
+*
+* Number of Components   Number of Lumped Components - Set to 0 if No Lumping Present
+*
+10 0 
+*
+*
+*          Mole        Critical        Critical       Accentric       Molecular        Specific        Critical          Volume         Boiling        Parachor          OmegaA          OmegaB         Costald         Costald Component
+*       Percent     Temperature        Pressure          Factor          Weight         Gravity          Volume           Shift           Point                                                          Volume  Accentric Fact Name     
+*
+*       percent       degrees F            psig                      lb/lb.mole         Gravity       l/kg.mole                       degrees F                                                       l/kg.mole         
+* ------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- ---------
+*
+
+           0.31        -233.124         477.326           0.039           28.01           1.026      89.8001291               0         -320.37            60.4         0.45724        0.077796      90.1497354          0.0358 "N2" 
+           2.33          87.672         1058.26           0.239           44.01           1.101      93.8998875               0         -109.23              78         0.45724        0.077796      93.8299662         0.23725 "CO2" 
+          68.73        -103.716         615.435           0.011           16.04           0.415       99.200169               0         -258.81              70         0.45724        0.077796      99.3899553          0.0983 "C1" 
+          12.37         20.8662         635.504           0.099            30.1           0.546      148.299879               0         -127.41             115         0.45724        0.077796      145.750251          0.1532 "C2" 
+           5.01          23.255         335.154           0.153            44.1           0.585      203.000158               0          -43.71             155         0.45724        0.077796      200.079697          0.1825 "C3" 
+           2.71         434.907         385.869           0.199            58.1             0.6      254.999728               0           31.17             200         0.45724        0.077796       254.38979          0.2008 "NC4" 
+            1.4         445.786         385.403           0.251            72.2            0.63      304.000176               0           96.87             245         0.45724        0.077796      311.320058          0.2522 "NC5" 
+           0.96         429.689         370.622           0.299            86.2           0.664       370.00023               0          155.73           282.5         0.45724        0.077796      368.199758         0.35069 "C6" 
+           3.43         476.292         496.024          0.2904         121.581          0.7628      463.596709               0         228.102         369.594         0.45724        0.077796      552.899898          0.4916 "C7::12" 
+           2.75         906.115          262.76          0.6232          252.73          0.8692      1000.66069               0         590.221         653.935         0.45724        0.077796      1198.93117         0.83279 "C13::C35" 
+*
+* Binary Interaction Coefficients
+*
+* Only non-zero BICs are exported and imported
+* Number of non-zero BICs to be written or read
+*
+
+1 
+* Only first half of array is exported - values will be copied to second half
+*
+9 2          0.0273 
+*
+* Volume Shift Flag
+*
+0 
+*
+* OIL Viscosity Options
+*  LBC LBCCOEFF PED BEGGS BEAL PETROSKY BERGMAN EGBOG
+*
+LBC 
+*
+* GAS Viscosity Options
+*  LBC LBCCOEFF PED LEE CARR
+*
+LBC 
+*
+*Enthalpy Model 
+*
+1 
+*
+*Enthalpy Model Shift Multiplier
+*
+              0               1 
+*
+*
+* CO2 Correction
+*
+1 
+*
+* Hydrate Model Options
+* MUNCK HCUBIC HCPA
+*
+MUNCK 
+*
+* Use Hyd Inhibitor
+*
+1 
+*
+*
+* Use Alcohol Correction
+*
+1 
+*
+* Water Composition
+*
+* Number of Salts
+*
+0 
+*
+* Number of Inhibitors
+*
+0 
+*
+*
+* Water Cut
+* Use Gas Water Cut
+*
+0 
+*
+*Water Cut Oil
+              0 
+*Water Cut Gas
+              0 
+*
+*
+* Separators T, P
+*
+3 1 
+            100             500 
+             90             100 
+             60               0 
+*
+* Reference Temperature
+*
+            300 
+*
+*# End of file   
+*

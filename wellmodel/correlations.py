@@ -218,13 +218,18 @@ def mukherjee_brill(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, 
 
 # ---------------------------------------------------------------------------
 # Duns & Ros mist flow (used by Orkiszewski and Aziz et al. in the mist region)
-def _dr_mist(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t):
-    """No-slip holdup; friction on the gas phase with a film roughness from the Weber number."""
+def _dr_mist(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, mixture=False):
+    """No-slip holdup; friction on the gas phase with a film roughness from the Weber number. mixture=True (PE2):
+    the friction term carries the no-slip mixture density and velocity instead of the gas alone - the liquid's
+    momentum, which makes the pressure drop rise with water as PROSPER's PE2 does (Tutorial 06 well, WGR 0-50)."""
     vm, lam = _no_slip_lambda(vsl, vsg)
     sig = np.maximum(sig_l, 0.5) * DYNE_TO_LBM_S2
     vg2 = np.maximum(vsg, 1e-6) ** 2
     nwnm = rho_g * vg2 * (mu_l * CP_TO_LBFTS) ** 2 / (rho_l * sig * sig)
-    eps = np.where(nwnm <= 0.005, 0.0749 * sig / (rho_g * vg2), 0.3713 * sig * nwnm ** 0.302 / (rho_g * vg2))
+    # film roughness in the field-unit form (sigma in dyne/cm, rho lb/ft3, v ft/s -> ft; i.e. 34 sigma/(rho v^2) in
+    # consistent units x 1/453.6) - the form PROSPER uses: it reproduces PE2's mist friction in PROSPER Tutorial 02
+    sig_d = np.maximum(sig_l, 0.5)
+    eps = np.where(nwnm <= 0.005, 0.0749 * sig_d / (rho_g * vg2), 0.3713 * sig_d * nwnm ** 0.302 / (rho_g * vg2))
     eps = np.clip(np.maximum(eps, rough), 1e-9, 0.25 * d)
     db = d - eps                                       # gas core diameter d - eps (Duns & Ros refinement)
     vsg_b = np.maximum(vsg, 1e-6) * d * d / (db * db)
@@ -233,8 +238,11 @@ def _dr_mist(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t):
     f_moody = friction_factor(re_g, rr)
     f_rough = 4 * (1 / (4 * np.log10(0.27 * rr)) ** 2 + 0.067 * rr ** 1.73)
     f = np.where(rr > 0.05, f_rough, f_moody)
-    fric = f * rho_g * vsg_b ** 2 / (2 * G * db) / 144.0
     rho_n = rho_l * lam + rho_g * (1 - lam)
+    if mixture:
+        fric = f * rho_n * (vm * d * d / (db * db)) ** 2 / (2 * G * db) / 144.0
+    else:
+        fric = f * rho_g * vsg_b ** 2 / (2 * G * db) / 144.0
     return rho_n * sin_t / 144.0, fric, lam
 
 
@@ -649,7 +657,8 @@ def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     (slip 0.8 ft/s) and Griffith friction - as in the modified Hagedorn & Brown. Slug flow: holdup from a constant
     slip velocity (0.155 ft/s, at least the no-slip holdup), a static gradient 1.45 % above the in-situ density
     (as PROSPER PE2 reports) and the Duns & Ros bubble/slug friction. Transition and
-    mist (Duns & Ros map): Duns & Ros. NOT Petroleum Experts' PE2 - an approximation of it."""
+    mist (Duns & Ros map): no-slip holdup with the Duns & Ros mist friction (film roughness). NOT Petroleum
+    Experts' PE2 - an approximation of it."""
     vm, lam = _no_slip_lambda(vsl, vsg)
     e_hb, f_hb, hl_hb = hagedorn_brown(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
     e_dr, f_dr, hl_dr = duns_ros(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
@@ -670,9 +679,12 @@ def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     ff3 = 1 + fm1 * np.sqrt(vsg / (50 * np.maximum(vsl, 1e-9)))
     f_s = fm1 * ff2 / ff3 * rho_l * vsl * vm / (2 * G * d) / 144.0
     e_s = PE2_SLUG_GRAVITY * (rho_l * hl_s + rho_g * (1 - hl_s)) * sin_t / 144.0
-    e = np.where(bubble, e_hb, np.where(beyond_slug, e_dr, e_s))
-    f = np.where(bubble, f_hb, np.where(beyond_slug, f_dr, f_s))
-    hl = np.where(bubble, hl_hb, np.where(beyond_slug, hl_dr, hl_s))
+    # beyond the Duns & Ros slug boundary PROSPER's PE2 reports no-slip holdup and the Duns & Ros mist (film
+    # roughness) friction, in the transition region too (Tutorial 02 gas well: holdup = no-slip, friction within 1 %)
+    e_m, f_m, hl_m = _dr_mist(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, mixture=True)
+    e = np.where(bubble, e_hb, np.where(beyond_slug, e_m, e_s))
+    f = np.where(bubble, f_hb, np.where(beyond_slug, f_m, f_s))
+    hl = np.where(bubble, hl_hb, np.where(beyond_slug, hl_m, hl_s))
     single = lam > 0.99999
     return np.where(single, e_hb, e), np.where(single, f_hb, f), np.where(single, 1.0, hl)
 

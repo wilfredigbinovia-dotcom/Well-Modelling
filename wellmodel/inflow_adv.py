@@ -23,8 +23,10 @@ Horizontal well with transverse fractures: Mukherjee & Economides (1991):
     s_c = (h / (FcD xf)) [ln(h / 2rw) - pi/2].
 Dual porosity: Warren & Root (1963) line source with skin.
 Multilayer: commingled layers with crossflow (linear injectivity above the
-    layer pressure); optional wellbore pressure losses between layers
-    (hydrostatic + Darcy-Weisbach friction, single-phase screening).
+    layer pressure). Multilayer with wellbore dP (PROSPER's recommended model):
+    each layer with its own pressure, inflow model and PVT; the commingled
+    stream is marched up between the layers with a multiphase correlation;
+    validated against PROSPER Tutorial 11.
 Horizontal well with friction dP: lateral split into zones, inflow allocated
     by k x length and zone skin, friction marched from toe to heel.
 Modified isochronal: correction factors, n regression, stabilisation as in
@@ -373,60 +375,6 @@ def _segment_dp(q, p, length, dtvd, d_in, rough_in, rho_fn, mu_fn, vol_fn):
     return rho * dtvd / 144 + fric
 
 
-def multilayer_dp(fluid, layers: list, top_md, top_tvd, props, pb=None, n=40):
-    """Layers with depths (md, tvd of the layer inflow point), flowing ID (in) and roughness
-    (in) of the pipe above each layer. Returns IPR at the TOP node."""
-    lay = sorted(layers, key=lambda L: L["md"])
-    if lay[0]["md"] < top_md:
-        raise ValueError("TOP depth must be at or above the shallowest layer.")
-    fns = [layer_rate_fn(fluid, L, pb) for L in lay]
-    rho_fn, mu_fn, vol_fn = _wellbore_props(fluid, props)
-    nodes_md = [top_md] + [L["md"] for L in lay]
-    nodes_tvd = [top_tvd] + [L["tvd"] for L in lay]
-
-    def march(p_bottom):
-        p = p_bottom
-        rates = [0.0] * len(lay)
-        qcum = 0.0
-        for i in range(len(lay) - 1, -1, -1):
-            rates[i] = float(np.asarray(fns[i](np.array([p])))[0])
-            qcum += rates[i]
-            L = lay[i]
-            dmd = nodes_md[i + 1] - nodes_md[i]
-            dtvd = nodes_tvd[i + 1] - nodes_tvd[i]
-            if dmd > 0:
-                p = p - _segment_dp(qcum, p, dmd, dtvd, L["id_in"], L["rough_in"], rho_fn, mu_fn, vol_fn)
-        return p, rates
-
-    pmax = max(L["pr"] for L in lay) + 0.433 * 1.2 * (nodes_tvd[-1] - top_tvd) + 50
-
-    def solve(p_top):
-        g = lambda pb_: march(pb_)[0] - p_top
-        lo, hi = max(p_top, 14.7), pmax * 1.5
-        if g(lo) > 0:
-            lo = 14.7
-        return brentq(g, lo, hi, xtol=0.01)
-
-    # shut-in TOP pressure: total rate zero
-    def q_at(p_top):
-        return sum(march(solve(p_top))[1])
-    p_hi = max(L["pr"] for L in lay)
-    p0 = brentq(q_at, 14.7, p_hi, xtol=0.1) if q_at(p_hi) < 0 else p_hi
-    pw = np.linspace(p0, 14.7, n)
-    qs, per = [], []
-    for p in pw:
-        r = march(solve(p))[1]
-        qs.append(max(sum(r), 0.0)); per.append(r)
-    qs = np.array(qs)
-    order = np.argsort(pw)
-    f = lambda x: np.interp(x, pw[order], qs[order])
-    curve = IPRCurve("Multi-layer with dP loss in wellbore", fluid, p0, pw, qs,
-                     {"Layers": len(lay), "Shut-in TOP pressure (psia)": p0}, [], None, f)
-    curve.layer_rates = pd.DataFrame(np.array(per), columns=[f"Layer {i + 1}" for i in range(len(lay))])
-    curve.notes.append("Wellbore losses between layers use single-phase properties (screening).")
-    return curve
-
-
 # ================================================ horizontal with friction
 def horizontal_friction(fluid, pr, zones: list, overall_kh_eq, overall_D, k_ref, props, pb=None, n=40,
                         profile_at=None):
@@ -538,3 +486,277 @@ def modified_isochronal(pres, tests: pd.DataFrame, t_flow_hr, t_shut_hr, k, phi,
                                      "dP2 measured": dp2, "dP2 isochronal": dp2_iso, "dP2 stabilised": dp2_stab})
     curve.c_iso = c_iso
     return curve
+
+
+# ================================================ multilayer with wellbore dP (PROSPER "MultiLayer - dP Loss in WellBore")
+def _with_pvt(fluid, api=None, gas_sg=None):
+    """The wellbore fluid with another oil gravity / gas gravity (black oil and wet gas; matches kept). Other fluids
+    (EOS tables) are returned unchanged."""
+    import dataclasses
+    from . import vlp as V
+    if fluid is None or (api is None and gas_sg is None):
+        return fluid
+    if isinstance(fluid, V.BlackOilFluid):
+        inp = dataclasses.replace(fluid.inp, **({"api": float(api)} if api is not None else {}),
+                                  **({"gas_sg": float(gas_sg)} if gas_sg is not None else {}))
+        return V.BlackOilFluid(dataclasses.replace(fluid.m, inp=inp))
+    if isinstance(fluid, V.WetGasFluid):
+        inp = dataclasses.replace(fluid.inp, **({"gas_sg": float(gas_sg)} if gas_sg is not None else {}))
+        return V.WetGasFluid(inp, float(api) if api is not None else fluid.api)
+    return fluid
+
+
+def _ml_rate_fn(kind, L, lf, t_res):
+    """q(p) for one layer of the dP model: liquid STB/d (oil) or Mscf/d (gas); negative above the layer pressure
+    (crossflow into the layer). Oil: PI or Darcy (J from the layer's own Bo and viscosity at its pressure), straight
+    line above the layer bubble point, Vogel / Petrobras composite below it."""
+    from .inflow import _pi_vogel_rate, darcy_pi
+    pr = L["pr"]
+    if kind == "oil":
+        gor = L.get("gor", 0.0)
+        pb = float(np.ravel(lf.pb_at(t_res, gor))[0]) if lf is not None and gor > 0 else L.get("pb", 0.0)
+        if L.get("model", "PI") == "Darcy":
+            _, bo_, mu = lf._props(np.array([pr]), np.array([t_res]), np.array([max(gor, 1.0)]))
+            j = darcy_pi(L["k"], L["h"], float(mu[0]), float(bo_[0]), L["area"], L["ca"], L["rw"], L.get("skin", 0.0))
+            L["bo"], L["mu"] = float(bo_[0]), float(mu[0])
+        else:
+            j = L["j"]
+        L["j_calc"], L["pb_calc"] = j, pb
+        prod = _pi_vogel_rate(pr, pb, j, L.get("wc", 0.0))
+        return lambda p: np.where(np.asarray(p, float) <= pr, prod(np.minimum(p, pr)), -j * (np.asarray(p, float) - pr))
+    return layer_rate_fn("gas", L)
+
+
+def multilayer_wellbore(kind, layers: list, top_md, top_tvd, t_res, fluid, correlation="beggs_brill", n=30):
+    """PROSPER's MultiLayer - dP Loss in WellBore IPR at the TOP node.
+
+    layers (any order): {"type": "Perforated"|"Blank", "md", "tvd" (bottom of the layer), "r_flow" (ft, radius of the
+    pipe from the node above down to this layer), "rough_in"} and for perforated layers "pr" (psia, at the layer
+    bottom), "model" (oil: "PI" with "j" | "Darcy" with "k", "area", "ca", "rw", "skin"; gas: "C and n" with "c", "n" |
+    "Jones" with "a", "b"), and the layer PVT - oil: "gor", "wc" (fraction), optional "api", "gas_sg"; gas: "cgr",
+    "wgr", optional "gas_sg". Darcy/Jones thickness "h" defaults to the TVD from the node above.
+    The well is marched up from the deepest layer: each layer adds (or, above its pressure, takes) fluid at the
+    pressure at its bottom; between nodes the commingled stream (rates, GOR and water cut blended from the layers)
+    loses pressure by the multiphase correlation in a pipe of the layer's flowing radius. Zero roughness turns the
+    wellbore losses off (layer pressures referred to the TOP depth), as in PROSPER.
+    Returns the IPR curve at TOP with .layer_table (per point and layer: pressure, liquid/oil/water/gas rates) and
+    .mix(q) -> dict of the blended producing ratios at a total rate (wc fraction and gor, or cgr and wgr)."""
+    from . import vlp as V
+    from .correlations import CORRELATIONS
+    from .inflow import IPRCurve
+    if fluid is None:
+        raise ValueError("The multilayer dP model needs the PVT (complete the PVT tab).")
+    lay = sorted([dict(L) for L in layers], key=lambda L: L["md"])
+    if not lay or not any(L["type"] == "Perforated" for L in lay):
+        raise ValueError("Enter at least one perforated layer.")
+    if lay[0]["md"] < top_md - 0.01:
+        raise ValueError("The TOP depth must be at or above the shallowest layer.")
+    nodes_md = np.array([top_md] + [L["md"] for L in lay], float)
+    nodes_tvd = np.array([top_tvd] + [L["tvd"] for L in lay], float)
+    if np.any(np.diff(nodes_md) < -1e-6) or np.any(np.diff(nodes_tvd) < -1e-6):
+        raise ValueError("Layer depths must increase downwards (MD and TVD).")
+    prev_tvd = nodes_tvd[:-1]
+    perf = []
+    for i, L in enumerate(lay):
+        if L["type"] != "Perforated":
+            continue
+        L.setdefault("h", max(L["tvd"] - prev_tvd[i], 0.1))
+        if kind == "oil":
+            L["fluid"] = _with_pvt(fluid, L.get("api"), L.get("gas_sg"))
+        else:
+            L["fluid"] = _with_pvt(fluid, None, L.get("gas_sg"))
+        L["fn"] = _ml_rate_fn(kind, L, L["fluid"], t_res)
+        perf.append(i)
+    # wellbore column between the nodes (segment i: node i -> node i+1, pipe of layer i)
+    seg = np.diff(nodes_md)
+    dz = np.diff(nodes_tvd)
+    r = np.array([L.get("r_flow", 0.25) for L in lay], float)
+    rough = np.array([L.get("rough_in", 0.0) for L in lay], float)
+    path = V.FlowPath(nodes_md, nodes_tvd, np.full(len(nodes_md), float(t_res)), np.maximum(seg, 1e-6),
+                      np.clip(dz / np.maximum(seg, 1e-6), -1.0, 1.0), np.pi * r * r, 2 * r, rough / 12.0, 2 * r)
+    corr = CORRELATIONS[correlation]
+    on = rough > 0
+
+    def phases(i, q):
+        """(oil or condensate STB/d, water STB/d, gas scf/d) produced by layer i at rate(s) q."""
+        L = lay[i]
+        if kind == "oil":
+            qo, qw = q * (1 - L.get("wc", 0.0)), q * L.get("wc", 0.0)
+            return qo, qw, qo * L.get("gor", 0.0)
+        g = q * 1000.0
+        return g * L.get("cgr", 0.0) / 1e6, g * L.get("wgr", 0.0) / 1e6, g
+
+    def case_of(qo, qw, qg):
+        if kind == "oil":
+            ql = qo + qw
+            safe = np.where(np.abs(ql) > 1e-12, ql, 1.0)
+            return {"q": np.maximum(np.abs(ql), 1e-6), "wc": np.clip(np.where(np.abs(ql) > 1e-12, qw / safe, 0.0), 0, 1),
+                    "gor": np.where(qo > 1e-9, qg / np.where(qo > 1e-9, qo, 1.0), 0.0)}
+        sg_ = np.where(qg > 1e-9, qg, 1.0)
+        return {"q": np.maximum(np.abs(qg) / 1e6, 1e-9), "cgr": np.where(qg > 1e-9, qo / sg_ * 1e6, 0.0),
+                "wgr": np.where(qg > 1e-9, qw / sg_ * 1e6, 0.0)}
+
+    # wellbore fluid of each segment: oil and gas gravities blended over the layers below it, weighted by their
+    # productivity (PROSPER blends by rate; the gravities rarely differ enough for the weighting to matter)
+    def seg_fluid(i):
+        below = [k for k in perf if k >= i]
+        if not below:
+            return fluid
+        w = []
+        for k in below:
+            L = lay[k]
+            wk = L.get("j_calc") or (L.get("c", 1.0) if kind == "gas" else 1.0)
+            w.append((k, max(float(wk), 1e-12)))
+        tot = sum(x for _, x in w)
+        if kind == "oil":
+            apis = [(lay[k].get("api"), x) for k, x in w if lay[k].get("api") is not None]
+            sgs = [(lay[k].get("gas_sg"), x) for k, x in w if lay[k].get("gas_sg") is not None]
+            api = sum(a * x for a, x in apis) / sum(x for _, x in apis) if apis else None
+            sg = sum(a * x for a, x in sgs) / sum(x for _, x in sgs) if sgs else None
+            return _with_pvt(fluid, api, sg)
+        sgs = [(lay[k].get("gas_sg"), x) for k, x in w if lay[k].get("gas_sg") is not None]
+        return _with_pvt(fluid, None, sum(a * x for a, x in sgs) / sum(x for _, x in sgs) if sgs else None)
+    fl_seg = [seg_fluid(i) for i in range(len(lay))]
+
+    def march(p_bottom):
+        """Up from the deepest node for an array of bottom pressures: layer rates (layers x N), node pressures
+        (nodes x N)."""
+        p = np.array(p_bottom, float)
+        N = p.size
+        rates = np.zeros((len(lay), N))
+        pn = np.empty((len(nodes_md), N))
+        pn[-1] = p
+        qo = np.zeros(N); qw = np.zeros(N); qg = np.zeros(N)
+        tt = np.full(N, float(t_res))
+        for i in range(len(lay) - 1, -1, -1):
+            if i in perf:
+                q = np.asarray(lay[i]["fn"](p), float)
+                rates[i] = q
+                a, b, c = phases(i, q)
+                tot = qo + qw if kind == "oil" else qg
+                lt = (a + b) if kind == "oil" else c
+                take = (q < 0) & (tot > 0)              # crossflow: the layer takes the stream it sees
+                f = np.where(take, np.minimum(-lt / np.maximum(tot, 1e-12), 1.0), 0.0)
+                a, b, c = np.where(take, -qo * f, a), np.where(take, -qw * f, b), np.where(take, -qg * f, c)
+                qo, qw, qg = qo + a, qw + b, qg + c
+            if on[i] and seg[i] > 1e-6:
+                cs = case_of(qo, qw, qg)
+                sign = np.where((qo + qw if kind == "oil" else qg) >= 0, 1.0, -1.0)
+                g0, _ = V._gradient(path, fl_seg[i], i, p, tt, cs, corr, 1.0, sign)
+                pp = np.maximum(p - g0 * seg[i], 14.7)
+                g1, _ = V._gradient(path, fl_seg[i], i, pp, tt, cs, corr, 1.0, sign)
+                p = np.maximum(p - 0.5 * (g0 + g1) * seg[i], 14.7)
+            pn[i] = p
+        return rates, pn
+
+    def solve_top(p_top):
+        """Layer rates and node pressures for TOP pressures (array): fixed-point on the bottom pressure."""
+        p_top = np.atleast_1d(np.asarray(p_top, float))
+        pb_ = p_top + 0.3 * max(nodes_tvd[-1] - top_tvd, 0.0)
+        prev = None
+        for _ in range(20):
+            rates, pn = march(pb_)
+            err = p_top - pn[0]
+            if np.nanmax(np.abs(err)) < 0.01:
+                return rates, pn
+            step = err.copy()
+            if prev is not None:                       # secant on d(TOP)/d(bottom), guarded
+                dp_, de_ = pb_ - prev[0], err - prev[1]
+                slope = np.where(np.abs(dp_) > 1e-9, -de_ / np.where(np.abs(dp_) > 1e-9, dp_, 1.0), 1.0)
+                slope = np.clip(slope, 0.2, 5.0)
+                step = err / slope
+            prev = (pb_.copy(), err)
+            pb_ = np.maximum(pb_ + step, 14.7)
+        return march(pb_)
+
+    total = lambda rates: rates[perf].sum(axis=0)
+    p_hi = max(lay[i]["pr"] for i in perf)
+    grid = np.linspace(15.7, p_hi + 0.5 * max(nodes_tvd[-1] - top_tvd, 0.0) + 50.0, 40)
+    tq = total(solve_top(grid)[0])
+    k = np.where((tq[:-1] > 0) & (tq[1:] <= 0))[0]
+    if len(k):
+        lo, hi = grid[k[0]], grid[k[0] + 1]
+        flo, fhi = tq[k[0]], tq[k[0] + 1]
+        p0 = hi
+        for _ in range(12):                        # shut-in TOP pressure: total rate zero (Illinois regula falsi)
+            p0 = hi - fhi * (hi - lo) / (fhi - flo) if fhi != flo else 0.5 * (lo + hi)
+            f0 = total(solve_top(np.array([p0]))[0])[0]
+            if abs(f0) < 1e-3:
+                break
+            if f0 > 0:
+                lo, flo = p0, f0
+                fhi *= 0.5
+            else:
+                hi, fhi = p0, f0
+                flo *= 0.5
+    else:
+        p0 = p_hi
+    pw = np.linspace(p0, 15.7, n)
+    rates, pn = solve_top(pw)
+    rows = []
+    qs = np.maximum(total(rates), 0.0)
+    mixes = np.zeros((n, 3))
+    for i in perf:
+        a, b, c = phases(i, rates[i])
+        mixes += np.c_[a, b, c]
+        for kk in range(n):
+            rows.append({"Point": kk + 1, "TOP pressure (psia)": pw[kk], "Layer": i + 1,
+                         "Layer pressure (psia)": pn[i + 1, kk],
+                         ("Liquid rate (STB/d)" if kind == "oil" else "Gas rate (Mscf/d)"): rates[i, kk],
+                         ("Oil rate (STB/d)" if kind == "oil" else "Condensate rate (STB/d)"): a[kk],
+                         "Water rate (STB/d)": b[kk], "Gas rate (MMscf/d)": c[kk] / 1e6})
+    order = np.argsort(pw)
+    f = lambda x: np.interp(x, pw[order], qs[order])
+    params = {"Layers": len(perf), "Shut-in TOP pressure (psia)": p0}
+    for i in perf:
+        L = lay[i]
+        if "j_calc" in L:
+            params[f"Layer {i + 1} PI (STB/d/psi)"] = L["j_calc"]
+        if L.get("pb_calc"):
+            params[f"Layer {i + 1} bubble point (psia)"] = L["pb_calc"]
+    curve = IPRCurve("Multi-layer with dP loss in wellbore", kind, p0, pw, qs, params, [], None, f)
+    curve.layer_table = pd.DataFrame(rows).sort_values(["Layer", "Point"]).reset_index(drop=True)
+    curve.layer_rates = curve.layer_table.pivot(index="Point", columns="Layer",
+                                                values="Liquid rate (STB/d)" if kind == "oil" else "Gas rate (Mscf/d)")
+    curve.layer_rates.columns = [f"Layer {c}" for c in curve.layer_rates.columns]
+    curve.top_md, curve.top_tvd = float(top_md), float(top_tvd)
+    good = qs > 1e-6
+
+    def mix(q):
+        """Blended producing ratios at total rate(s) q (IPR units)."""
+        q = np.atleast_1d(np.asarray(q, float))
+        if good.sum() < 1:
+            return {}
+        qq, mm = qs[good], mixes[good]
+        o_, w_, g_ = (np.interp(q, qq, mm[:, j] / qq) for j in range(3))
+        if kind == "oil":
+            liq = o_ + w_
+            return {"wc": w_ / np.maximum(liq, 1e-12), "gor": g_ / np.maximum(o_, 1e-12)}
+        return {"cgr": o_ / np.maximum(g_, 1e-12) * 1e6, "wgr": w_ / np.maximum(g_, 1e-12) * 1e6}
+    curve.mix = mix
+    if not on.any():
+        curve.notes.append("Zero roughness everywhere: no wellbore losses between layers (layer pressures are "
+                           "referred to the TOP depth).")
+    return curve
+
+
+def layer_split(curve, p_top):
+    """Per-layer results of a multilayer dP IPR at a TOP pressure (psia), interpolated between the IPR points:
+    layer pressure and rates (negative = crossflow into the layer), plus the total."""
+    lt = curve.layer_table
+    rows = []
+    for lay_, g in lt.groupby("Layer"):
+        g = g.sort_values("TOP pressure (psia)")
+        x = g["TOP pressure (psia)"].to_numpy(float)
+        r = {"Layer": f"Layer {int(lay_)}"}
+        for c in g.columns:
+            if c in ("Point", "Layer", "TOP pressure (psia)"):
+                continue
+            r[c] = float(np.interp(p_top, x, g[c].to_numpy(float)))
+        rows.append(r)
+    out = pd.DataFrame(rows)
+    tot = {"Layer": "Total"}
+    for c in out.columns[1:]:
+        tot[c] = np.nan if c == "Layer pressure (psia)" else out[c].sum()
+    out = pd.concat([out, pd.DataFrame([tot])], ignore_index=True)
+    return out

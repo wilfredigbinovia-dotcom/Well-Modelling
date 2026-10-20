@@ -1,0 +1,478 @@
+{
+ "format": "wellmodel-project",
+ "version": 1,
+ "name": "T37 Retrograde Condensate Well",
+ "saved": "2026-10-20T20:19:17+00:00",
+ "inputs": {
+  "eq_cpg": 0.51,
+  "sys_flags": "Yes",
+  "calc_mode": "System analysis (IPR + VLP)",
+  "sys_node": "Bottom node",
+  "sys_rate_method": "Automatic - Geometric",
+  "eq_cpo": 0.53,
+  "eq_tsur": 60.0,
+  "eq_cpw": 1.0,
+  "sys_lhi": "DisAllow",
+  "eq_u": 5.0,
+  "eq_usur": 5.0,
+  "sys_whp": 2514.696,
+  "sys_wgr": 0.0,
+  "sys_sep_gor": 7432.66,
+  "sys_corr": "pe5_style",
+  "sys_use_fit": false,
+  "pvt_sal": 20000.0,
+  "pvt_t": 300.0,
+  "pvt_pres": 6014.696,
+  "ipr_model_gas": "Petroleum Experts",
+  "ipr_pr": 6014.696,
+  "ipr_t_from_pvt": true,
+  "ipr_wgr": 0.0,
+  "ipr_k": 25.0,
+  "ipr_h": 100.0,
+  "ipr_area": 340.0,
+  "ipr_ca": 31.6,
+  "ipr_rw": 0.354,
+  "ipr_hp": 100.0,
+  "ipr_tdays": 50.0,
+  "ipr_phi": 0.25,
+  "ipr_swc": 0.2,
+  "ipr_perm_kind": "Total permeability",
+  "ipr_d_method": "Calculated",
+  "ipr_mech": "Enter skin by hand",
+  "ipr_skin": 5.0,
+  "ipr_devpp": "None",
+  "sys_p1_pe5_style": 1.0,
+  "sys_p2_pe5_style": 1.0
+ },
+ "widgets": {
+  "opt_completion": "cased_hole",
+  "opt_method": "eos",
+  "opt_well_type": "producer",
+  "opt_sand_control": "none",
+  "opt_fluid_type": "retrograde_condensate",
+  "opt_flow_type": "tubing",
+  "opt_separator": "single_stage",
+  "opt_water_vapour": "none",
+  "opt_artificial_lift": "none",
+  "sys_sens_on": false,
+  "eq_filter_on": false
+ },
+ "tables": {
+  "eq_survey": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "True Vertical Depth (ft)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      12000.0,
+      12000.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "True Vertical Depth (ft)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_surface": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Fitting",
+     "Pipe Length (ft)",
+     "TVD of End Point (ft)",
+     "Pipe Inside Diameter (in)",
+     "Pipe Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Fitting": "object",
+    "Pipe Length (ft)": "float64",
+    "TVD of End Point (ft)": "float64",
+    "Pipe Inside Diameter (in)": "float64",
+    "Pipe Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_downhole": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Measured Depth (ft)",
+     "Tubing Inside Diameter (in)",
+     "Tubing Inside Roughness (in)",
+     "Tubing Outside Diameter (in)",
+     "Tubing Outside Roughness (in)",
+     "Casing Inside Diameter (in)",
+     "Casing Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3
+    ],
+    "data": [
+     [
+      null,
+      "Xmas Tree",
+      0.0,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      11800.0,
+      3.992,
+      0.0018,
+      null,
+      null,
+      null,
+      null,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "Casing",
+      12000.0,
+      null,
+      null,
+      null,
+      null,
+      8.3,
+      0.0018,
+      1.0,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Measured Depth (ft)": "float64",
+    "Tubing Inside Diameter (in)": "float64",
+    "Tubing Inside Roughness (in)": "float64",
+    "Tubing Outside Diameter (in)": "float64",
+    "Tubing Outside Roughness (in)": "float64",
+    "Casing Inside Diameter (in)": "float64",
+    "Casing Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_geo": {
+   "__df__": {
+    "columns": [
+     "Formation Measured Depth (ft)",
+     "Formation Temperature (deg F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "data": [
+     [
+      0.0,
+      70.0
+     ],
+     [
+      12000.0,
+      300.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Formation Measured Depth (ft)": "float64",
+    "Formation Temperature (deg F)": "float64"
+   },
+   "index_name": "Point"
+  }
+ },
+ "extras": {
+  "prp_text": "*\n* Petroleum Experts - PRP Export File\n*\n*\n*Export File Signature\n*#PetexPRP\n*Export File Version\n*#17\n*\n* !!!!!!!!!!!!!!!!!!!! FILE DETAILS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n*  FILE NAME : K:\\IPM1250\\samples\\prosper\\T37_Retrograde_Condensate_EoS.prp\n*  Exported  : Wed Nov 11 13:15:18 2020\n* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n*\n*\n* Equation Type 0 - Peng Robinson 1 - SRK\n0 \n*\n*\n*\n* Number of Components   Number of Lumped Components - Set to 0 if No Lumping Present\n*\n10 0 \n*\n*\n*          Mole        Critical        Critical       Accentric       Molecular        Specific        Critical          Volume         Boiling        Parachor          OmegaA          OmegaB         Costald         Costald Component\n*       Percent     Temperature        Pressure          Factor          Weight         Gravity          Volume           Shift           Point                                                          Volume  Accentric Fact Name     \n*\n*       percent       degrees F            psig                      lb/lb.mole         Gravity       l/kg.mole                       degrees F                                                       l/kg.mole         \n* ------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- ---------\n*\n\n           0.31        -233.124         477.326           0.039           28.01           1.026      89.8001291               0         -320.37            60.4         0.45724        0.077796      90.1497354          0.0358 \"N2\" \n           2.33          87.672         1058.26           0.239           44.01           1.101      93.8998875               0         -109.23              78         0.45724        0.077796      93.8299662         0.23725 \"CO2\" \n          68.73        -103.716         615.435           0.011           16.04           0.415       99.200169               0         -258.81              70         0.45724        0.077796      99.3899553          0.0983 \"C1\" \n          12.37         20.8662         635.504           0.099            30.1           0.546      148.299879               0         -127.41             115         0.45724        0.077796      145.750251          0.1532 \"C2\" \n           5.01          23.255         335.154           0.153            44.1           0.585      203.000158               0          -43.71             155         0.45724        0.077796      200.079697          0.1825 \"C3\" \n           2.71         434.907         385.869           0.199            58.1             0.6      254.999728               0           31.17             200         0.45724        0.077796       254.38979          0.2008 \"NC4\" \n            1.4         445.786         385.403           0.251            72.2            0.63      304.000176               0           96.87             245         0.45724        0.077796      311.320058          0.2522 \"NC5\" \n           0.96         429.689         370.622           0.299            86.2           0.664       370.00023               0          155.73           282.5         0.45724        0.077796      368.199758         0.35069 \"C6\" \n           3.43         476.292         496.024          0.2904         121.581          0.7628      463.596709               0         228.102         369.594         0.45724        0.077796      552.899898          0.4916 \"C7::12\" \n           2.75         906.115          262.76          0.6232          252.73          0.8692      1000.66069               0         590.221         653.935         0.45724        0.077796      1198.93117         0.83279 \"C13::C35\" \n*\n* Binary Interaction Coefficients\n*\n* Only non-zero BICs are exported and imported\n* Number of non-zero BICs to be written or read\n*\n\n1 \n* Only first half of array is exported - values will be copied to second half\n*\n9 2          0.0273 \n*\n* Volume Shift Flag\n*\n0 \n*\n* OIL Viscosity Options\n*  LBC LBCCOEFF PED BEGGS BEAL PETROSKY BERGMAN EGBOG\n*\nLBC \n*\n* GAS Viscosity Options\n*  LBC LBCCOEFF PED LEE CARR\n*\nLBC \n*\n*Enthalpy Model \n*\n1 \n*\n*Enthalpy Model Shift Multiplier\n*\n              0               1 \n*\n*\n* CO2 Correction\n*\n1 \n*\n* Hydrate Model Options\n* MUNCK HCUBIC HCPA\n*\nMUNCK \n*\n* Use Hyd Inhibitor\n*\n1 \n*\n*\n* Use Alcohol Correction\n*\n1 \n*\n* Water Composition\n*\n* Number of Salts\n*\n0 \n*\n* Number of Inhibitors\n*\n0 \n*\n*\n* Water Cut\n* Use Gas Water Cut\n*\n0 \n*\n*Water Cut Oil\n              0 \n*Water Cut Gas\n              0 \n*\n*\n* Separators T, P\n*\n3 1 \n            100             500 \n             90             100 \n             60               0 \n*\n* Reference Temperature\n*\n            300 \n*\n*# End of file   \n*\n",
+  "prp_name": "T37_Retrograde_Condensate_EoS.prp"
+ }
+}

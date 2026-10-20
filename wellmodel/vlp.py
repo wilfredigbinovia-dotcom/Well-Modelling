@@ -137,6 +137,14 @@ def _sigma_water(p, t):
     return np.clip(70.0 - (np.asarray(t, float) - 74.0) * (17.0 / 206.0), 35.0, 75.0) + 0 * np.asarray(p, float)
 
 
+def sigma_water_gas(rho_w, rho_g):
+    """Water-gas interfacial tension (dyne/cm), Macleod-Sugden: sigma^(1/4) = 52.43 rho_w/18.015 - 4.549 rho_g
+    (densities g/cc; water parachor 52.4, gas 4.549 per unit molar mass) - fitted to PROSPER's water/gas IFT for
+    Tutorial 02 within 1.5 % (it sets the Duns & Ros film roughness in gas wells)."""
+    x = 52.43 * np.asarray(rho_w, float) / 62.428 / 18.015 - 4.549 * np.asarray(rho_g, float) / 62.428
+    return np.clip(np.maximum(x, 0.5) ** 4, 1.0, 100.0)
+
+
 def _water(inp, p, t):
     return bo.water_props(inp, np.maximum(p, 14.7), t)
 
@@ -211,15 +219,23 @@ def condensate_mw(api):
     return 6084.0 / max(api - 5.9, 1.0)
 
 
+WATER_SCF_PER_STB = 350.2 / 18.015 * 379.5     # scf of water vapour per STB of water
+
+
 class WetGasFluid:
     """Gas / condensate well with gas correlations. Condensate is carried as wellstream gas (wet gas);
     water is the liquid phase. Case keys: q (gas MMscf/d), wgr (STB/MMscf), cgr (STB/MMscf)."""
     kind = "gas"
 
-    def __init__(self, inp: bo.PVTInputs, cond_api=50.0):
+    def __init__(self, inp: bo.PVTInputs, cond_api=50.0, visc="lee", vapour=None, gpvt=None):
+        """visc: gas viscosity correlation ("lee" | "carr"). vapour: a gaspvt.GasPVTInputs (reservoir pressure and
+        temperature, salinity) to account for condensed water vapour - the gas carries the water it held at
+        reservoir conditions and drops what it can no longer hold as free water; None: all water is liquid."""
         self.inp, self.api = inp, cond_api
         self.go = 141.5 / (131.5 + cond_api)
         self.veq = 133000.0 * self.go / condensate_mw(cond_api)     # scf vapour per STB condensate
+        self.visc, self.vapour = visc, vapour
+        self.gpvt = gpvt                       # gaspvt.GasPVTInputs: its PVT match (Z, FVF, viscosity) is applied
 
     def wellstream_sg(self, cgr):
         r = np.where(cgr > 1e-9, 1e6 / np.maximum(cgr, 1e-9), np.inf)       # separator GOR scf/STB
@@ -238,11 +254,27 @@ class WetGasFluid:
         for g in np.unique(np.round(sg_, 4)):          # few distinct gravities: loop
             k = np.isclose(np.round(sg_, 4), g)
             inp.gas_sg = float(g)
+            if self.gpvt is not None and self.gpvt.match:
+                from .gaspvt import gas_props as _gp
+                z[k], bg[k], rho_g[k], mu_g[k] = _gp(self.gpvt, p_[k], t_[k], sg=float(g))
+                continue
             z[k], bg[k], rho_g[k], mu_g[k] = bo.gas_props(inp, p_[k], t_[k])
+            if self.visc == "carr":
+                from .gaspvt import carr_viscosity
+                tpc, ppc = bo.gas_pseudocritical(inp)
+                mu_g[k] = carr_viscosity(float(g), t_[k], np.maximum(p_[k], 14.696), tpc, ppc, inp.n2, inp.co2, inp.h2s)
         scf = q * 1e6 + q * cgr * self.veq
+        wliq = wgr
+        if self.vapour is not None:
+            from .gaspvt import water_split
+            wvap, wliq = water_split(self.vapour, p_, t_, wgr)
+            scf = scf + q * wvap * WATER_SCF_PER_STB             # water vapour travels with the gas
+            mvap = q * wvap * RB * 62.428                         # lb/d of water in the vapour
+            vg = np.maximum(scf * bg, 1e-12)
+            rho_g = rho_g * (scf - q * wvap * WATER_SCF_PER_STB) * bg / vg + mvap / vg
         bw, rho_w, mu_w = _water(self.inp, p, t)
-        return dict(ql=q * wgr * bw * RB / 86400, qg=scf * bg / 86400, rho_l=rho_w + 0 * rho_g, rho_g=rho_g,
-                    mu_l=mu_w + 0 * mu_g, mu_g=mu_g, sig=_sigma_water(p, t) + 0 * mu_g)
+        return dict(ql=q * wliq * bw * RB / 86400, qg=scf * bg / 86400, rho_l=rho_w + 0 * rho_g, rho_g=rho_g,
+                    mu_l=mu_w + 0 * mu_g, mu_g=mu_g, sig=sigma_water_gas(rho_w, rho_g))
 
     def mass_cp(self, case, hc: HeatCapacities):
         q, wgr, cgr = case["q"], np.maximum(case["wgr"], 0.0), np.maximum(case["cgr"], 0.0)
@@ -253,9 +285,11 @@ class WetGasFluid:
         return w / 24.0, (mg * hc.gas + mc * hc.oil + mw * hc.water) / np.maximum(w, 1e-12)
 
 
-def eos_grid(eos_fluid, p_max, t_min, t_max, n_p=26, n_t=6):
-    """Flash the reservoir fluid on a (T, p) grid. Returns dict of 2-D arrays (n_t, n_p)."""
-    ps = np.unique(np.concatenate([np.geomspace(14.7, p_max, n_p)]))
+def eos_grid(eos_fluid, p_max, t_min, t_max, n_p=80, n_t=6):
+    """Flash the reservoir fluid on a (T, p) grid. Returns dict of 2-D arrays (n_t, n_p). Pressures: half
+    geometric (low pressures), half linear (the tubing range) - the phase split and densities change fast near the
+    dew point, and a 26-point geometric grid moved the T37 condensate system rate by 3 %."""
+    ps = np.unique(np.round(np.concatenate([np.geomspace(14.7, p_max, n_p // 2), np.linspace(14.7, p_max, n_p // 2)]), 3))
     ts = np.linspace(t_min, t_max, n_t)
     keys = ("beta", "vL", "vV", "rhoL", "rhoV", "muL", "muV", "ift")
     out = {k: np.full((len(ts), len(ps)), np.nan) for k in keys}
@@ -317,6 +351,12 @@ class EOSTableFluid:
                     mu_l=fo * v["muL"] + (1 - fo) * mu_w, mu_g=v["muV"],
                     sig=fo * np.maximum(v["ift"], 0.5) + (1 - fo) * _sigma_water(np.exp(pp), tt))
 
+    def free_gas_mmscfd(self, p, t, case):
+        """Vapour in situ, as standard gas (MMscf/d)."""
+        x = np.array([[np.clip(t, *self.t_rng), np.log(np.clip(p, 14.7, self.p_max))]])
+        beta = float(np.clip(self.f["beta"](x)[0], 0, 1))
+        return float(np.atleast_1d(self._moles(case))[0]) * beta * 379.49 * 86400 / 1e6
+
     def mass_cp(self, case, hc: HeatCapacities):
         n = self._moles(case) * 86400                        # lbmol/d
         m_oil = n * self.stb * RB * self.rho_st if self.stb > 0 else 0 * n
@@ -328,13 +368,14 @@ class EOSTableFluid:
 
 
 # ============================================================ temperature
-def temperature_profile(path: FlowPath, w_lbh, cp, u):
-    """Fluid temperature at every node (cases x nodes); reservoir fluid enters at formation temperature."""
+def temperature_profile(path: FlowPath, w_lbh, cp, u, t_bottom=None):
+    """Fluid temperature at every node (cases x nodes); the fluid enters the bottom node at formation temperature,
+    or at t_bottom (F, scalar or per case) - e.g. the pump discharge temperature for the tubing above an ESP."""
     w = np.atleast_1d(np.asarray(w_lbh, float))
     cp = np.broadcast_to(np.asarray(cp, float), w.shape)
     n = len(path.md)
     T = np.empty((w.size, n))
-    T[:, -1] = path.t_form[-1]
+    T[:, -1] = path.t_form[-1] if t_bottom is None else np.broadcast_to(np.asarray(t_bottom, float), w.shape)
     for i in range(n - 2, -1, -1):
         L = path.seg_len[i]
         a = u * np.pi * path.d_ht[i] / np.maximum(w * cp, 1e-9)
@@ -394,8 +435,9 @@ def _broadcast_case(case):
 
 
 def traverse(path: FlowPath, fluid, whp, case, correlation="beggs_brill", p1=1.0, p2=1.0, u=8.0,
-             hc: HeatCapacities | None = None):
-    """Pressure (cases x nodes) and temperature (cases x nodes) from the wellhead down."""
+             hc: HeatCapacities | None = None, t_bottom=None):
+    """Pressure (cases x nodes) and temperature (cases x nodes) from the wellhead down. t_bottom: temperature of the
+    fluid entering at the bottom node (default the formation temperature there)."""
     hc = hc or HeatCapacities()
     case = dict(case)
     case["_whp"], case["_p1"], case["_p2"] = whp, p1, p2
@@ -403,7 +445,9 @@ def traverse(path: FlowPath, fluid, whp, case, correlation="beggs_brill", p1=1.0
     whp, p1, p2 = case.pop("_whp"), case.pop("_p1"), case.pop("_p2")
     corr = CORRELATIONS[correlation]
     w, cp = fluid.mass_cp(case, hc)
-    T = temperature_profile(path, w, cp, u)
+    if t_bottom is not None:
+        w = np.broadcast_to(np.asarray(w, float), whp.shape)
+    T = temperature_profile(path, w, cp, u, t_bottom)
     n = len(path.md)
     P = np.empty((whp.size, n))
     p = np.maximum(whp, 14.7)
@@ -428,7 +472,7 @@ OIL_TEST_COLUMNS = ["Test Point Date", "Test Point Comment", "Tubing Head Pressu
                     "Choke Size (64ths in)"]
 GAS_TEST_COLUMNS = ["Test Point Date", "Test Point Comment", "Tubing Head Pressure (psia)",
                     "Tubing Head Temperature (deg F)", "Water Gas Ratio (STB/MMscf)",
-                    "Separator Gas Oil Ratio (scf/STB)", "Gas Rate (MMscf/day)", "Gauge Depth (Measured) (feet)",
+                    "Condensate Gas Ratio (STB/MMscf)", "Gas Rate (MMscf/day)", "Gauge Depth (Measured) (feet)",
                     "Gauge Pressure (psia)", "Reservoir Pressure (psia)", "Manifold Pressure (psia)",
                     "Choke Size (64ths in)"]
 SURFACE_TEST_COLUMNS = ("Manifold Pressure (psia)", "Choke Size (64ths in)")   # optional: Match Surface
@@ -463,8 +507,11 @@ def clean_tests(df: pd.DataFrame, kind: str, path_top=None, path_bottom=None):
             rec["gor_free"] = _num(df, "GOR Free (scf/STB)").loc[r.name]
         else:
             rec["wgr"] = _num(df, "Water Gas Ratio (STB/MMscf)").loc[r.name]
-            sg = _num(df, "Separator Gas Oil Ratio (scf/STB)").loc[r.name]
-            rec["cgr"] = 1e6 / sg if np.isfinite(sg) and sg > 0 else 0.0
+            cgr = _num(df, "Condensate Gas Ratio (STB/MMscf)").loc[r.name]
+            if not np.isfinite(cgr):                      # older project files: separator GOR
+                sg = _num(df, "Separator Gas Oil Ratio (scf/STB)").loc[r.name]
+                cgr = 1e6 / sg if np.isfinite(sg) and sg > 0 else 0.0
+            rec["cgr"] = max(float(cgr), 0.0)
         name = f"Test {i}"
         if np.isnan(thp) or thp <= 0:
             issues.append(("error", f"{name}: enter the tubing head pressure."))

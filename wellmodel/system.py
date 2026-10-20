@@ -95,6 +95,33 @@ def _case_arrays(kind, p):
     return {"wgr": p["wgr"], "cgr": 1e6 / sg if sg and sg > 0 else 0.0}
 
 
+def _flu(kind, p, curve, q):
+    """Per-rate fluid arrays (wc/gor or wgr/cgr) for VLP rates q. A multilayer IPR with .mix(q) sets the producing
+    ratios from the layer contributions at each rate (PROSPER: water cut and GOR follow the IPR); otherwise they
+    are the case's constants."""
+    q = np.atleast_1d(np.asarray(q, float))
+    mix = getattr(curve, "mix", None) if curve is not None else None
+    if mix is not None:
+        m = mix(np.nan_to_num(q) * (1000.0 if kind == "gas" else 1.0))
+        if m:
+            return {k: np.asarray(v, float) for k, v in m.items()}
+    return {k: np.full(len(q), float(v)) for k, v in _case_arrays(kind, p).items()}
+
+
+def mixed_params(kind, params, curve, q):
+    """params with the producing ratios of a multilayer IPR at rate q (wc in %, gor; or wgr, sep_gor)."""
+    mix = getattr(curve, "mix", None) if curve is not None else None
+    if mix is None or q is None:
+        return params
+    m = mix(q * (1000.0 if kind == "gas" else 1.0))
+    if not m:
+        return params
+    if kind == "oil":
+        return {**params, "wc": float(m["wc"][0]) * 100.0, "gor": float(m["gor"][0])}
+    cgr = float(m["cgr"][0])
+    return {**params, "wgr": float(m["wgr"][0]), "sep_gor": 1e6 / cgr if cgr > 0 else 0.0}
+
+
 @dataclass
 class CaseResult:
     params: dict
@@ -142,7 +169,7 @@ class SurfaceSetup:
         return SF.with_choke_size(self.items, float(c)) if c is not None and SF.has_choke(self.items) else self.items
 
 
-def _wellhead(kind, path, fluid, plist, qlist, u, surface: SurfaceSetup | None, hc):
+def _wellhead(kind, path, fluid, plist, qlist, u, surface: SurfaceSetup | None, hc, curves=None):
     """Wellhead pressure arrays for (params, rates) pairs sharing a flow path and U. Without surface equipment the
     top node is the wellhead. With it, params['whp'] is the manifold pressure and the surface items are marched back
     to the wellhead at the wellhead temperature of each rate (batched by choke size)."""
@@ -156,8 +183,8 @@ def _wellhead(kind, path, fluid, plist, qlist, u, surface: SurfaceSetup | None, 
         q = np.concatenate([qlist[j] for j in js])
         flu = {}
         for j in js:
-            for k, v in _case_arrays(kind, plist[j]).items():
-                flu.setdefault(k, []).append(np.full(len(qlist[j]), float(v)))
+            for k, v in _flu(kind, plist[j], curves[j] if curves else None, qlist[j]).items():
+                flu.setdefault(k, []).append(v)
         case = {"q": q, **{k: np.concatenate(v) for k, v in flu.items()}}
         w, cp = fluid.mass_cp(case, hc)
         t_wh = V.temperature_profile(path, w, cp, u)[:, 0]
@@ -212,13 +239,14 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
     for (tid, u), idx in groups.items():
         path = paths.setdefault(tid, path_for(tid))
         qs, flu = [], {}
-        whps = _wellhead(kind, path, fluid, [prep[i][0] for i in idx], [prep[i][3] for i in idx], u, surface, hc)
+        whps = _wellhead(kind, path, fluid, [prep[i][0] for i in idx], [prep[i][3] for i in idx], u, surface, hc,
+                         [prep[i][1] for i in idx])
         for j, i in enumerate(idx):
-            p, _, _, rates = prep[i]
+            p, curve_i, _, rates = prep[i]
             qs.append(rates)
             pwh_store[i] = whps[j]
-            for k, v in _case_arrays(kind, p).items():
-                flu.setdefault(k, []).append(np.full(len(rates), float(v)))
+            for k, v in _flu(kind, p, curve_i, rates).items():
+                flu.setdefault(k, []).append(v)
         case = {"q": np.concatenate(qs), **{k: np.concatenate(v) for k, v in flu.items()}}
         P, _ = V.traverse(path, fluid, np.concatenate(whps), case, correlation, p1, p2, u, hc)
         bottom = P[:, -1]
@@ -267,11 +295,12 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
             path = paths[tid]
             q_arr = np.array([q0 for _, _, q0 in items])
             whp = np.concatenate(_wellhead(kind, path, fluid, [results[i].params for i, _, _ in items],
-                                           [np.array([q0]) for _, _, q0 in items], u, surface, hc))
+                                           [np.array([q0]) for _, _, q0 in items], u, surface, hc,
+                                           [results[i].ipr_curve for i, _, _ in items]))
             flu = {}
-            for i, _, _ in items:
-                for kk, v in _case_arrays(kind, results[i].params).items():
-                    flu.setdefault(kk, []).append(float(v))
+            for i, _, q0 in items:
+                for kk, v in _flu(kind, results[i].params, results[i].ipr_curve, [q0]).items():
+                    flu.setdefault(kk, []).append(float(v[0]))
             P, _ = V.traverse(path, fluid, whp, {"q": q_arr, **{kk: np.array(v) for kk, v in flu.items()}},
                               correlation, p1, p2, u, hc)
             wh_of = {i: w for (i, _, _), w in zip(items, whp)}
@@ -306,7 +335,7 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
     for r in results:                       # wellhead temperatures (independent of pressure)
         path = paths[r.params.get("tubing_id")]
         qq = np.append(r.rates, r.q if r.q is not None else r.rates[-1])
-        case = {"q": qq, **{k: np.full(len(qq), float(v)) for k, v in _case_arrays(kind, r.params).items()}}
+        case = {"q": qq, **_flu(kind, r.params, r.ipr_curve, qq)}
         w, cp = fluid.mass_cp(case, hc)
         tt = V.temperature_profile(path, w, cp, float(r.params["u"]))[:, 0]
         r.wht, r.wht_q = tt[:-1], (float(tt[-1]) if r.q is not None else None)
@@ -314,6 +343,9 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
             r.pwh_q = float(np.interp(r.q, r.rates, r.pwh))
     if node == "top":
         _top_node_inflow(results, paths, fluid, kind, correlation, p1, p2, hc, surface, scale)
+    for r in results:                       # multilayer IPR: the case's ratios become those at the solution rate
+        if r.q is not None and getattr(r.ipr_curve, "mix", None) is not None:
+            r.params = mixed_params(kind, r.params, r.ipr_curve, r.q)
     return results, paths
 
 
@@ -332,8 +364,8 @@ def _top_node_inflow(results, paths, fluid, kind, correlation, p1, p2, hc, surfa
             pbot[-1] = r.pwf if r.q is not None else np.nan
             qs.append(np.nan_to_num(q, nan=r.rates[0]))
             pb.append(pbot)
-            for k, v in _case_arrays(kind, r.params).items():
-                flu.setdefault(k, []).append(np.full(len(q), float(v)))
+            for k, v in _flu(kind, r.params, r.ipr_curve, qs[-1]).items():
+                flu.setdefault(k, []).append(v)
         case = {"q": np.concatenate(qs), **{k: np.concatenate(v) for k, v in flu.items()}}
         P, T = V.traverse_up(path, fluid, np.concatenate(pb), case, correlation, p1, p2, u, hc)
         top = P[:, 0]
@@ -366,7 +398,7 @@ def rate_table(kind, r: CaseResult) -> pd.DataFrame:
     """PROSPER-style table of the VLP/IPR curves of one case."""
     rows = []
     for i, q in enumerate(r.rates):
-        sr = surface_rates(kind, r.params, q)
+        sr = surface_rates(kind, mixed_params(kind, r.params, r.ipr_curve, q), q)
         row = {"Point": i + 1, **sr}
         if r.node == "top" and r.top_in is not None:
             row["Inflow pressure at top node (psia)"] = r.top_in[i]
@@ -384,6 +416,8 @@ def rate_table(kind, r: CaseResult) -> pd.DataFrame:
 # ---------------------------------------------------------------- details
 def _free_gas(fluid, kind, s, case, p, t):
     """Free gas at the node in MMscf/d: in-situ gas mass rate over the gas density at standard conditions."""
+    if hasattr(fluid, "free_gas_mmscfd"):
+        return fluid.free_gas_mmscfd(float(np.atleast_1d(p)[0]), float(np.atleast_1d(t)[0]), case)
     rho_g = float(s["rho_g"][0])
     qg = float(s["qg"][0])                                   # ft3/s in situ
     sg = getattr(getattr(fluid, "inp", None), "gas_sg", None)
@@ -393,7 +427,7 @@ def _free_gas(fluid, kind, s, case, p, t):
 
 
 def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, hc=None,
-                     surface: SurfaceSetup | None = None, comp=None):
+                     surface: SurfaceSetup | None = None, comp=None, t_bottom=None):
     """Traverse at the solution rate with a breakdown of pressure losses, velocities and restriction regimes.
     With surface equipment, det also carries the manifold and the surface losses, and the regimes dict the choke."""
     hc = hc or HeatCapacities()
@@ -402,7 +436,7 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
     surf_rows, surf_det = None, {}
     if surface is not None and surface.items:
         w, cp = fluid.mass_cp(case, hc)
-        t_wh = V.temperature_profile(path, w, cp, u)[:, 0]
+        t_wh = V.temperature_profile(path, w, cp, u, t_bottom)[:, 0]
         pwh, surf_rows, t_man, notes = SF.wellhead_pressure(
             surface.items_for(params), fluid, kind, np.array([whp]), case, t_wh, surface.correlation, hc,
             surface.t_surround, surface.u, surface.choke_method, surface.cd, p2=surface.friction, detail=True)
@@ -411,7 +445,7 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         surf_det = {"Manifold pressure (psia)": whp, "Manifold temperature (°F)": float(t_man[0]),
                     "dP choke (psi)": dpc, "dP flowline and fittings (psi)": dpl}
         whp = float(pwh[0])
-    P, T = V.traverse(path, fluid, whp, case, correlation, p1, p2, u, hc)
+    P, T = V.traverse(path, fluid, whp, case, correlation, p1, p2, u, hc, t_bottom)
     P, T = P[0], T[0]
     corr = CORRELATIONS[correlation]
     rows, dpg, dpf, transit = [], 0.0, 0.0, 0.0

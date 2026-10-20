@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from wellmodel import blackoil as bo
 from wellmodel import eos as wm_eos
 import inspect
+import dataclasses
 
 from scipy.optimize import brentq
 
@@ -38,6 +39,9 @@ from wellmodel import liftcurves as wlc
 from wellmodel import gradient as wgrad
 from wellmodel import choke as wchoke
 from wellmodel import gaslift as wgl
+from wellmodel import intermittent as wigl
+from wellmodel import esp as wesp
+from wellmodel import gaspvt as wgp
 from wellmodel import complementary as wcx
 from wellmodel import units as wu
 from wellmodel import ui_units as wuu
@@ -193,6 +197,15 @@ def num(col, label, key, default, mn=None, mx=None, step=None, fmt=None, help=No
 
 def _fmt_list(vals):
     return ", ".join(f"{x:.6g}" for x in vals)
+
+
+def parse_values(text):
+    out = []
+    for tok in str(text).replace(";", ",").split(","):
+        tok = tok.strip()
+        if tok:
+            out.append(float(tok))
+    return out
 
 
 def num_list(col, label, key, default_text, note="comma separated", help=None):
@@ -414,6 +427,11 @@ CAPTIONS = {
                      "pre_packed_screen": "Screen with resin-bonded gravel layer",
                      "wire_wrapped_screen": "Wire wrapped around a base pipe",
                      "slotted_liner": "Pipe with machined slots"},
+    "separator": {"single_stage": "Surface rates at one separator stage"},
+    "water_vapour": {"none": "Water produced as liquid only",
+                     "calculate": "Dry and wet gas: water vaporised in the gas condenses up the well"},
+    "artificial_lift": {"none": "Natural flow (gas lift is designed in the Design tab)",
+                        "esp": "Pump in the well: Equipment, VLP at the pump discharge, Calculation"},
 }
 STATUS_ICON = {wopt.MODELLED_NOW: "✅ Modelled", wopt.LUMPED_IN_PI: "↪️ Absorbed in matched PI",
                wopt.PVT_ONLY: "🧪 PVT only - flow calculations not built yet",
@@ -424,8 +442,8 @@ with tabs[0]:
     st.caption("Describe the well first. These choices decide what the setup tabs ask for "
                "and which calculations apply.")
     sel_opts = {}
-    groups = [("Fluid description", ["fluid_type", "method"]),
-              ("Well", ["well_type", "flow_type"]),
+    groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour"]),
+              ("Well", ["well_type", "flow_type", "artificial_lift"]),
               ("Completion", ["completion", "sand_control"])]
     cols = st.columns(3, gap="large")
     for col, (title, fields) in zip(cols, groups):
@@ -808,26 +826,191 @@ if ss.pop("_proj_rematch", False):
     except (ValueError, KeyError, TypeError) as e:
         ss["_proj_msg"] = ("warning", f"PVT match could not be repeated: {e}")
 
+GAS_MATCH_COLS = ["Temperature (deg F)", "Pressure (psia)", "Z factor", "Gas viscosity (cp)", "Gas FVF (ft3/scf)"]
+
+
+def gas_match_tables():
+    """Match data from the PVT tab grouped by temperature: [(T, DataFrame)]."""
+    df = ss.get("_tables", {}).get("pvt_gas_match")
+    if df is None:
+        df = ss.get("pvt_gas_match")
+    if df is None or not len(df):
+        return []
+    df = df.copy()
+    for c in GAS_MATCH_COLS:
+        df[c] = pd.to_numeric(df.get(c), errors="coerce")
+    df = df[np.isfinite(df["Temperature (deg F)"]) & np.isfinite(df["Pressure (psia)"])]
+    return [(float(t), g) for t, g in df.groupby("Temperature (deg F)")]
+
+
+def gas_pvt_inputs(opts_now=None, matched=None) -> wgp.GasPVTInputs:
+    """Dry and wet gas PVT inputs from the PVT tab (pressures psia internally), with the PVT match applied when
+    'Apply match parameters' is on (matched=False: the correlations as published)."""
+    gi = _gas_pvt_inputs_raw()
+    use = bool(val("pvt_gas_use_match", True)) if matched is None else matched
+    tabs_ = gas_match_tables() if use else []
+    if tabs_:
+        try:
+            gi.match = wgp.match_gas(gi, tabs_)
+        except (ValueError, np.linalg.LinAlgError):
+            gi.match = {}
+    return gi
+
+
+def _gas_pvt_inputs_raw() -> wgp.GasPVTInputs:
+    return wgp.GasPVTInputs(
+        gas_sg=float(val("pvt_gas_sg", 0.70)), sep_p=float(val("pvt_sep_p", 214.7)) - 14.696,
+        cgr=float(val("pvt_cgr", 0.0)), cond_api=float(val("pvt_cond_api", 50.0)), wgr=float(val("pvt_wgr", 0.0)),
+        salinity_ppm=float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"])), h2s=float(val("pvt_h2s", 0.0)),
+        co2=float(val("pvt_co2", 0.0)), n2=float(val("pvt_n2", 0.0)),
+        visc="carr" if val("pvt_gvisc", "Lee et al") == "Carr et al" else "lee",
+        t_res=float(val("pvt_t", 200.0)), p_res=float(val("pvt_pres", 3014.7)) - 14.696)
+
+
+def gas_vapour_on(o_=None):
+    o_ = o_ or ss.get("options")
+    return bool(o_ is not None and getattr(o_, "water_vapour", "none") == "calculate"
+                and o_.fluid_type == "dry_wet_gas" and o_.method == "black_oil")
+
+
+def gas_pvt_panel(opts_now):
+    """PROSPER PVT | Input Data for Dry and Wet Gas (black oil)."""
+    st.subheader("Input data")
+    st.caption("Condensate drops out at the separator only: in the well it is carried as an equivalent gas "
+               "(wellstream gravity from the separator gas, CGR and condensate gravity) - a single gas phase plus "
+               "free water. Z: Sutton pseudo-criticals with Wichert-Aziz impurity correction and Dranchuk-Abou-Kassem "
+               "(PROSPER: Standing-Katz with Wichert-Aziz). For liquid dropout in the well choose Retrograde "
+               "condensate.")
+    c = st.columns(4)
+    num(c[0], "Gas Gravity (sp. gravity)", "pvt_gas_sg", 0.70, 0.55, 2.0, 0.01, "%.3f",
+        help="Separator gas gravity (air = 1).")
+    num(c[1], "Separator Pressure (psia)", "pvt_sep_p", 214.7, 14.7, 5000.0, 10.0)
+    num(c[2], "Condensate Gas Ratio (STB/MMscf)", "pvt_cgr", 0.0, 0.0, 1e4, 1.0)
+    num(c[3], "Condensate Gravity (API)", "pvt_cond_api", 50.0, 20.0, 90.0, 0.5)
+    c = st.columns(4)
+    num(c[0], "Water Gas Ratio (STB/MMscf)", "pvt_wgr", 0.0, 0.0, 1e5, 1.0)
+    num(c[1], "Water Salinity (ppm)", "pvt_sal", INPUT_DEFAULTS["pvt_sal"], 0.0, 300000.0, 1000.0, "%.0f")
+    sel(c[2], "Gas Viscosity Correlation", ["Lee et al", "Carr et al"], "pvt_gvisc",
+        help="Lee, Gonzalez & Eakin (default, wider range) or Carr, Kobayashi & Burrows.")
+    c = st.columns(4)
+    num(c[0], "Mole Percent H2S (percent)", "pvt_h2s", 0.0, 0.0, 100.0, 0.1)
+    num(c[1], "Mole Percent CO2 (percent)", "pvt_co2", 0.0, 0.0, 100.0, 0.1)
+    num(c[2], "Mole Percent N2 (percent)", "pvt_n2", 0.0, 0.0, 100.0, 0.1)
+    inp = gas_pvt_inputs(opts_now)
+    c[3].metric("Wellstream gas gravity", f"{float(inp.wellstream_sg()):.4f}")
+    for e in inp.check():
+        st.error(e)
+    st.subheader("Reservoir data")
+    c = st.columns(4)
+    num(c[0], "Reservoir Temperature (deg F)", "pvt_t", 200.0, 40.0, 500.0, 1.0)
+    num(c[1], "Reservoir Pressure (psia)", "pvt_pres", 3014.7, 14.7, 30000.0, 10.0)
+    inp = gas_pvt_inputs(opts_now)
+    if gas_vapour_on(opts_now):
+        wmin = wgp.minimum_wgr(inp)
+        c[2].metric("Minimum WGR", f"{wmin:.5f} STB/MMscf",
+                    help="Water vaporised in the gas at reservoir pressure and temperature (McKetta-Wehe with a "
+                         "salinity correction). A smaller WGR in a calculation is replaced by it.")
+        with st.expander("Water vapour plot"):
+            fig, ax = plt.subplots(figsize=(8, 4.2))
+            pp = np.linspace(400.0, max(inp.p_res, 1000.0), 60) + 14.696
+            for i_, tt in enumerate(np.linspace(60.0, inp.t_res, 7)):
+                ax.plot(pp - 14.696, wgp.saturated_wgr(pp, tt, inp.salinity_ppm), color=wplt.SERIES[i_ % 4],
+                        lw=1.5, label=f"{tt:.1f} °F")
+            ax.set_xlabel("Pressure (psig)")
+            ax.set_ylabel("Saturated WGR (STB/MMscf)")
+            ax.grid(alpha=0.3)
+            ax.legend(fontsize=8, ncol=2)
+            fig.tight_layout()
+            st.pyplot(fig, clear_figure=True)
+    else:
+        c[2].caption("Condensed water vapour is off (Options summary: Water vapour).")
+    st.subheader("Matching")
+    st.caption("Laboratory (flash) data at one or more temperatures. Each correlation is fitted as Parameter 1 x "
+               "correlation + Parameter 2 (least squares): Z factor, gas FVF (from the matched Z) and both viscosity "
+               "correlations - the one selected above is used. Leave cells blank where there is no data.")
+    if "pvt_gas_match" not in ss:
+        ss["pvt_gas_match"] = pd.DataFrame({c_: pd.Series([np.nan] * 8, dtype=float) for c_ in GAS_MATCH_COLS},
+                                           index=pd.RangeIndex(1, 9, name="Point"))
+    track("pvt_gas_match", st.data_editor(ss["pvt_gas_match"], key=f"pvt_gas_match_ed_{ss.get('_ver_pvt_gas_match', 0)}",
+                                          num_rows="dynamic", width="stretch", column_config={
+        c_: st.column_config.NumberColumn(c_, format="%g") for c_ in GAS_MATCH_COLS}))
+    mt = gas_match_tables()
+    flag(st.toggle, "Apply match parameters", "pvt_gas_use_match", True,
+         help="On: every calculation (PVT table, IPR, VLP, system) uses the matched correlations.")
+    if mt:
+        raw = gas_pvt_inputs(opts_now, matched=False)
+        mres = wgp.match_gas(raw, mt)
+        rows_ = [{"Property": wgp.MATCH_PROPS[k], "Parameter 1": m_.p1, "Parameter 2": m_.p2,
+                  "Std deviation (relative)": m_.std, "Error before match (%)": m_.raw_error_pct, "Points": m_.n}
+                 for k, m_ in mres.items()]
+        if val("pvt_gas_use_match", True):
+            st.success("PVT is matched - the correlations below are applied with these parameters.")
+            dev_ = wgp.fvf_consistency(dataclasses.replace(raw, match=mres))
+            if dev_ > 0.10:
+                st.warning(f"The matched gas FVF departs from the matched Z (Bg = 0.02827 Z T/p) by up to "
+                           f"{dev_:.0%} below reservoir pressure. The FVF sets the gas volume and density in the "
+                           f"well, so this changes the friction loss and the rate - check the lab FVF data.")
+        st.dataframe(pd.DataFrame(rows_).style.format({"Parameter 1": "{:.5f}", "Parameter 2": "{:.4e}",
+                                                       "Std deviation (relative)": "{:.3e}",
+                                                       "Error before match (%)": "{:.3f}"}),
+                     hide_index=True, width="stretch")
+        mi = dataclasses.replace(raw, match=mres)
+        fig, axs = plt.subplots(1, 3, figsize=(15, 3.8))
+        for i_, (tt, g_) in enumerate(mt):
+            pp = np.linspace(max(14.7, g_["Pressure (psia)"].min() * 0.5), g_["Pressure (psia)"].max() * 1.05, 60)
+            r0 = wgp.raw_props(raw, pp, np.full(pp.size, tt))
+            r1 = wgp.gas_props(mi, pp, np.full(pp.size, tt))
+            mu0 = r0[4] if raw.visc == "carr" else r0[3]
+            for ax, col, y0, y1 in ((axs[0], "Z factor", r0[0], r1[0]), (axs[1], "Gas viscosity (cp)", mu0, r1[3]),
+                                    (axs[2], "Gas FVF (ft3/scf)", r0[1], r1[1])):
+                cc = wplt.SERIES[i_ % 4]
+                ax.plot(pp, y0, color=cc, lw=1.1, ls="--", label=f"{tt:g} °F correlation")
+                ax.plot(pp, y1, color=cc, lw=1.8, label=f"{tt:g} °F matched")
+                ax.scatter(g_["Pressure (psia)"], g_[col], color=wplt.INK, s=28, zorder=4, label="lab data" if i_ == 0 else None)
+                ax.set_title(col, fontsize=9)
+                ax.set_xlabel("Pressure (psia)", fontsize=8)
+                ax.grid(alpha=0.3)
+        axs[0].legend(fontsize=7)
+        axs[2].set_yscale("log")
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+    else:
+        st.caption("No match data - the correlations are used as published.")
+    inp = gas_pvt_inputs(opts_now)
+    st.subheader("Calculate")
+    c = st.columns(4)
+    temps = num_list(c[0], "Temperatures (°F)", "pvt_gas_temps", f"60, {inp.t_res:g}", "comma separated")
+    p_lo = num(c[1], "First pressure (psia)", "pvt_gas_p0", 29.7, 14.7, 30000.0, 10.0)
+    p_hi = num(c[2], "Last pressure (psia)", "pvt_gas_p1", max(inp.p_res + 14.696, 1000.0), 14.7, 30000.0, 10.0)
+    npts = int(num(c[3], "Number of pressures", "pvt_gas_n", 20.0, 2.0, 100.0, 1.0, "%.0f"))
+    if temps and p_hi > p_lo:
+        tab = wgp.pvt_table(inp, temps, np.linspace(p_lo, p_hi, npts) - 14.696)
+        tab.insert(1, "Pressure (psia)", tab["Pressure (psig)"] + 14.696)
+        tab = tab.drop(columns="Pressure (psig)")
+        if not gas_vapour_on(opts_now):
+            tab = tab.drop(columns="Free water (STB/MMscf)")
+        fig, axs = plt.subplots(1, 4, figsize=(15, 3.8))
+        for i_, tt in enumerate(sorted(set(tab["Temperature (°F)"]))):
+            d_ = tab[tab["Temperature (°F)"] == tt]
+            for ax, col in zip(axs, ("Z factor", "Gas FVF (ft3/scf)", "Gas viscosity (cp)", "Gas density (lb/ft3)")):
+                ax.plot(d_["Pressure (psia)"], d_[col], color=wplt.SERIES[i_ % 4], lw=1.6, label=f"{tt:g} °F")
+                ax.set_title(col, fontsize=9)
+                ax.set_xlabel("Pressure (psia)", fontsize=8)
+                ax.grid(alpha=0.3)
+        axs[0].legend(fontsize=8)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+        st.dataframe(tab.style.format(precision=5), hide_index=True, width="stretch", height=320)
+        st.download_button("Download PVT table (CSV)", tab.to_csv(index=False).encode(), "gas_pvt.csv")
+
+
 with tabs[1]:
     st.header("PVT Input Data")
     opts_now = ss.get("options")
     if opts_now is not None and opts_now.method == "eos":
         render_eos(opts_now)
     elif opts_now is not None and opts_now.fluid_type != "oil":
-        st.subheader("Input parameters")
-        st.caption(f"Gas correlations for {opts_now.label('fluid_type').lower()}: Sutton pseudo-criticals with "
-                   "Wichert-Aziz impurity correction, Dranchuk-Abou-Kassem Z and Lee-Gonzalez-Eakin viscosity. "
-                   "For condensate dropout, choose **Equation of state** in the Options summary and import a PRP file.")
-        c = st.columns(4)
-        num(c[0], "Gas Gravity (sp. gravity)", "pvt_gas_sg", 0.70, 0.55, 2.0, 0.01, "%.3f")
-        num(c[1], "Mole Percent H2S (percent)", "pvt_h2s", 0.0, 0.0, 100.0, 0.1)
-        num(c[2], "Mole Percent CO2 (percent)", "pvt_co2", 0.0, 0.0, 100.0, 0.1)
-        num(c[3], "Mole Percent N2 (percent)", "pvt_n2", 0.0, 0.0, 100.0, 0.1)
-        c = st.columns(4)
-        num(c[0], "Reservoir temperature (deg F)", "pvt_t", 200.0, 40.0, 500.0, 1.0)
-        num(c[1], "Condensate Gravity (API)", "pvt_cond_api", 50.0, 20.0, 90.0, 0.5,
-            help="Stock-tank condensate gravity. Used to carry condensate as wellstream gas in the tubing (VLP).")
-        num(c[2], "Water Salinity (ppm)", "pvt_sal", INPUT_DEFAULTS["pvt_sal"], 0.0, 300000.0, 1000.0, "%.0f")
+        gas_pvt_panel(opts_now)
     else:
         # ------------------------------------------------------- fluid inputs
         st.subheader("Input parameters")
@@ -1026,22 +1209,29 @@ def gas_pvt_fn(opts_now, t_f):
         f = wm_eos.EOSFluid(eos_parse(ss["prp_text"], ss.get("prp_name", "")))
 
         def mu_z(p):
-            out = [f.phase_props(f.z, float(x), t_f) for x in np.atleast_1d(p)]
+            # above the dew point the reservoir fluid; below it the equilibrium gas (vapour) phase, as PROSPER's
+            # M(P) for a condensate (Tutorial 37: M(P) within 0.4 %, AOF within 0.2 %)
+            out = []
+            for x in np.atleast_1d(p):
+                r = f.flash(float(x), t_f)
+                out.append(r.vapour if r.phases == "2P" and r.vapour is not None
+                           else f.phase_props(f.z, float(x), t_f))
             return np.array([o.viscosity for o in out]), np.array([o.z for o in out])
-        return mu_z, float(f.z @ f.mw / 28.9625), f"Equation of state ({ss.get('prp_name', 'PRP file')}), reservoir fluid"
-    sg = float(val("pvt_gas_sg", 0.70))
-    inp = bo.PVTInputs(rsb=1, api=40, gas_sg=sg, h2s=float(val("pvt_h2s", 0.0)), co2=float(val("pvt_co2", 0.0)),
-                       n2=float(val("pvt_n2", 0.0)))
+        return mu_z, float(f.z @ f.mw / 28.9625), (f"Equation of state ({ss.get('prp_name', 'PRP file')}): reservoir "
+                                                   "fluid above the dew point, equilibrium gas below it")
+    gi = gas_pvt_inputs(opts_now)
+    sg = float(gi.wellstream_sg())
 
     def mu_z(p):
-        z, _, _, mu = bo.gas_props(inp, p, t_f)
+        z, _, _, mu = wgp.gas_props(gi, p, np.full(np.shape(np.atleast_1d(p)), float(t_f)))
         return np.asarray(mu, float), np.asarray(z, float)
-    return mu_z, sg, "Gas correlations from gas gravity (Sutton, Dranchuk-Abou-Kassem, Lee-Gonzalez-Eakin)"
+    return mu_z, sg, (f"Gas correlations, wellstream gravity {sg:.4f} (Sutton + Wichert-Aziz, Dranchuk-Abou-Kassem, "
+                      f"{wgp.VISC_CORRELATIONS[gi.visc]})")
 
 
 
 # ---------------------------------------------------------------- IPR helpers
-VERTICAL_SKIN_MODELS = {"Darcy", "Fetkovich", "Jones", "Transient", "Back pressure", "Dual Porosity",
+VERTICAL_SKIN_MODELS = {"Darcy", "Fetkovich", "Jones", "Transient", "Back pressure", "Dual Porosity", "Petroleum Experts",
                         "Multiphase Pseudo Pressure"}
 HORIZONTAL_MODELS = {"Horizontal Well - No Flow Boundaries", "Horizontal Well - Constant Pressure Upper Boundary",
                      "Horizontal Well - Transverse Vertical Fractures",
@@ -1511,6 +1701,135 @@ def multilayer_table(fluid, with_dp):
         "IPR model": st.column_config.SelectboxColumn(options=models)}))
 
 
+ML_DP_OIL = ["Type", "IPR model", "MD bottom (ft)", "TVD bottom (ft)", "Layer pressure (psia)", "Flowing radius (ft)",
+             "Roughness (in)", "GOR (scf/STB)", "Oil gravity (API)", "Gas gravity", "Water cut (%)", "PI (STB/d/psi)",
+             "Permeability (md)", "Drainage area (acres)", "Dietz shape factor", "Wellbore radius (ft)", "Skin"]
+ML_DP_GAS = ["Type", "IPR model", "MD bottom (ft)", "TVD bottom (ft)", "Layer pressure (psia)", "Flowing radius (ft)",
+             "Roughness (in)", "CGR (STB/MMscf)", "WGR (STB/MMscf)", "Gas gravity", "C (Mscf/d/psi^2n)", "n",
+             "Permeability (md)", "Drainage area (acres)", "Dietz shape factor", "Wellbore radius (ft)", "Skin"]
+
+
+def ml_dp_example(gas):
+    """PROSPER Tutorial 11 layers (oil); a three-layer gas example."""
+    nan = np.nan
+    if not gas:
+        rows = [("Perforated", "Darcy", 9305, 9025, 5214.7, 0.3175, 0.0006, 800, 37, 0.75, 5.0, nan, 71, 400, 31.6, 0.354, 2.4),
+                ("Blank", None, 9318, 9035, nan, 0.3175, 0.0006, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan),
+                ("Perforated", "Darcy", 9350, 9060, 5334.7, 0.3175, 0.0006, 800, 37, 0.75, 0.5, nan, 65, 400, 31.6, 0.354, 1.0),
+                ("Blank", None, 9370, 9075, nan, 0.3175, 0.0006, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan),
+                ("Perforated", "Darcy", 9405, 9100, 5339.7, 0.3175, 0.0006, 800, 37, 0.76, 7.4, nan, 100, 400, 31.6, 0.354, 1.5)]
+        cols = ML_DP_OIL
+    else:
+        rows = [("Perforated", "Jones", 9305, 9025, 4014.7, 0.3175, 0.0006, 10, 2, 0.70, nan, nan, 20, 400, 31.6, 0.354, 2.0),
+                ("Blank", None, 9318, 9035, nan, 0.3175, 0.0006, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan),
+                ("Perforated", "C and n", 9350, 9060, 4114.7, 0.3175, 0.0006, 15, 5, 0.70, 0.01, 0.85, nan, nan, nan, nan, nan)]
+        cols = ML_DP_GAS
+    return pd.DataFrame(rows, columns=cols, index=pd.RangeIndex(1, len(rows) + 1, name="Layer"))
+
+
+def multilayer_dp_ui(o, gas, t_f, pvt, gasp):
+    """PROSPER System | Inflow Performance | MultiLayer - dP Loss in WellBore. Returns the IPR curve at TOP."""
+    st.caption("Each perforated layer has its own pressure (at the layer bottom), inflow model and PVT "
+               + ("(GOR, oil and gas gravity, water cut)" if not gas else "(CGR, WGR, gas gravity)") +
+               ". The well is marched up from the deepest layer: each layer adds its inflow at the pressure at its "
+               "bottom and the commingled stream loses pressure between the layers by the multiphase correlation "
+               "below, in a pipe of each layer's flowing radius (0.5 x the ID of the pipe from the node above). "
+               "Roughness 0 turns the wellbore losses off. Darcy/Jones thickness = TVD from the node above. "
+               "Water cut and GOR in the system calculation then follow the layer contributions at each rate.")
+    c = st.columns(4)
+    top_md = num(c[0], "TOP measured depth (ft)", "ipr_top_md", 9275.0, 0.0, 4e4, 10.0)
+    top_tvd = num(c[1], "TOP true vertical depth (ft)", "ipr_top_tvd", 9000.0 if not gas else 9000.0, 0.0, 4e4, 10.0)
+    corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+    mcorr = sel(c[2], "Wellbore correlation", corr_opts, "ipr_ml_corr", format_func=VLP_LABELS.get,
+                help="Multiphase correlation for the pressure loss between the layers.")
+    c[3].button("Load Tutorial 11 layers" if not gas else "Load example layers", key="ipr_ml_ex",
+                on_click=lambda: (ss.__setitem__(f"ipr_mldp_{'gas' if gas else 'oil'}", ml_dp_example(gas)),
+                                  ss.__setitem__("_ver_mldp", ss.get("_ver_mldp", 0) + 1)))
+    key = f"ipr_mldp_{'gas' if gas else 'oil'}"
+    if key not in ss:
+        ss[key] = ml_dp_example(gas)
+    cols = ML_DP_GAS if gas else ML_DP_OIL
+    tab_ = track(key, st.data_editor(ss[key], key=f"{key}_ed_{ss.get('_ver_mldp', 0)}", num_rows="dynamic",
+                                     width="stretch", column_config={
+        "Type": st.column_config.SelectboxColumn(options=["Perforated", "Blank"], required=True),
+        "IPR model": st.column_config.SelectboxColumn(options=["C and n", "Jones"] if gas else ["PI", "Darcy"])}))
+    p_max = float(np.nanmax(pd.to_numeric(tab_["Layer pressure (psia)"], errors="coerce").to_numpy(float),
+                            initial=1000.0)) * 1.3
+    fluid_, why = vlp_fluid(o, "gas" if gas else "oil", p_max, float(t_f) - 20, float(t_f) + 20)
+    if fluid_ is None:
+        raise ValueError(why)
+    layers, prev_tvd = [], float(top_tvd)
+    f_ = lambda row, k_, d=np.nan: float(row[k_]) if k_ in row and pd.notna(row[k_]) else d
+    for i, row in tab_.reset_index(drop=True).iterrows():
+        if pd.isna(row.get("MD bottom (ft)")) or pd.isna(row.get("TVD bottom (ft)")):
+            continue
+        L = {"type": row.get("Type") or "Blank", "md": f_(row, "MD bottom (ft)"), "tvd": f_(row, "TVD bottom (ft)"),
+             "r_flow": f_(row, "Flowing radius (ft)", 0.25), "rough_in": f_(row, "Roughness (in)", 0.0)}
+        h = max(L["tvd"] - prev_tvd, 0.1)
+        prev_tvd = L["tvd"]
+        if L["type"] == "Perforated":
+            if pd.isna(row.get("Layer pressure (psia)")):
+                raise ValueError(f"Layer {i + 1}: enter the layer pressure.")
+            L.update(pr=f_(row, "Layer pressure (psia)"), model=row.get("IPR model") or ("C and n" if gas else "PI"),
+                     h=h, skin=f_(row, "Skin", 0.0))
+            darcy_kw = dict(k=f_(row, "Permeability (md)"), area=f_(row, "Drainage area (acres)", 400.0),
+                            ca=f_(row, "Dietz shape factor", 31.6), rw=f_(row, "Wellbore radius (ft)", 0.354))
+            if not gas:
+                L.update(gor=f_(row, "GOR (scf/STB)", float(pvt.get("gor") or 0.0) if pvt else 0.0),
+                         wc=f_(row, "Water cut (%)", 0.0) / 100.0)
+                if pd.notna(row.get("Oil gravity (API)")):
+                    L["api"] = f_(row, "Oil gravity (API)")
+                if pd.notna(row.get("Gas gravity")):
+                    L["gas_sg"] = f_(row, "Gas gravity")
+                if L["model"] == "Darcy":
+                    if not np.isfinite(darcy_kw["k"]):
+                        raise ValueError(f"Layer {i + 1}: Darcy needs the permeability.")
+                    L.update(darcy_kw)
+                else:
+                    if not np.isfinite(f_(row, "PI (STB/d/psi)")):
+                        raise ValueError(f"Layer {i + 1}: enter the PI.")
+                    L["j"] = f_(row, "PI (STB/d/psi)")
+            else:
+                L.update(cgr=f_(row, "CGR (STB/MMscf)", 0.0), wgr=f_(row, "WGR (STB/MMscf)", 0.0))
+                sg_ = f_(row, "Gas gravity", gasp["sg"])
+                if pd.notna(row.get("Gas gravity")):
+                    L["gas_sg"] = sg_
+                if L["model"] == "Jones":
+                    if not np.isfinite(darcy_kw["k"]):
+                        raise ValueError(f"Layer {i + 1}: Jones needs the permeability.")
+                    mu_, z_ = (float(v[0]) for v in gasp["mu_z"](np.array([L["pr"]])))
+                    a_, b_, _ = ipr.jones_gas_coeffs(darcy_kw["k"], h, darcy_kw["area"], darcy_kw["ca"], darcy_kw["rw"],
+                                                     L["skin"], t_f, mu_, z_, sg_, h)
+                    L.update(a=a_, b=b_)
+                else:
+                    if not np.isfinite(f_(row, "C (Mscf/d/psi^2n)")):
+                        raise ValueError(f"Layer {i + 1}: enter C and n.")
+                    L.update(c=f_(row, "C (Mscf/d/psi^2n)"), n=f_(row, "n", 1.0))
+        layers.append(L)
+    args_ = ("gas" if gas else "oil", layers, top_md, top_tvd, float(t_f), fluid_, mcorr)
+    kw_ = {"n": 25 if gas else 30}
+    sig_ = repr((repr(layers), top_md, top_tvd, mcorr, float(t_f), why, repr(getattr(fluid_, "m", None)),
+                 repr(getattr(fluid_, "inp", None)), getattr(fluid_, "api", None)))
+    hit = ss.get("_mldp_cache")
+    if hit is not None and hit[0] == sig_:
+        curve = hit[1]
+        ss["ipr_recipe"] = (_ipr2_mod.multilayer_wellbore, args_, kw_)
+    else:
+        with st.spinner("Marching the layers..."):
+            curve = ipr2.multilayer_wellbore(*args_, **kw_)
+        ss["_mldp_cache"] = (sig_, curve)
+    eqd_ = ss.get("equipment") or {}
+    try:
+        bot_ = float(eqd_["downhole"][1]["MD bottom (ft)"].max())
+        if abs(bot_ - top_md) > 1.0:
+            st.warning(f"TOP is at {top_md:,.0f} ft MD but the deepest equipment is at {bot_:,.0f} ft MD - the system "
+                       "calculation joins the VLP to this IPR at the bottom of the equipment, so set TOP to that depth "
+                       "(as PROSPER expects).")
+    except (KeyError, TypeError, IndexError):
+        pass
+    return curve
+
+
 def zones_table():
     key = "ipr_zones"
     if key not in ss:
@@ -1522,6 +1841,47 @@ def zones_table():
                                index=pd.RangeIndex(1, 7, name="Zone (heel → toe)"))
     return track(key, st.data_editor(ss[key], key=key + "_ed", num_rows="dynamic", width="stretch", column_config={
         "Type": st.column_config.SelectboxColumn(options=["Perforated", "Open Hole", "Blank"], required=True)}))
+
+
+@st.cache_data(show_spinner=False)
+def eos_vlp_grid(text, name, p_max, t_min, t_max):
+    f = wm_eos.EOSFluid(wm_eos.parse_prp(text, name))
+    grid = wvlp.eos_grid(f, p_max, t_min, t_max)
+    sep = f.separator_train()
+    return grid, float(f.z @ f.mw), float(sep["stages"]["Gas (scf per lbmol feed)"].sum()), \
+        float(sep["stb_per_lbmol"]), float(sep["oil_density"]) if np.isfinite(sep["oil_density"]) else 50.0
+
+
+def vlp_fluid(o, kind, p_max, t_min, t_max):
+    """Fluid model for the tubing from the PVT tab. Returns (fluid, description) or (None, reason)."""
+    water = bo.PVTInputs(rsb=1, api=40, gas_sg=0.7, salinity_ppm=float(val("pvt_sal", 50000.0)),
+                         h2s=float(val("pvt_h2s", 0.0)), co2=float(val("pvt_co2", 0.0)), n2=float(val("pvt_n2", 0.0)))
+    if o.method == "eos":
+        if not ss.get("prp_text"):
+            return None, "Load a PRP file in the PVT Input Data tab."
+        p_max = float(np.ceil(p_max / 500) * 500)
+        grid, mw, scf, stb, rho = eos_vlp_grid(ss["prp_text"], ss.get("prp_name", ""), p_max,
+                                               float(np.floor(t_min / 10) * 10), float(np.ceil(t_max / 10) * 10))
+        if kind == "oil" and stb <= 0:
+            return None, "The PRP fluid gives no stock-tank oil."
+        water.salinity_ppm = float(eos_parse(ss["prp_text"], ss.get("prp_name", "")).salinity_ppm or 0.0)
+        return wvlp.EOSTableFluid(kind, grid, mw, scf, stb, rho, water), \
+            f"Equation of state ({ss.get('prp_name', 'PRP file')}): flashed on a pressure-temperature grid"
+    if kind == "oil":
+        model = blackoil_model(o)
+        if model is None:
+            return None, "Complete the PVT Input Data tab (black oil)."
+        fam = f"{bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}"
+        return wvlp.BlackOilFluid(model), f"Black oil ({fam}{', matched' if model.params else ', not matched'})"
+    inp = bo.PVTInputs(rsb=1, api=40, gas_sg=float(val("pvt_gas_sg", 0.70)), salinity_ppm=water.salinity_ppm,
+                       h2s=water.h2s, co2=water.co2, n2=water.n2)
+    api = float(val("pvt_cond_api", 50.0))
+    gi = gas_pvt_inputs(o)
+    vap = gi if gas_vapour_on(o) else None
+    return wvlp.WetGasFluid(inp, api, gi.visc, vap, gi), (
+        f"Gas correlations, gas gravity {inp.gas_sg:.3f}, condensate {api:g} °API (wet gas), "
+        f"{wgp.VISC_CORRELATIONS[gi.visc]}" + (", PVT matched" if gi.match else "") + (f", condensed water vapour (minimum WGR {wgp.minimum_wgr(gi):.4f} "
+                                               "STB/MMscf)" if vap is not None else ""))
 
 
 with tabs[2]:
@@ -1592,7 +1952,8 @@ with tabs[2]:
             mu_used = gasp.get("mu_r") if gas else (pvt["mu"] if pvt else None)
             try:
                 if model in VERTICAL_SKIN_MODELS:
-                    r = reservoir_props(nd=(model == "Jones" or (gas and model == "Multiphase Pseudo Pressure")))
+                    r = reservoir_props(nd=(model in ("Jones", "Petroleum Experts")
+                                            or (gas and model == "Multiphase Pseudo Pressure")))
                     skin, skin_parts = skin_panel(o, r["k"], r["rw"], r["h"], fluid)
                     kh_for_skin = r["k"] * r["h"]
                 if not gas and model in ipr.OIL_MODELS:
@@ -1641,6 +2002,30 @@ with tabs[2]:
                             n = num(st.columns(4)[0], "Exponent n", "ipr_n_bp", 0.85, 0.5, 1.0, 0.01)
                             curve = ipr.back_pressure(pr, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, t_f,
                                                       gasp["mu_r"], gasp["z_r"], n)
+                    elif model == "Petroleum Experts":
+                        c = st.columns(4)
+                        tdays = num(c[0], "Time since production started (days)", "ipr_tdays", 50.0, 0.5, 1e6, 1.0)
+                        phi = num(c[1], "Reservoir porosity (fraction)", "ipr_phi", 0.15, 0.01, 0.5, 0.01)
+                        swc = num(c[2], "Connate water saturation (fraction)", "ipr_swc", 0.25, 0.0, 0.9, 0.01)
+                        perm = sel(c[3], "Permeability entered", ["Total permeability", "Gas permeability"],
+                                   "ipr_perm_kind")
+                        c = st.columns(4)
+                        dm = sel(c[0], "Non-Darcy flow factor (D)", ["Calculated", "Entered"], "ipr_d_method")
+                        d_ent = num(c[1], "D (1/(Mscf/d))", "ipr_d", 1e-4, 0.0, 1.0, None, "%.4e") \
+                            if dm == "Entered" else None
+                        psi_g = ipr.pseudo_pressure_fn(gasp["mu_z"], pr, n=200 if o.method == "eos" else 600,
+                                                       gauge=True)
+                        zz_ = gasp["mu_z"](np.array([pr - 5.0, pr, pr + 5.0]))[1]
+                        cg_ = 1.0 / pr - (zz_[2] - zz_[0]) / 10.0 / zz_[1]
+                        if o.method == "eos":         # D uses the separator gas gravity (separator train)
+                            sg_sep = float(wm_eos.EOSFluid(eos_parse(ss["prp_text"], ss.get("prp_name", "")))
+                                           .separator_train()["gas_gravity"])
+                        else:
+                            sg_sep = gas_pvt_inputs(o).gas_sg
+                        curve = ipr.petex_gas(pr, t_f, r["k"], r["h"], r["area"], r["ca"], r["rw"], r["hp"], tdays,
+                                              phi, swc, skin, psi_g, gasp["mu_r"], float(cg_), float(sg_sep), d_ent,
+                                              "gas" if perm == "Gas permeability" else "total")
+                        kh_for_skin = curve.params["Gas permeability (md)"] * r["h"]
                     elif model == "Forchheimer":
                         c = st.columns(4)
                         a = num(c[0], "a - turbulent (psi²/(Mscf/d)²)", "ipr_fa", 0.003, 0.0, 1e6, None, "%.4e")
@@ -1760,8 +2145,10 @@ with tabs[2]:
                                                    tdays, omega, lam, pvt["mu"], skin, **oil_kw)
                 elif model == "Multiphase Pseudo Pressure":
                     curve = mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr)
-                elif model in ("Multi-layer", "Multi-layer with dP loss in wellbore"):
-                    with_dp = model.endswith("wellbore")
+                elif model == "Multi-layer with dP loss in wellbore":
+                    curve = multilayer_dp_ui(o, gas, t_f, pvt, gasp)
+                elif model == "Multi-layer":
+                    with_dp = False
                     c = st.columns(4)
                     area = num(c[0], "Drainage area (acres)", "ipr_area", 160.0, 0.1, 1e6, 10.0)
                     rw = num(c[1], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.05, 5.0, 0.001, "%.3f")
@@ -1800,13 +2187,7 @@ with tabs[2]:
                             L.update(md=float(row["MD (ft)"]), tvd=float(row["TVD (ft)"]),
                                      id_in=float(row["Flowing ID (in)"]), rough_in=float(row["Roughness (in)"]))
                         layers.append(L)
-                    if with_dp:
-                        props = (dict(mu=pvt["mu"], bo=pvt["bo"], rho=pvt["rho"], wc=wc) if not gas
-                                 else dict(mu_z=gasp["mu_z"], sg=gasp["sg"], t_f=t_f))
-                        curve = ipr2.multilayer_dp(fluid, layers, top_md, top_tvd, props,
-                                                   pvt["pb"] if not gas else None, n=25 if gas else 40)
-                    else:
-                        curve = ipr2.multilayer(fluid, layers, pvt["pb"] if not gas else None)
+                    curve = ipr2.multilayer(fluid, layers, pvt["pb"] if not gas else None)
                 elif model == "Modified Isochronal":
                     c = st.columns(4)
                     k = num(c[0], "Gas permeability (md)", "ipr_k", 50.0, 0.001, 1e5, 1.0)
@@ -1829,14 +2210,18 @@ with tabs[2]:
             raw_curve = curve
             sc, sc_res, sc_multi = sand_control_panel(o, fluid, float(val("ipr_h", 60.0)),
                                                       r if model in VERTICAL_SKIN_MODELS else None)
-            if curve is not None and err is None and sc.kind != "none":
+            if curve is not None and err is None and sc.kind != "none" and hasattr(curve, "layer_table"):
+                st.info("Sand control is not applied to the multilayer dP model (PROSPER enters a gravel pack layer "
+                        "by layer for it; not available here yet) - the IPR is at the sand face of each layer.")
+            elif curve is not None and err is None and sc.kind != "none":
                 try:
                     props_, props_note = sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, sc_multi)
                     dp_fn = wcomp.sand_control_dp(sc, props_, *sc_res)
                     st.caption(f"Sand-control dP with {props_note}.")
                     curve = wcomp.apply_sand_control(curve, dp_fn)
                     ss["ipr_sc_dp"] = dp_fn
-                    for attr in ("layer_rates", "profile", "profile_heel_pressure", "isochronal", "c_iso"):
+                    for attr in ("layer_rates", "profile", "profile_heel_pressure", "isochronal", "c_iso", "layer_table",
+                                 "mix", "top_md", "top_tvd"):
                         if attr == "layer_rates" and hasattr(raw_curve, attr) and \
                                 len(raw_curve.layer_rates) != len(curve.q):
                             continue                  # per-point layer rates belong to the sand-face curve
@@ -1914,6 +2299,14 @@ with tabs[2]:
                                    "gas: the total skin drop shared in proportion to each component's skin).")
                 with st.expander("IPR table", expanded=False):
                     st.dataframe(table.style.format(precision=2), hide_index=True, width="stretch")
+                if hasattr(curve, "layer_table"):
+                    with st.expander("Layer results (PROSPER: Results, layer by layer)", expanded=False):
+                        lt_ = curve.layer_table
+                        pick_ = st.selectbox("Layer", sorted(lt_["Layer"].unique()), key="ipr_ml_pick",
+                                             format_func=lambda v: f"Layer {v}")
+                        st.dataframe(lt_[lt_["Layer"] == pick_].drop(columns="Layer").style.format(precision=3),
+                                     hide_index=True, width="stretch")
+                        st.caption("Negative rates: crossflow into the layer.")
                 if hasattr(curve, "isochronal"):
                     with st.expander("Modified isochronal corrections", expanded=True):
                         st.dataframe(curve.isochronal.style.format(precision=4), hide_index=True, width="stretch")
@@ -2138,6 +2531,67 @@ def geo_plot(gt, secs_bottom=None):
     ax.set_title("Geothermal gradient", fontsize=10)
     fig.tight_layout()
     return fig
+
+
+def esp_library_all():
+    pumps = dict(wesp.PUMPS)
+    pumps.update(ss.get("esp_user_pumps", {}))
+    motors = dict(wesp.MOTORS)
+    motors.update(ss.get("esp_user_motors", {}))
+    return pumps, motors, dict(wesp.CABLES)
+
+
+def _esp_copy_design():
+    d = ss.get("esp_design")
+    if not d:
+        return
+    put("espq_md", float(d["pump_md"]))
+    put("espq_f", float(d["freq"]))
+    put("espq_n", float(d["stages"]))
+    put("espq_pump", d["pump"])
+    put("espq_motor", d["motor"])
+    put("espq_cable", d["cable"])
+    for k_ in ("cable", "sep", "wear"):
+        if f"esp_{k_}" in ss.get("_esp_design_inputs", {}):
+            put({"cable": "espq_len", "sep": "espq_sep", "wear": "espq_wear"}[k_], ss["_esp_design_inputs"][f"esp_{k_}"])
+
+
+def esp_equipment_panel(top_md, secs):
+    """System | Electrical Submersible Pump: the installed pump used by the Calculation tab."""
+    st.subheader("Electrical submersible pump")
+    st.caption("The pump used in the Calculation tab (PROSPER System | Electrical Submersible Pump). The tubing "
+               "should end at the pump; below it the flow is in the casing. Run the ESP design (Design tab) and copy "
+               "it here, or enter the equipment directly.")
+    pumps, motors, cables = esp_library_all()
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
+    st.button("Copy from the ESP design", on_click=_esp_copy_design, disabled=not ss.get("esp_design"),
+              key="espq_copy")
+    c = st.columns(4)
+    md = num(c[0], "Pump depth (ft MD)", "espq_md", float(round(bottom)), float(top_md) + 50, 60000.0)
+    f = num(c[1], "Operating frequency (Hz)", "espq_f", 60.0, 20.0, 90.0, None, "%.4g")
+    n = num(c[2], "Number of stages", "espq_n", 100.0, 1.0, 1000.0, 1.0, "%.0f")
+    ln = num(c[3], "Length of cable (ft)", "espq_len", float(round(bottom)), 100.0, 60000.0)
+    c = st.columns(3)
+    pn = sel(c[0], "Pump", list(pumps), "espq_pump")
+    mn = sel(c[1], "Motor", list(motors), "espq_motor")
+    cn = sel(c[2], "Cable", list(cables), "espq_cable")
+    c = st.columns(4)
+    sep = num(c[0], "Gas separator efficiency (%)", "espq_sep", 0.0, 0.0, 100.0)
+    wear = num(c[1], "Pump wear factor (fraction)", "espq_wear", 0.0, -0.5, 0.9, None, "%.3g")
+    chp = num(c[2], "Casing head pressure (psia)", "espq_chp", 264.7, 14.7, 20000.0,
+              help="For the annulus liquid level (PROSPER: Casing Head Pressure). No gas is vented up the annulus.")
+    meth = sel(c[3], "Pump calculation", ["Stage by stage", "Average rate"], "espq_meth",
+               help="Stage by stage: each stage at its own in-situ rate and density as the gas is compressed "
+                    "(closest to PROSPER's system results). Average rate: all stages at the average rate.")
+    if abs(bottom - md) > 1.0:
+        st.warning(f"The tubing ends at {bottom:,.0f} ft MD but the pump is at {md:,.0f} ft MD. PROSPER expects the "
+                   "tubing to end at the pump.")
+    out = {"pump_md": md, "freq": f, "stages": int(n), "cable_len": ln, "pump": pumps[pn], "motor": motors[mn],
+           "cable": cables[cn], "sep": sep / 100.0, "wear": wear, "chp": chp,
+           "method": "stages" if meth == "Stage by stage" else "average"}
+    ss["esp_equipment"] = out
+    return out
 
 
 with tabs[3]:
@@ -2372,6 +2826,11 @@ with tabs[3]:
     else:
         st.info("The string summary and well schematic appear once every equipment section above is complete "
                 "(no ❌ in the status table).")
+    if o is not None and getattr(o, "artificial_lift", "none") == "esp":
+        st.divider()
+        esp_equipment_panel(top_md, secs)
+    else:
+        ss.pop("esp_equipment", None)
     ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": ed_s, "t_surround": t_sur,
                        "u_surface": u_sur, "downhole": (top_md, secs, pts), "geothermal": (gmd, gtemp),
                        "u_geo": u_geo, "heat_capacities": hc,
@@ -2421,42 +2880,6 @@ def vlp_set_tests(kind, df):
         ss.pop(k_, None)
 
 
-@st.cache_data(show_spinner=False)
-def eos_vlp_grid(text, name, p_max, t_min, t_max):
-    f = wm_eos.EOSFluid(wm_eos.parse_prp(text, name))
-    grid = wvlp.eos_grid(f, p_max, t_min, t_max)
-    sep = f.separator_train()
-    return grid, float(f.z @ f.mw), float(sep["stages"]["Gas (scf per lbmol feed)"].sum()), \
-        float(sep["stb_per_lbmol"]), float(sep["oil_density"]) if np.isfinite(sep["oil_density"]) else 50.0
-
-
-def vlp_fluid(o, kind, p_max, t_min, t_max):
-    """Fluid model for the tubing from the PVT tab. Returns (fluid, description) or (None, reason)."""
-    water = bo.PVTInputs(rsb=1, api=40, gas_sg=0.7, salinity_ppm=float(val("pvt_sal", 50000.0)),
-                         h2s=float(val("pvt_h2s", 0.0)), co2=float(val("pvt_co2", 0.0)), n2=float(val("pvt_n2", 0.0)))
-    if o.method == "eos":
-        if not ss.get("prp_text"):
-            return None, "Load a PRP file in the PVT Input Data tab."
-        p_max = float(np.ceil(p_max / 500) * 500)
-        grid, mw, scf, stb, rho = eos_vlp_grid(ss["prp_text"], ss.get("prp_name", ""), p_max,
-                                               float(np.floor(t_min / 10) * 10), float(np.ceil(t_max / 10) * 10))
-        if kind == "oil" and stb <= 0:
-            return None, "The PRP fluid gives no stock-tank oil."
-        water.salinity_ppm = float(eos_parse(ss["prp_text"], ss.get("prp_name", "")).salinity_ppm or 0.0)
-        return wvlp.EOSTableFluid(kind, grid, mw, scf, stb, rho, water), \
-            f"Equation of state ({ss.get('prp_name', 'PRP file')}): flashed on a pressure-temperature grid"
-    if kind == "oil":
-        model = blackoil_model(o)
-        if model is None:
-            return None, "Complete the PVT Input Data tab (black oil)."
-        fam = f"{bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}"
-        return wvlp.BlackOilFluid(model), f"Black oil ({fam}{', matched' if model.params else ', not matched'})"
-    inp = bo.PVTInputs(rsb=1, api=40, gas_sg=float(val("pvt_gas_sg", 0.70)), salinity_ppm=water.salinity_ppm,
-                       h2s=water.h2s, co2=water.co2, n2=water.n2)
-    api = float(val("pvt_cond_api", 50.0))
-    return wvlp.WetGasFluid(inp, api), f"Gas correlations, gas gravity {inp.gas_sg:.3f}, condensate {api:g} °API (wet gas)"
-
-
 def vlp_path(eqd, flow_type, extra_md):
     top, secs, pts = eqd["downhole"]
     smd, stvd = eqd["survey"]
@@ -2475,6 +2898,8 @@ def rebuild_ipr(changes):
     if "wc" in changes and "wc" not in inspect.signature(fn).parameters:
         changes.pop("wc")                          # models without a water-cut input ignore it
     if not changes:
+        if ss.get("ipr_curve") is not None:
+            return ss["ipr_curve"]
         c = fn(*b.args, **b.kwargs)
         return wcomp.apply_sand_control(c, ss["ipr_sc_dp"]) if ss.get("ipr_sc_dp") is not None else c
     for key, v in changes.items():
@@ -2503,6 +2928,17 @@ def ipr_arg(name):
     b = inspect.signature(fn).bind(*a, **k)
     b.apply_defaults()
     return b.arguments.get(name)
+
+
+def comp_current():
+    """Complementary-calculation options (Calculation tab, Options) from the stored inputs."""
+    return wcx.CompOptions(sand_density=float(val("comp_rho_s", 2.65)), sand_rate=float(val("comp_w", 0.0)),
+                           c_factor=float(val("comp_c", 400.0)), s_factor=float(val("comp_s", 0.05)),
+                           turner=float(val("comp_turner", 2.04)), wall=str(val("comp_wall", "Carbon steel")),
+                           deformation=str(val("comp_def", "Ductile")), particle_mm=float(val("comp_dp", 250.0)) / 1000,
+                           geometry_factor=float(val("comp_gf", 2.0)), reducer_angle=float(val("comp_ang", 45.0)),
+                           inhibited_rate=float(val("comp_irc", 0.0)), inhibitor_eff=float(val("comp_eff", 0.0)),
+                           alkalinity=float(val("comp_alk", 0.0)))
 
 
 def ipr_for_test(curve, pr_test):
@@ -2567,7 +3003,7 @@ def vlp_example_tests(kind, path, fluid, u, hc, pr, ipr_curve=None):
             d.update({"Water Cut (percent)": r["wc"] * 100, "Liquid Rate (STB/day)": r["q"],
                       "Gas Oil Ratio (scf/STB)": r["gor"], "GOR Free (scf/STB)": 0.0})
         else:
-            d.update({"Water Gas Ratio (STB/MMscf)": r["wgr"], "Separator Gas Oil Ratio (scf/STB)": round(1e6 / r["cgr"]),
+            d.update({"Water Gas Ratio (STB/MMscf)": r["wgr"], "Condensate Gas Ratio (STB/MMscf)": r["cgr"],
                       "Gas Rate (MMscf/day)": r["q"]})
         rows.append(d)
     df = vlp_blank(kind)
@@ -3313,15 +3749,6 @@ with tabs[4]:
 RATE_METHODS = ["Automatic - Geometric", "Automatic - Linear", "User selected"]
 
 
-def parse_values(text):
-    out = []
-    for tok in str(text).replace(";", ",").split(","):
-        tok = tok.strip()
-        if tok:
-            out.append(float(tok))
-    return out
-
-
 def _plot_qmax(shown, full):
     """x-axis limit: the whole rate range, or (default) a window around the solution(s) - a high-PI well's IPR
     runs out to an AOF far beyond anything the tubing can lift."""
@@ -3460,17 +3887,6 @@ def solution_panel(kind, r, det, regimes):
     out = pd.DataFrame(rows, columns=["Result", "Value"])
     out["Value"] = [_fmt_result(v_) if isinstance(v_, (int, float, np.floating)) else str(v_) for v_ in out["Value"]]
     return out
-
-
-def comp_current():
-    """Complementary-calculation options (Calculation tab, Options) from the stored inputs."""
-    return wcx.CompOptions(sand_density=float(val("comp_rho_s", 2.65)), sand_rate=float(val("comp_w", 0.0)),
-                           c_factor=float(val("comp_c", 400.0)), s_factor=float(val("comp_s", 0.05)),
-                           turner=float(val("comp_turner", 2.04)), wall=str(val("comp_wall", "Carbon steel")),
-                           deformation=str(val("comp_def", "Ductile")), particle_mm=float(val("comp_dp", 250.0)) / 1000,
-                           geometry_factor=float(val("comp_gf", 2.0)), reducer_angle=float(val("comp_ang", 45.0)),
-                           inhibited_rate=float(val("comp_irc", 0.0)), inhibitor_eff=float(val("comp_eff", 0.0)),
-                           alkalinity=float(val("comp_alk", 0.0)))
 
 
 def comp_panel():
@@ -3673,7 +4089,44 @@ def choke_mode(o):
             st.info("Press Calculate.")
 
 
-def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
+def esp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, surface, esp):
+    """Gradient traverse of an ESP well at one rate: tubing (top node to the pump discharge), the pump, casing (pump
+    intake to the bottom node). Same outputs as wsys.solution_details plus pump rows in det."""
+    md_p = esp["pump_md"]
+    above, below = wesp.sub_path(path, path.md[0], md_p), wesp.sub_path(path, md_p, path.md[-1])
+    det, reg, prof = wsys.solution_details(above, fluid, kind, base, q, corr, p1, p2, hc, surface, comp=comp_current())
+    case = {"q": np.array([q]), "wc": np.array([base["wc"] / 100.0]), "gor": np.array([float(base["gor"])])}
+    out = wesp.bhp_with_pump(path, fluid, np.array([det["Wellhead pressure (psia)"]]), case, esp, corr, p1, p2,
+                             base["u"], hc)
+    pip, pdp = float(out["pip"][0]), float(out["pdp"][0])
+    if not np.isfinite(pip):
+        raise ValueError(f"at {q:g} STB/d the pump would draw the intake below atmospheric (pumped off) - the rate "
+                         "is below what this pump delivers against the tubing.")
+    t_dis = float(out["t_discharge"][0])
+    det, reg, prof = wsys.solution_details(above, fluid, kind, {**base, "gor": float(out["gor_above"][0])}, q,
+                                           corr, p1, p2, hc, surface, comp=comp_current(), t_bottom=t_dis)
+    det_b, _, prof_b = wsys.solution_details(below, fluid, kind, {**base, "whp": pip}, q, corr, p1, p2, hc, None,
+                                             comp=comp_current())
+    z_p = float(np.interp(md_p, path.md, path.tvd))
+    pump_row = pd.DataFrame([{"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pdp, "Temperature (°F)": t_dis,
+                              "Section": "Pump discharge"},
+                             {"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pip,
+                              "Temperature (°F)": float(out["t_intake"][0]), "Section": "Pump intake"}])
+    prof = pd.concat([prof.assign(Section="Tubing"), pump_row, prof_b.assign(Section="Casing")], ignore_index=True)
+    det = dict(det)
+    det["Bottom node pressure (psia)"] = float(out["bhp"][0])
+    det["dP gravity - production string (psi)"] += det_b["dP gravity - production string (psi)"]
+    det["dP friction - production string (psi)"] += det_b["dP friction - production string (psi)"]
+    det["Pump discharge pressure (psia)"], det["Pump intake pressure (psia)"] = pdp, pip
+    det["Pump dP (psi)"] = pdp - pip
+    det["Pump intake temperature (°F)"], det["Pump discharge temperature (°F)"] = float(out["t_intake"][0]), t_dis
+    det["Liquid level in annulus (ft TVD)"] = wesp.liquid_level(
+        fluid, pip, float(out["t_intake"][0]), case, float(np.interp(md_p, path.md, path.tvd)), esp.get("chp", 264.7),
+        float(path.tvd[0]))
+    return det, reg, prof
+
+
+def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
     """Gradient traverse: pressure, temperature, holdup and velocities along the well at chosen rates."""
     hc = eqd["heat_capacities"]
     with col:
@@ -3684,16 +4137,25 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
         st.caption("The traverse starts at the top node " + ("(the manifold) and works back through the surface "
                    "equipment, then " if surface is not None else "(the wellhead) and runs ") +
                    "down the tubing to the bottom node, with the inputs on the left.")
+        if esp:
+            st.caption(f"With the ESP from the Equipment tab: {esp['pump'].name}, {esp['stages']} stages at "
+                       f"{esp['freq']:g} Hz, set at {esp['pump_md']:,.0f} ft MD. Above the pump the flow is in the "
+                       "tubing, below it in the casing; the pressure steps up across the pump.")
         go = st.button("Calculate traverse", type="primary", disabled=not rates)
-    sig = (kind, tuple(sorted(base.items())), corr, p1, p2, tuple(rates), repr(surface), o.flow_type)
+    sig = (kind, tuple(sorted(base.items())), corr, p1, p2, tuple(rates), repr(surface), o.flow_type,
+           None if not esp else (esp["pump_md"], esp["freq"], esp["stages"], esp["pump"].name, esp["sep"],
+                                 esp["wear"], esp.get("chp")))
     if go:
         try:
-            path = vlp_path(eqd, o.flow_type, ())
+            path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ())
             out = []
             with st.spinner("Calculating traverses..."):
                 for q in rates:
-                    det, reg, prof = wsys.solution_details(path, fluid, kind, base, q, corr, p1, p2, hc, surface,
-                                                          comp=comp_current())
+                    if esp:
+                        det, reg, prof = esp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, surface, esp)
+                    else:
+                        det, reg, prof = wsys.solution_details(path, fluid, kind, base, q, corr, p1, p2, hc, surface,
+                                                              comp=comp_current())
                     out.append((q, det, reg, prof))
             ss["trav_res"] = {"sig": sig, "res": out, "path": path}
         except (ValueError, KeyError, TypeError) as e:
@@ -3717,6 +4179,11 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
                   "Max. velocity / erosional": det["Max. velocity / erosional velocity"]})
         if "dP choke (psi)" in det:
             r["dP choke (psi)"] = det["dP choke (psi)"]
+        for k_ in ("Pump discharge pressure (psia)", "Pump intake pressure (psia)", "Pump dP (psi)",
+                   "Pump intake temperature (°F)", "Pump discharge temperature (°F)",
+                   "Liquid level in annulus (ft TVD)"):
+            if k_ in det:
+                r[k_] = det[k_]
         rows.append(r)
     st.markdown("**Summary**")
     st.dataframe(pd.DataFrame(rows).style.format(precision=2), hide_index=True, width="stretch")
@@ -3731,6 +4198,11 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
         ax[3].plot(prof["Mixture velocity (ft/s)"], prof["TVD (ft)"], color=c, lw=1.6, label=lab)
         ax[3].plot(prof["Erosional velocity (ft/s)"], prof["TVD (ft)"], color=c, lw=1.0, ls="--")
     ax[1].plot(path.t_form, path.tvd, color=wplt.INK2, ls="--", lw=1.1, label="formation")
+    if res and "Pump intake pressure (psia)" in res[0][1]:
+        z_p = float(res[0][3].loc[res[0][3]["Section"] == "Pump intake", "TVD (ft)"].iloc[0])
+        for a_ in ax:
+            a_.axhline(z_p, color=wplt.INK2, lw=0.8, ls="-.")
+        ax[0].text(ax[0].get_xlim()[0], z_p, " ESP", va="bottom", fontsize=8, color=wplt.INK2)
     for a_, t_ in zip(ax, ("Pressure (psia)", "Temperature (°F)", "Liquid holdup (dotted: no-slip)",
                            "Mixture velocity (dashed: erosional), ft/s")):
         a_.set_xlabel(t_, fontsize=9)
@@ -3751,7 +4223,9 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
         st.dataframe(surf_tab.style.format(precision=2), hide_index=True, width="stretch")
     if reg:
         st.caption("Restrictions: " + "; ".join(f"{k} - {v[0]}, dP {v[1]:.1f} psi" for k, v in reg.items()))
-    st.markdown("**Tubing profile** (segment properties are given at the lower node of each segment)")
+    st.markdown("**Tubing profile** (segment properties are given at the lower node of each segment)" if
+                "Section" not in prof else "**Profile** - tubing to the pump, then casing below it (segment "
+                "properties at the lower node of each segment)")
     st.dataframe(prof.style.format(precision=3, na_rep="—"), hide_index=True, width="stretch", height=380)
     allp = pd.concat([p_.assign(**{f"Rate ({_qunit(kind)})": q_}) for q_, _, _, p_ in res], ignore_index=True)
     st.download_button("Download all profiles (CSV)", allp.to_csv(index=False).encode(), "gradient_traverse.csv")
@@ -3761,7 +4235,7 @@ def _default_list(vals):
     return ", ".join(f"{v:.4g}" for v in vals)
 
 
-def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
+def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
     """Lift-curve tables for reservoir simulation: BHP over rate x THP x WFR x GFR."""
     hc = eqd["heat_capacities"]
     ax_ = wlc.AXES[kind]
@@ -3799,26 +4273,41 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
             c0 = 1e6 / sg if sg > 0 else 0.0
             gfr = num_list(st, "Condensate gas ratios (STB/MMscf)", f"vfp_gfr_{kind}",
                            _default_list(sorted({0.0, round(c0, 2), round(max(c0 * 2, 20.0), 2)})))
+        alq = []
+        if esp:
+            f0 = float(esp["freq"])
+            alq = num_list(st, "ESP frequencies (Hz) - the ALQ axis", "vfp_alq",
+                           _default_list(sorted({max(f0 - 10, 30.0), f0 - 5, f0, f0 + 5, min(f0 + 10, 90.0)})),
+                           "comma separated; one value = a single frequency (no ALQ axis)")
+            alq = sorted({v for v in alq if 10.0 <= v <= 120.0})
         c2 = st.columns([1, 2])
         tno = int(num(c2[0], "Table number", "vfp_tno", 1.0, 1.0, 9999.0, 1.0, "%.0f"))
         wfr = [v for v in wfr if v >= 0]
         gfr = [v for v in gfr if v >= 0]
         thp = [v for v in thp if v > 0]
-        npts = len(flo) * len(set(thp)) * len(set(wfr)) * len(set(gfr))
+        n_alq = max(len(alq), 1)
+        npts = len(flo) * len(set(thp)) * len(set(wfr)) * len(set(gfr)) * n_alq
         c2[1].caption(f"{npts:,} points ({len(flo)} rates x {len(set(thp))} pressures x {len(set(wfr))} x "
-                      f"{len(set(gfr))}).")
+                      f"{len(set(gfr))}" + (f" x {n_alq} frequencies" if len(alq) > 1 else "") + ").")
         if kind == "oil" and any(v >= 100 for v in wfr):
             st.error("Water cut must be below 100 %.")
             wfr = [v for v in wfr if v < 100]
+        if esp:
+            st.caption(f"Tables include the ESP from the Equipment tab ({esp['pump'].name}, {esp['stages']} stages, "
+                       f"{esp['pump_md']:,.0f} ft MD). With more than one frequency, frequency is the ALQ axis of the "
+                       "VFPPROD table (set it in the simulator through the well's ALQ). Points where the pump would "
+                       "draw the intake below atmospheric (rate too low for the pump) are left blank.")
         go = st.button("Generate lift curves", type="primary", disabled=not (flo and thp and wfr and gfr))
     sig = (kind, corr, p1, p2, tuple(flo), tuple(thp), tuple(wfr), tuple(gfr), repr(surface), o.flow_type, base["u"],
-           tno)
+           tno, None if not esp else (esp["pump_md"], esp["freq"], esp["stages"], esp["pump"].name, esp["sep"],
+                                      esp["wear"], esp["motor"].name, tuple(alq)))
     if go:
         try:
-            path = vlp_path(eqd, o.flow_type, ())
+            path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ())
             with st.spinner(f"Calculating {npts:,} traverses..."):
+                esp_ = {**esp, "freq": alq[0]} if esp and len(alq) == 1 else esp
                 axes, bhp, wh = wlc.vfp_table(path, fluid, kind, corr, p1, p2, float(base["u"]), flo, thp, wfr, gfr,
-                                              hc, surface)
+                                              hc, surface, esp_, alq if esp and len(alq) > 1 else None)
             ss["vfp_res"] = {"sig": sig, "axes": axes, "bhp": bhp, "wh": wh if surface is not None else None,
                              "datum": float(path.tvd[-1]), "md": float(path.md[-1]), "tno": tno,
                              "label": f"{VLP_LABELS[corr]} P1 {p1:.4f} P2 {p2:.4f}"}
@@ -3830,25 +4319,30 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
     if vr["sig"] != sig:
         st.info("Inputs have changed since the tables were generated - press Generate lift curves to update.")
     axes, bhp = vr["axes"], vr["bhp"]
-    thp_a, wfr_a, gfr_a, flo_a = axes
+    (thp_a, wfr_a, gfr_a, alq_a, flo_a), bhp5 = wlc._split(axes, bhp)
     st.markdown(f"**Lift curves** - bottom node at {vr['datum']:,.1f} ft TVD ({vr['md']:,.0f} ft MD), "
                 f"{vr['label']}")
-    for w_ in wlc.vfp_checks(axes, bhp):
+    for w_ in wlc.vfp_checks(axes, bhp, esp=bool(esp)):
         st.warning(w_)
-    c = st.columns(2)
+    c = st.columns(3 if alq_a is not None else 2)
     jw = c[0].selectbox(f"{ax_['wfr'][0]} ({ax_['wfr'][1]})", range(len(wfr_a)), format_func=lambda i: f"{wfr_a[i]:g}",
                         key=f"vfp_pw_{len(wfr_a)}")
     kg = c[1].selectbox(f"{ax_['gfr'][0]} ({ax_['gfr'][1]})", range(len(gfr_a)), format_func=lambda i: f"{gfr_a[i]:g}",
                         key=f"vfp_pg_{len(gfr_a)}")
+    la = 0
+    if alq_a is not None:
+        la = c[2].selectbox("ESP frequency (Hz)", range(len(alq_a)), format_func=lambda i: f"{alq_a[i]:g}",
+                            key=f"vfp_pa_{len(alq_a)}")
     fig, ax = plt.subplots(figsize=(9, 5))
     cmap = plt.get_cmap("viridis")
     for i, t in enumerate(thp_a):
-        ax.plot(flo_a, bhp[i, jw, kg], "-o", ms=3, lw=1.5, color=cmap(i / max(len(thp_a) - 1, 1)),
+        ax.plot(flo_a, bhp5[i, jw, kg, la], "-o", ms=3, lw=1.5, color=cmap(i / max(len(thp_a) - 1, 1)),
                 label=f"THP {t:g} psia")
     ax.set_xlabel(f"{ax_['flo'][0]} ({ax_['flo'][1]})")
     ax.set_ylabel("Bottom node pressure (psia)")
     ax.set_title(f"Lift curves at {ax_['wfr'][0].lower()} {wfr_a[jw]:g} {ax_['wfr'][1]}, "
-                 f"{ax_['gfr'][0].lower()} {gfr_a[kg]:g} {ax_['gfr'][1]}", fontsize=10)
+                 f"{ax_['gfr'][0].lower()} {gfr_a[kg]:g} {ax_['gfr'][1]}"
+                 + (f", {alq_a[la]:g} Hz" if alq_a is not None else ""), fontsize=10)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -3864,17 +4358,406 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
                            width="stretch")
         st.caption("Eclipse FIELD units: " + ("FLO = liquid rate (STB/d), WFR = water cut (fraction), GFR = GOR "
                    "(Mscf/STB)" if kind == "oil" else "FLO = gas rate (Mscf/d), WFR = WGR (STB/Mscf), GFR = OGR "
-                   "(STB/Mscf)") + "; THP and BHP in psia; datum = bottom node TVD; no artificial lift (ALQ 0)." +
+                   "(STB/Mscf)") + "; THP and BHP in psia; datum = bottom node TVD; " +
+                   ("ALQ = ESP frequency (Hz)." if alq_a is not None else "no artificial lift (ALQ 0).") +
                    (" THP is the manifold pressure (surface equipment included)." if vr["wh"] is not None else ""))
         with st.expander("Preview VFPPROD"):
             st.code("\n".join(ecl.splitlines()[:40]) + ("\n..." if len(ecl.splitlines()) > 40 else ""),
                     language=None)
+
+# ================================================================ ESP design
+def esp_library():
+    pumps = dict(wesp.PUMPS)
+    pumps.update(ss.get("esp_user_pumps", {}))
+    motors = dict(wesp.MOTORS)
+    motors.update(ss.get("esp_user_motors", {}))
+    return pumps, motors, dict(wesp.CABLES)
+
+
+def esp_pump_plot(pump, n, res=None, duty=None, points=None, wear=0.0):
+    fig, ax = plt.subplots(figsize=(7.8, 4.8))
+    marks = {40: "s", 50: "o", 60: "+", 70: "^"}
+    lo_l, hi_l, be_l = [], [], []
+    for f, mk in marks.items():
+        r = f / 60.0
+        q = np.linspace(0, pump.q_runout * r, 60)
+        h = n * pump.head_stage(q, f, wear)
+        ax.plot(q, h, color="#2ca02c", lw=1.4, marker=mk, markevery=6, ms=5, label=f"{f} Hz")
+        lo, hi = pump.range_at(f)
+        lo_l.append((lo, n * float(pump.head_stage(lo, f, wear))))
+        hi_l.append((hi, n * float(pump.head_stage(hi, f, wear))))
+        be_l.append((pump.q_bep * r, n * float(pump.head_stage(pump.q_bep * r, f, wear))))
+    for pts_, lab, col in ((lo_l, "Min. operating range", "#d62728"), (hi_l, "Max. operating range", "#d62728"),
+                           (be_l, f"Best efficiency line ({100 * pump.eff_bep:.2f} %)", "#1f3fd6")):
+        a = np.array(pts_)
+        ax.plot(a[:, 0], a[:, 1], color=col, lw=1.6, marker="v" if "Min" in lab else (">" if "Max" in lab else "D"),
+                ms=5, label=lab)
+    if res is not None and duty is not None:
+        ax.scatter([duty.q_avg], [res["Number Of Stages"] * res["Head per stage (ft)"]], s=70, color="#b000b0",
+                   zorder=7, marker="D", label="Pump operating point")
+    if points is not None and len(points):
+        ax.scatter(points["Average pump rate (RB/d)"], points["Head (ft)"], s=40, color="#b000b0", zorder=7,
+                   marker="D", label="System operating points")
+    ax.set_xlim(0, None)
+    ax.set_ylim(0, None)
+    ax.set_xlabel("Operating rate (RB/d)")
+    ax.set_ylabel("Head (ft)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=7, ncol=2)
+    ax.set_title(f"{pump.name} - {n} stages", fontsize=9.5)
+    fig.tight_layout()
+    return fig
+
+
+def esp_motor_plot(motor, load=None):
+    fig, ax = plt.subplots(figsize=(7.8, 4.2))
+    L = np.array(motor.load)
+    ax.plot(L, motor.amps_pct, color="#2ca02c", marker="s", ms=4, label="Nameplate amps (%)")
+    ax.plot(L, motor.eff, color="#1f3fd6", marker="o", ms=4, label="Motor efficiency (%)")
+    ax.plot(L, motor.pf, color="#b000b0", marker="+", ms=6, label="Power factor (%)")
+    ax.set_xlabel("Percentage nameplate power (%)")
+    ax.set_ylabel("Amps, efficiency, power factor (%)")
+    ax2 = ax.twinx()
+    for f, mk in ((40, "^"), (50, "v"), (60, "<"), (70, ">")):
+        ax2.plot(L, np.array(motor.rpm60) * f / 60.0, color="#d62728", marker=mk, ms=4, lw=1.0)
+    ax2.set_ylabel("Motor speed (rpm), 40-70 Hz")
+    if load is not None:
+        ax.axvline(load, color=wplt.INK2, ls="--", lw=1.0)
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=7, loc="lower right")
+    ax.set_title(f"{motor.name}", fontsize=9.5)
+    fig.tight_layout()
+    return fig
+
+
+def esp_tab(o, eqd, ipr_curve):
+    """Design | Electrical Submersible Pump - after PROSPER (User Guide 2.13.2, Tutorial 26)."""
+    st.caption("ESP design after PROSPER Design | Electrical Submersible Pump: Calculate pump duty (flowing BHP from "
+               "the IPR at the design rate, gradient up the casing to the pump intake, gradient down the tubing from "
+               "the top node to the pump discharge; head from the pressure rise and the average fluid gravity in "
+               "the pump), then select the pump, motor and cable (stages, power, current, cable voltage drop, "
+               "surface voltage and kVA), and check the pump over a range of water cuts and frequencies. The pump "
+               "should sit at the bottom of the tubing; below it the flow is in the casing.")
+    gmd, gt = eqd["geothermal"]
+    top_, secs_, pts_ = eqd["downhole"]
+    tub = secs_[secs_["Type"] == "Tubing"]
+    bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+    fluid, fluid_note = vlp_fluid(o, "oil", max(float(ipr_curve.pr), 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                  float(np.max(gt)) + 10)
+    if fluid is None:
+        st.warning(fluid_note)
+        return
+    pumps, motors, cables = esp_library()
+    g = 14.696
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Input data**")
+        c = st.columns(2)
+        pump_md = num(c[0], "Pump depth (ft MD)", "esp_md", float(round(bottom_tub)), float(top_) + 50,
+                      float(secs_["MD bottom (ft)"].max()) - 1.0)
+        freq = num(c[1], "Operating frequency (Hz)", "esp_f", 60.0, 20.0, 90.0, None, "%.4g")
+        c = st.columns(2)
+        max_od = num(c[0], "Maximum pump OD (in)", "esp_od", 6.0, 2.0, 12.0, None, "%.3g")
+        cable_len = num(c[1], "Length of cable (ft)", "esp_cable", float(round(bottom_tub)), 100.0, 40000.0)
+        c = st.columns(2)
+        sep = num(c[0], "Gas separator efficiency (%)", "esp_sep", 0.0, 0.0, 100.0, help="Share of the free gas at "
+                  "the intake vented to the annulus; the rest goes through the pump.")
+        q_des = num(c[1], "Design rate (STB/d)", "esp_q", 1000.0, 1.0, 1e6)
+        c = st.columns(2)
+        wc = num(c[0], "Water cut (%)", "esp_wc", float(val("sys_wc", 0.0)), 0.0, 100.0)
+        gor = num(c[1], "Total GOR (scf/STB)", "esp_gor", float(val("sys_gor", 300.0)), 0.0, 1e6)
+        c = st.columns(2)
+        top_p = num(c[0], "Top node pressure (psia)", "esp_top", float(val("sys_whp", 264.7)), 14.7, 1e4)
+        margin = num(c[1], "Motor power safety margin (%)", "esp_margin", 0.0, 0.0, 100.0)
+        wear = num(st, "Pump wear factor (fraction)", "esp_wear", 0.0, -0.5, 0.9, None, "%.3g",
+                   help="Head = (1 - wear) x catalogue head; 0.05 -> 95 %.")
+        ms = ss.get("vlp_matches", {}).get("ms", {})
+        sel_c = ss.get("vlp_selected")
+        corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+        corr = sel(st, "Tubing correlation", corr_opts, "esp_corr",
+                   sel_c if sel_c in corr_opts else "hagedorn_brown", format_func=VLP_LABELS.get)
+        m_fit = ms.get(corr)
+        use_fit = flag(st.toggle, "Use matched parameters", "esp_use_fit", disabled=m_fit is None)
+        c2 = st.columns(2)
+        if m_fit is not None and use_fit:
+            p1, p2 = float(m_fit.p1), float(m_fit.p2)
+            c2[0].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True, key="esp_p1_show")
+            c2[1].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True, key="esp_p2_show")
+        else:
+            p1 = num(c2[0], "Parameter 1 (gravity)", f"esp_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
+            p2 = num(c2[1], "Parameter 2 (friction)", f"esp_p2_{corr}", 1.0, 0.01, 10.0, None, "%.4f")
+        u = float(val("eq_u", eqd.get("u_geo", 8.0)))
+        if abs(bottom_tub - pump_md) > 1.0:
+            st.caption(f"Note: the tubing ends at {bottom_tub:,.0f} ft MD, not at the pump; below the pump the "
+                       "flow then follows the tubing geometry.")
+        go = st.button("Calculate pump duty", type="primary", key="esp_go")
+        with st.expander("Equipment library - add a pump or motor"):
+            st.caption("Enter the 60 Hz catalogue curve of a pump (rate, head per stage, efficiency) from the "
+                       "manufacturer's published curve sheet, or a motor's nameplate (its load curves are taken "
+                       "from the Centrilift 544 motor).")
+            c = st.columns(4)
+            pn = c[0].text_input("Pump name", "", key="esp_new_pn")
+            pod = num(c[1], "OD (in)", "esp_new_od", 4.0, 1.0, 12.0, None, "%.3g")
+            pmin = num(c[2], "Min rate (RB/d)", "esp_new_min", 1000.0, 0.0, 1e5)
+            pmax = num(c[3], "Max rate (RB/d)", "esp_new_max", 3000.0, 0.0, 1e5)
+            tab0 = pd.DataFrame({"Rate (RB/d)": [0.0, 1000, 2000, 3000, 4000],
+                                 "Head per stage (ft)": [30.0, 28, 24, 18, 0],
+                                 "Efficiency (%)": [0.0, 45, 62, 55, 0]})
+            ptab = st.data_editor(tab0, num_rows="dynamic", key="esp_new_tab", hide_index=True)
+            if st.button("Add pump", key="esp_add_pump") and pn.strip():
+                pt = ptab.dropna()
+                up = dict(ss.get("esp_user_pumps", {}))
+                up[pn.strip()] = wesp.pump_from_table(pn.strip(), pod, pmin, pmax, pt["Rate (RB/d)"],
+                                                      pt["Head per stage (ft)"], pt["Efficiency (%)"] / 100.0)
+                ss["esp_user_pumps"] = up
+                st.rerun()
+            c = st.columns(4)
+            mn = c[0].text_input("Motor name", "", key="esp_new_mn")
+            mhp = num(c[1], "Power (hp)", "esp_new_hp", 150.0, 1.0, 2000.0)
+            mv = num(c[2], "Voltage (V)", "esp_new_v", 1500.0, 100.0, 6000.0)
+            ma = num(c[3], "Current (A)", "esp_new_a", 60.0, 1.0, 500.0)
+            if st.button("Add motor", key="esp_add_motor") and mn.strip():
+                um = dict(ss.get("esp_user_motors", {}))
+                um[mn.strip()] = wesp.motor_like(mn.strip(), mhp, mv, ma)
+                ss["esp_user_motors"] = um
+                st.rerun()
+    curve_ = ipr_curve
+    if curve_.fluid == "oil":
+        try:
+            curve_ = rebuild_ipr({"wc": wc / 100.0})
+        except ValueError:
+            pass
+    path = vlp_path(eqd, "tubing", (pump_md,))
+    sig = (pump_md, freq, sep, q_des, wc, gor, top_p, corr, p1, p2, u, float(curve_.pr), float(curve_.aof))
+    with right:
+        if go:
+            try:
+                pwf = float(wgl.ipr_pwf(curve_, q_des))
+                if not np.isfinite(pwf):
+                    raise ValueError("The design rate is above the well's AOF.")
+                with st.spinner("Calculating pump duty..."):
+                    d = wesp.pump_duty(path, fluid, pwf, q_des, wc / 100.0, gor, top_p, pump_md, sep / 100.0, corr,
+                                       p1, p2, u, eqd["heat_capacities"])
+                ss["esp_duty"] = {"sig": sig, "d": d, "err": None}
+            except (ValueError, RuntimeError, ZeroDivisionError) as e:
+                ss["esp_duty"] = {"sig": sig, "d": None, "err": str(e)}
+        out = ss.get("esp_duty")
+        if out is None:
+            st.info("Enter the design data and press Calculate pump duty.")
+            return
+        if out["err"]:
+            st.error(out["err"])
+            return
+        if out["sig"] != sig:
+            st.info("Inputs have changed - press Calculate pump duty to update.")
+        d = out["d"]
+        st.markdown("**Pump duty**")
+        dt = wesp.duty_table(d, g, freq)
+        dt.loc[0, "Value"] = top_p - g
+        st.dataframe(dt.style.format({"Value": "{:,.6g}"}, na_rep="—"), hide_index=True, width="stretch")
+        st.markdown("**Equipment**")
+        cid = float(tub["Casing ID (in)"].iloc[-1]) if len(tub) and pd.notna(tub["Casing ID (in)"].iloc[-1]) else 99.0
+        cand = wesp.candidate_pumps(d, pumps, freq, max_od, cid, wear)
+        st.dataframe(cand.style.format(precision=2), hide_index=True, width="stretch")
+        ok_names = list(cand.loc[cand["Suitable"], "Pump"]) or list(pumps)
+        c = st.columns(3)
+        pname = sel(c[0], "Pump", ok_names, "esp_pump")
+        pump = pumps[pname]
+        n_auto = int(np.ceil(d.head / float(pump.head_stage(d.q_avg, freq, wear))))
+        p_need = d.fluid_hp * n_auto * float(pump.head_stage(d.q_avg, freq, wear)) / d.head / max(
+            float(pump.efficiency(d.q_avg, freq)), 1e-6) * (1 + margin / 100.0)
+        mot_ok = [k for k, m in motors.items() if m.hp * freq / 60.0 >= p_need] or list(motors)
+        mot_ok = sorted(mot_ok, key=lambda k: motors[k].hp)
+        mname = sel(c[1], "Motor", mot_ok, "esp_motor",
+                    help=f"Motors able to give {p_need:,.0f} hp at {freq:g} Hz, smallest first.")
+        motor = motors[mname]
+        # smallest cable carrying the current (PROSPER)
+        r0 = wesp.design(d, pump, motor, cables["#1 Copper"], freq, cable_len, wear, margin / 100.0)
+        cab_ok = [k for k, cb in sorted(cables.items(), key=lambda kv: -kv[1].v_per_kft_amp)
+                  if cb.max_amps >= r0["Current Used (amps)"]] or list(cables)
+        cname = sel(c[2], "Cable", cab_ok, "esp_cable_sel",
+                    format_func=lambda k: f"{k}  {cables[k].v_per_kft_amp:g} V/1000 ft/A, {cables[k].max_amps:g} A max")
+        res = wesp.design(d, pump, motor, cables[cname], freq, cable_len, wear, margin / 100.0, casing_id=cid,
+                          motor_od=motor.od)
+        cp_ = float(fluid.mass_cp({"q": np.array([q_des]), "wc": np.array([wc / 100]), "gor": np.array([gor])},
+                                  eqd["heat_capacities"])[1][0])
+        res["Pump Outlet Temperature (deg F)"] = wesp.outlet_temperature(d.t_intake, res["Pump and motor losses (hp)"],
+                                                                         d.mass, cp_)
+        st.markdown("**Results**")
+        rows_ = [(k_.rsplit(" (", 1)[0], v_, k_.rsplit(" (", 1)[1][:-1] if k_.endswith(")") else "")
+                 for k_, v_ in res.items() if k_ != "notes"]
+        st.dataframe(pd.DataFrame(rows_, columns=["Result", "Value", "Units"]).style.format({"Value": "{:,.6g}"}),
+                     hide_index=True, width="stretch")
+        for n_ in res["notes"]:
+            st.warning(n_)
+        ss["esp_design"] = {"pump": pname, "motor": mname, "cable": cname, "stages": res["Number Of Stages"],
+                            "freq": freq, "pump_md": pump_md}
+        ss["_esp_design_inputs"] = {"esp_cable": cable_len, "esp_sep": sep, "esp_wear": wear}
+        t1, t2, t3 = st.tabs(["Pump plot", "Motor plot", "System sensitivity"])
+        with t1:
+            st.pyplot(esp_pump_plot(pump, res["Number Of Stages"], res, d, wear=wear), clear_figure=True)
+            st.caption(f"Source: {pump.source}.")
+        with t2:
+            st.pyplot(esp_motor_plot(motor, res["Motor Load (%)"]), clear_figure=True)
+            st.caption(f"Source: {motor.source}.")
+        with t3:
+            st.caption("System analysis with this pump (PROSPER's convention: solution at the pump discharge, the "
+                       "VLP from the top node against the IPR corrected to the intake plus the pump pressure gain).")
+            c = st.columns(2)
+            wcs = c[0].text_input("Water cuts (%)", "60, 70, 80, 90", key="esp_s_wc")
+            frs = c[1].text_input("Frequencies (Hz)", f"{freq:g}", key="esp_s_f")
+            if st.button("Calculate", key="esp_s_go"):
+                try:
+                    wl = [float(x) for x in wcs.replace(";", ",").split(",") if x.strip()]
+                    fl = [float(x) for x in frs.replace(";", ",").split(",") if x.strip()]
+                    rows_s = []
+                    with st.spinner("System analysis..."):
+                        for w_ in wl:
+                            cv = curve_
+                            try:
+                                cv = rebuild_ipr({"wc": w_ / 100.0})
+                            except ValueError:
+                                pass
+                            for f_ in fl:
+                                sol, _ = wesp.system(path, fluid, lambda q, cv=cv: float(wgl.ipr_pwf(cv, q)),
+                                                     w_ / 100.0, gor, top_p, pump_md, pump, res["Number Of Stages"],
+                                                     f_, wear, sep / 100.0, corr, p1, p2, u, eqd["heat_capacities"],
+                                                     q_max=float(np.max(cv.q)) * 0.995, n=25, motor=motor,
+                                                     method="stages")
+                                row = {"Water cut (%)": w_, "Frequency (Hz)": f_}
+                                if sol is None:
+                                    row["Liquid rate (STB/d)"] = np.nan
+                                else:
+                                    row.update({k: v for k, v in sol.items()})
+                                rows_s.append(row)
+                    ss["esp_sys"] = pd.DataFrame(rows_s)
+                except (ValueError, RuntimeError) as e:
+                    ss["esp_sys"] = str(e)
+            sres = ss.get("esp_sys")
+            if isinstance(sres, str):
+                st.error(sres)
+            elif sres is not None and len(sres):
+                st.dataframe(sres.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+                okp = sres.dropna(subset=["Liquid rate (STB/d)"])
+                if len(okp):
+                    st.pyplot(esp_pump_plot(pump, res["Number Of Stages"], points=okp, wear=wear), clear_figure=True)
+                    fig, ax = plt.subplots(figsize=(7.0, 3.8))
+                    for f_, gdf in okp.groupby("Frequency (Hz)"):
+                        ax.plot(gdf["Water cut (%)"], gdf["Oil rate (STB/d)"], marker="o", label=f"{f_:g} Hz")
+                    ax.set_xlabel("Water cut (%)")
+                    ax.set_ylabel("Oil rate (STB/d)")
+                    ax.grid(alpha=0.3, ls="--")
+                    ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    st.pyplot(fig, clear_figure=True)
+
+
+def esp_sys_plot(curves):
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+    for k, (lab, crv, sol) in enumerate(curves[:8]):
+        col = wplt.SERIES[k % len(wplt.SERIES)]
+        ax.plot(crv["Liquid rate (STB/d)"], crv["VLP at pump discharge (psia)"], color=col, lw=1.6, label=f"VLP {lab}")
+        ax.plot(crv["Liquid rate (STB/d)"], crv["Pump discharge from IPR (psia)"], color=col, lw=1.4, ls="--",
+                label=f"Pump discharge {lab}")
+        if sol is not None:
+            ax.scatter([sol["Liquid rate (STB/d)"]], [sol["Pump discharge pressure (psia)"]], color=col, s=40, zorder=6)
+    ax.set_xlabel("Liquid rate (STB/d)")
+    ax.set_ylabel("Pressure at the pump discharge (psia)")
+    ax.set_xlim(0, None)
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=6.5, ncol=2)
+    ax.set_title("ESP system: VLP against the inflow at the pump discharge", fontsize=9.5)
+    fig.tight_layout()
+    return fig
+
+
+def esp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
+    """Calculation | System for an ESP well (PROSPER: solution node at the pump discharge)."""
+    esp = ss.get("esp_equipment")
+    if not esp:
+        st.info("Enter the pump in the Equipment Data tab (Electrical submersible pump section).")
+        return
+    pump, motor, cable = esp["pump"], esp["motor"], esp["cable"]
+    sig = ("esp", tuple(sorted(base.items())), corr, p1, p2, tuple((k_, tuple(v_)) for k_, v_ in sens.items()),
+           esp["pump_md"], esp["freq"], esp["stages"], pump.name, motor.name, cable.name, esp["sep"], esp["wear"],
+           esp["method"], esp.get("chp"))
+    if go:
+        try:
+            combos = wsys.combinations(sens)
+            path = vlp_path(eqd, "tubing", (esp["pump_md"],))
+            results = []
+            with st.spinner(f"Calculating {len(combos)} case(s)..."):
+                for ch in combos:
+                    prm = {**base, **{k_: v_ for k_, v_ in ch.items() if k_ in ("whp", "wc", "gor", "u")}}
+                    f_ = float(ch.get("esp_freq", esp["freq"]))
+                    n_ = int(round(ch.get("esp_stages", esp["stages"])))
+                    changes = {k_: float(ch[k_]) for k_ in wsys.IPR_KEYS if k_ in ch}
+                    changes["wc"] = float(prm["wc"]) / 100.0
+                    cv = ipr_for(changes)
+                    sol, crv = wesp.system(path, fluid, lambda q, cv=cv: float(wgl.ipr_pwf(cv, q)),
+                                           prm["wc"] / 100.0, prm["gor"], prm["whp"], esp["pump_md"], pump, n_, f_,
+                                           esp["wear"], esp["sep"], corr, p1, p2, prm["u"], eqd["heat_capacities"],
+                                           q_max=float(np.max(cv.q)) * 0.995, n=25, motor=motor,
+                                           method=esp["method"])
+                    if sol is not None:
+                        sol.update(wesp.operate(sol["Pump power (hp)"], motor, cable, f_, esp["cable_len"],
+                                                sol["Average cable temperature (F)"]))
+                        sol["Pump min. rate (RB/d)"], sol["Pump max. rate (RB/d)"] = pump.range_at(f_)
+                        sol["Casing head pressure (psia)"] = esp.get("chp", 264.7)
+                        sol["Liquid level in annulus (ft TVD)"] = wesp.liquid_level(
+                            fluid, sol["Pump intake pressure (psia)"], sol["Pump intake temperature (F)"],
+                            {"q": np.array([sol["Liquid rate (STB/d)"]]), "wc": np.array([prm["wc"] / 100.0]),
+                             "gor": np.array([float(prm["gor"])])},
+                            float(np.interp(esp["pump_md"], path.md, path.tvd)), esp.get("chp", 264.7),
+                            float(path.tvd[0]))
+                    results.append((ch, f_, n_, sol, crv))
+            ss["esp_sys_res"] = {"sig": sig, "results": results}
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            st.error(f"Calculation failed: {e}")
+    out = ss.get("esp_sys_res")
+    if not out:
+        st.info("Press Calculate.")
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate to update.")
+    rows, curves, pts = [], [], []
+    for ch, f_, n_, sol, crv in out["results"]:
+        lab = ", ".join(f"{labels.get(k_, k_).split(' (')[0]} {v_:g}" for k_, v_ in ch.items()) or "base"
+        d_ = {labels.get(k_, k_): v_ for k_, v_ in ch.items()}
+        if sol is None:
+            d_["Note"] = "No solution - the pump cannot lift this case to the top node pressure."
+        else:
+            d_.update({k_: v_ for k_, v_ in sol.items() if not isinstance(v_, bool)})
+            d_["In recommended range"] = "Yes" if sol["In recommended range"] else "No"
+            pts.append({"Average pump rate (RB/d)": sol["Average pump rate (RB/d)"], "Head (ft)": sol["Head (ft)"]})
+        rows.append(d_)
+        curves.append((lab, crv, sol))
+    tab_ = pd.DataFrame(rows)
+    st.markdown(f"**Results** - {len(rows)} case(s); pump {pump.name}, {out['results'][0][2]} stages, motor "
+                f"{motor.name}, cable {cable.name}")
+    st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.download_button("Download ESP system results (CSV)", tab_.to_csv(index=False).encode(), "esp_system.csv")
+    over = tab_[tab_.get("Motor load (%)", pd.Series(dtype=float)) > 100] if "Motor load (%)" in tab_ else []
+    if len(over):
+        st.warning(f"{len(over)} case(s) overload the motor (load above 100 % of nameplate at that frequency).")
+    cc = st.columns([1.1, 1])
+    with cc[0]:
+        st.pyplot(esp_sys_plot(curves), clear_figure=True)
+    with cc[1]:
+        st.pyplot(esp_pump_plot(pump, out["results"][0][2], points=pd.DataFrame(pts), wear=esp["wear"]),
+                  clear_figure=True)
+    st.caption("PROSPER's convention for ESP wells: the solution node is the pump discharge. VLP = top node down "
+               "the tubing to the pump; pump discharge = IPR corrected up the casing to the intake plus the pump "
+               "pressure gain. Motor load, current and voltages from the Equipment tab's motor and cable.")
+
 
 with tabs[5]:
     st.header("Calculation")
     mode = radio(st, "Calculation", CALC_MODES, "calc_mode", horizontal=True, label_visibility="collapsed")
     SYS = mode == CALC_MODES[0]
     CHOKE = mode == CALC_MODES[3]
+    _o = ss.get("options")
+    ESP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "esp")
     st.subheader(mode)
     o = ss.get("options")
     eqd = ss.get("equipment", {})
@@ -3956,6 +4839,9 @@ with tabs[5]:
                     base["gor"] = num(st, "Total GOR (scf/STB)", "sys_gor",
                                       float(t0_["gor"]) if t0_ is not None else
                                       (float(m_.inp.rsb) if m_ else 500.0), 0.0, 1e6)
+                    if getattr(ipr_curve, "mix", None) is not None:
+                        st.caption("Multilayer IPR: the water cut and GOR above are not used - at each rate they "
+                                   "follow the layer contributions (PROSPER: dependent on the IPR pressure).")
                 else:
                     base["wgr"] = num(st, "Water gas ratio (STB/MMscf)", "sys_wgr",
                                       float(t0_["wgr"]) if t0_ is not None else 0.0, 0.0, 1e5)
@@ -3963,6 +4849,9 @@ with tabs[5]:
                     base["sep_gor"] = num(st, "Separator GOR (scf/STB)", "sys_sep_gor",
                                           round(1e6 / cg_) if cg_ > 0 else 0.0, 0.0, 1e8,
                                           help="Separator gas per barrel of condensate; 0 = dry gas.")
+                    if getattr(ipr_curve, "mix", None) is not None:
+                        st.caption("Multilayer IPR: the WGR and separator GOR above are not used - at each rate they "
+                                   "follow the layer contributions.")
                 surface = None
                 if use_surface:
                     s_corr = sel(st, "Surface equipment correlation", SURFACE_CORRELATIONS, "sys_scorr",
@@ -4060,6 +4949,11 @@ with tabs[5]:
                         var_defs.pop("choke", None)
                     if surface is not None:
                         var_defs["whp"] = "Manifold pressure (psia)"
+                    if ESP_ON:
+                        var_defs.pop("tubing_id", None)
+                        var_defs.pop("choke", None)
+                        var_defs["esp_freq"] = "Operating frequency (Hz)"
+                        var_defs["esp_stages"] = "Number of stages"
                     sens = {}
                     if sens_on:
                         chosen = st.multiselect("Variables (up to 3)", list(var_defs), format_func=var_defs.get,
@@ -4067,6 +4961,9 @@ with tabs[5]:
                         tub_id = float(eqd["downhole"][1].query("Type == 'Tubing'")["Flow ID (in)"].iloc[-1])
                         cur = {**base, "pr": ipr_arg("pr"), "j": ipr_arg("j"), "skin": ipr_arg("skin"),
                                "tubing_id": tub_id}
+                        if ESP_ON and ss.get("esp_equipment"):
+                            cur["esp_freq"] = ss["esp_equipment"]["freq"]
+                            cur["esp_stages"] = ss["esp_equipment"]["stages"]
                         if surface is not None and wsurf.has_choke(surface.items):
                             cur["choke"] = round(next(i.d_in for i in surface.items if i.kind == "choke") * 64, 2)
                         for v_ in chosen:
@@ -4107,135 +5004,149 @@ with tabs[5]:
                         st.caption(f"{n_case} case(s) will be calculated.")
 
                 go = st.button("Calculate", type="primary")
-                sig = (kind, tuple(sorted(base.items())), corr, p1, p2, method, tuple(user_rates or []), lhi,
-                       tuple((k_, tuple(v_)) for k_, v_ in sens.items()), fluid_note, ipr_curve.pr,
-                       float(ipr_curve.aof), repr(surface), node)
-                if go:
-                    try:
-                        combos = wsys.combinations(sens)
-                        path_cache = {}
+                if ESP_ON:
+                    def ipr_for_esp(ch):
+                        try:
+                            return rebuild_ipr(ch)
+                        except ValueError:
+                            return ipr_curve
+                    esp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for_esp, var_defs)
+                else:
+                    sig = (kind, tuple(sorted(base.items())), corr, p1, p2, method, tuple(user_rates or []), lhi,
+                           tuple((k_, tuple(v_)) for k_, v_ in sens.items()), fluid_note, ipr_curve.pr,
+                           float(ipr_curve.aof), repr(surface), node)
+                    if go:
+                        try:
+                            combos = wsys.combinations(sens)
+                            path_cache = {}
 
-                        def path_for(tid):
-                            if tid not in path_cache:
-                                top_, secs_, pts_ = eqd["downhole"]
-                                s2 = secs_.copy()
-                                if tid is not None:
-                                    s2.loc[s2["Type"] == "Tubing", "Flow ID (in)"] = float(tid)
-                                smd_, stvd_ = eqd["survey"]
-                                path_cache[tid] = wvlp.build_flow_path(top_, s2, pts_, smd_, stvd_, gmd, gt, o.flow_type)
-                            return path_cache[tid]
+                            def path_for(tid):
+                                if tid not in path_cache:
+                                    top_, secs_, pts_ = eqd["downhole"]
+                                    s2 = secs_.copy()
+                                    if tid is not None:
+                                        s2.loc[s2["Type"] == "Tubing", "Flow ID (in)"] = float(tid)
+                                    smd_, stvd_ = eqd["survey"]
+                                    path_cache[tid] = wvlp.build_flow_path(top_, s2, pts_, smd_, stvd_, gmd, gt, o.flow_type)
+                                return path_cache[tid]
 
-                        def ipr_for(ch):
-                            if not ch:
-                                return ipr_curve
-                            try:
-                                return rebuild_ipr(ch)
-                            except ValueError:
-                                if set(ch) <= {"wc"}:          # no recipe: keep the IPR tab curve
+                            def ipr_for(ch):
+                                if not ch:
                                     return ipr_curve
-                                raise
-                        with st.spinner(f"Calculating {len(combos)} case(s)..."):
-                            res, paths_ = wsys.solve_cases(path_for, fluid, kind, base, combos, ipr_for, corr, p1, p2,
-                                                           eqd["heat_capacities"], method, 25, user_rates,
-                                                           allow_left=(lhi == "Allow"), surface=surface, node=node)
-                        for r_, c_ in zip(res, combos):
-                            r_.case_label = c_
-                        ss["sys_res"] = {"sig": sig, "res": res, "paths": paths_, "vars": list(sens), "kind": kind,
-                                         "corr": corr, "p1": p1, "p2": p2, "labels": var_defs, "surface": surface}
-                    except (ValueError, TypeError, KeyError) as e:
-                        st.error(f"Calculation failed: {e}")
-                out = ss.get("sys_res")
-                if out and out["kind"] == kind:
-                    if out["sig"] != sig:
-                        st.info("Inputs have changed since the last calculation - press Calculate to update.")
-                    res = out["res"]
-                    qcol = "Liquid rate (STB/d)" if kind == "oil" else "Gas rate (MMscf/d)"
-                    if len(res) > 1:
-                        rows_ = []
-                        for r_ in res:
-                            d_ = {out["labels"][k_]: v_ for k_, v_ in r_.case_label.items()}
-                            if r_.q is not None:
-                                d_.update(wsys.surface_rates(kind, r_.params, r_.q))
-                                d_.update({"Bottom node pressure (psia)": r_.pwf})
-                                if r_.pwh_q is not None:
-                                    d_["Wellhead pressure (psia)"] = r_.pwh_q
-                                d_.update({"Wellhead temperature (°F)": r_.wht_q, "Stable": "Yes" if r_.stable else "No"})
-                            d_["Note"] = r_.note
-                            rows_.append(d_)
-                        tab_ = pd.DataFrame(rows_)
-                        for c_ in ("Stable", "Note"):
-                            if c_ in tab_:
-                                tab_[c_] = tab_[c_].fillna("—")
-                        st.markdown(f"**Sensitivity results** - {len(res)} cases")
-                        st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
-                        st.download_button("Download sensitivity results (CSV)", tab_.to_csv(index=False).encode(),
-                                           "system_sensitivity.csv")
-                        cc = st.columns([1.2, 1])
-                        with cc[0]:
-                            full_s_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full_sens")
-                            st.pyplot(sys_plot(res, kind, full=full_s_), clear_figure=True)
-                            if len(res) > 12:
-                                st.caption("IPR/VLP plot shows the first 12 cases.")
-                        with cc[1]:
-                            names_ = [out["labels"][k_] for k_ in out["vars"]]
-                            if qcol in tab_:
-                                st.pyplot(sens_plot(tab_, names_, {n_: n_ for n_ in names_}, qcol), clear_figure=True)
-                        pick = st.selectbox("Case details", range(len(res)), key=f"sys_case_{len(res)}",
-                                            format_func=lambda i: f"Case {i + 1}: " + ", ".join(
-                                                f"{out['labels'][k_].split(' (')[0]} = {v_:g}"
-                                                for k_, v_ in res[i].case_label.items()))
-                        r = res[pick]
-                    else:
-                        r = res[0]
-                    st.markdown("**Results**")
-                    if r.note:
-                        (st.warning if r.q is None or not r.stable else st.info)(r.note)
-                    if r.q is not None:
-                        if r.node == "top" and r.pwh_q is not None and (r.top_in_q is None or not np.isfinite(r.top_in_q)
-                                                                         or r.top_in_q > float(r.params["whp"]) + 1.0):
-                            st.caption("The surface choke is critical at the solution: the inflow at the manifold drops "
-                                       "vertically at this rate, so the manifold pressure does not affect it.")
-                        if flags == "Yes" and not r.stable:
-                            st.error("Stability flag: the solution is the left-hand intersection - the VLP crosses the IPR "
-                                     "from above, so flow is unstable (heading / liquid loading).")
-                    cc = st.columns([1.25, 1])
-                    with cc[0]:
-                        if len(res) == 1:
-                            full_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full",
-                                              help="Off: the plot zooms to the solution - a high-PI well's IPR "
-                                                   "runs far beyond what the tubing can lift. The curve table "
-                                                   "always lists every rate.")
-                            st.pyplot(sys_plot(res, kind, full=full_), clear_figure=True)
-                        st.markdown("**IPR / VLP curve data**")
-                        rt_ = wsys.rate_table(kind, r)
-                        rt_show_ = rt_.copy()
-                        for c_ in rt_show_.columns[1:]:
-                            rt_show_[c_] = [f"{v_:,.2f}" if np.isfinite(v_) else "—" for v_ in rt_show_[c_].astype(float)]
-                        st.dataframe(rt_show_, hide_index=True, width="stretch", height=330)
-                        if r.node == "top":
-                            st.caption("Inflow pressure at top node: — where the well cannot lift the rate to the top "
-                                       "node or, with a critical choke, where the bean cannot pass it.")
-                    with cc[1]:
+                                try:
+                                    return rebuild_ipr(ch)
+                                except ValueError:
+                                    if set(ch) <= {"wc"}:          # no recipe: keep the IPR tab curve
+                                        return ipr_curve
+                                    raise
+                            with st.spinner(f"Calculating {len(combos)} case(s)..."):
+                                res, paths_ = wsys.solve_cases(path_for, fluid, kind, base, combos, ipr_for, corr, p1, p2,
+                                                               eqd["heat_capacities"], method, 25, user_rates,
+                                                               allow_left=(lhi == "Allow"), surface=surface, node=node)
+                            for r_, c_ in zip(res, combos):
+                                r_.case_label = c_
+                            ss["sys_res"] = {"sig": sig, "res": res, "paths": paths_, "vars": list(sens), "kind": kind,
+                                             "corr": corr, "p1": p1, "p2": p2, "labels": var_defs, "surface": surface}
+                        except (ValueError, TypeError, KeyError) as e:
+                            st.error(f"Calculation failed: {e}")
+                    out = ss.get("sys_res")
+                    if out and out["kind"] == kind:
+                        if out["sig"] != sig:
+                            st.info("Inputs have changed since the last calculation - press Calculate to update.")
+                        res = out["res"]
+                        qcol = "Liquid rate (STB/d)" if kind == "oil" else "Gas rate (MMscf/d)"
+                        if len(res) > 1:
+                            rows_ = []
+                            for r_ in res:
+                                d_ = {out["labels"][k_]: v_ for k_, v_ in r_.case_label.items()}
+                                if r_.q is not None:
+                                    d_.update(wsys.surface_rates(kind, r_.params, r_.q))
+                                    d_.update({"Bottom node pressure (psia)": r_.pwf})
+                                    if r_.pwh_q is not None:
+                                        d_["Wellhead pressure (psia)"] = r_.pwh_q
+                                    d_.update({"Wellhead temperature (°F)": r_.wht_q, "Stable": "Yes" if r_.stable else "No"})
+                                d_["Note"] = r_.note
+                                rows_.append(d_)
+                            tab_ = pd.DataFrame(rows_)
+                            for c_ in ("Stable", "Note"):
+                                if c_ in tab_:
+                                    tab_[c_] = tab_[c_].fillna("—")
+                            st.markdown(f"**Sensitivity results** - {len(res)} cases")
+                            st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+                            st.download_button("Download sensitivity results (CSV)", tab_.to_csv(index=False).encode(),
+                                               "system_sensitivity.csv")
+                            cc = st.columns([1.2, 1])
+                            with cc[0]:
+                                full_s_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full_sens")
+                                st.pyplot(sys_plot(res, kind, full=full_s_), clear_figure=True)
+                                if len(res) > 12:
+                                    st.caption("IPR/VLP plot shows the first 12 cases.")
+                            with cc[1]:
+                                names_ = [out["labels"][k_] for k_ in out["vars"]]
+                                if qcol in tab_:
+                                    st.pyplot(sens_plot(tab_, names_, {n_: n_ for n_ in names_}, qcol), clear_figure=True)
+                            pick = st.selectbox("Case details", range(len(res)), key=f"sys_case_{len(res)}",
+                                                format_func=lambda i: f"Case {i + 1}: " + ", ".join(
+                                                    f"{out['labels'][k_].split(' (')[0]} = {v_:g}"
+                                                    for k_, v_ in res[i].case_label.items()))
+                            r = res[pick]
+                        else:
+                            r = res[0]
+                        st.markdown("**Results**")
+                        if r.note:
+                            (st.warning if r.q is None or not r.stable else st.info)(r.note)
                         if r.q is not None:
-                            det_, reg_, prof_ = wsys.solution_details(out["paths"][r.params.get("tubing_id")], fluid, kind,
-                                                                      r.params, r.q, out["corr"], out["p1"], out["p2"],
-                                                                      eqd["heat_capacities"], surface=out.get("surface"),
-                                                                      comp=comp_current())
-                            surf_tab_ = det_.pop("_surface", None)
-                            st.markdown("**Solution**")
-                            st.dataframe(solution_panel(kind, r, det_, reg_), hide_index=True, width="stretch",
-                                         height=560)
-                            if surf_tab_ is not None:
-                                st.markdown("**Surface equipment at the solution** (wellhead to manifold)")
-                                st.dataframe(surf_tab_.style.format(precision=2), hide_index=True, width="stretch")
-                            with st.expander("Pressure and temperature profile at the solution"):
-                                st.dataframe(prof_.style.format(precision=3), hide_index=True, width="stretch")
-                        st.download_button("Download IPR/VLP table (CSV)", rt_.to_csv(index=False).encode(),
-                                           "system_analysis.csv")
+                            if r.node == "top" and r.pwh_q is not None and (r.top_in_q is None or not np.isfinite(r.top_in_q)
+                                                                             or r.top_in_q > float(r.params["whp"]) + 1.0):
+                                st.caption("The surface choke is critical at the solution: the inflow at the manifold drops "
+                                           "vertically at this rate, so the manifold pressure does not affect it.")
+                            if flags == "Yes" and not r.stable:
+                                st.error("Stability flag: the solution is the left-hand intersection - the VLP crosses the IPR "
+                                         "from above, so flow is unstable (heading / liquid loading).")
+                        cc = st.columns([1.25, 1])
+                        with cc[0]:
+                            if len(res) == 1:
+                                full_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full",
+                                                  help="Off: the plot zooms to the solution - a high-PI well's IPR "
+                                                       "runs far beyond what the tubing can lift. The curve table "
+                                                       "always lists every rate.")
+                                st.pyplot(sys_plot(res, kind, full=full_), clear_figure=True)
+                            st.markdown("**IPR / VLP curve data**")
+                            rt_ = wsys.rate_table(kind, r)
+                            rt_show_ = rt_.copy()
+                            for c_ in rt_show_.columns[1:]:
+                                rt_show_[c_] = [f"{v_:,.2f}" if np.isfinite(v_) else "—" for v_ in rt_show_[c_].astype(float)]
+                            st.dataframe(rt_show_, hide_index=True, width="stretch", height=330)
+                            if r.node == "top":
+                                st.caption("Inflow pressure at top node: — where the well cannot lift the rate to the top "
+                                           "node or, with a critical choke, where the bean cannot pass it.")
+                        with cc[1]:
+                            if r.q is not None:
+                                det_, reg_, prof_ = wsys.solution_details(out["paths"][r.params.get("tubing_id")], fluid, kind,
+                                                                          r.params, r.q, out["corr"], out["p1"], out["p2"],
+                                                                          eqd["heat_capacities"], surface=out.get("surface"),
+                                                                          comp=comp_current())
+                                surf_tab_ = det_.pop("_surface", None)
+                                st.markdown("**Solution**")
+                                st.dataframe(solution_panel(kind, r, det_, reg_), hide_index=True, width="stretch",
+                                             height=560)
+                                if surf_tab_ is not None:
+                                    st.markdown("**Surface equipment at the solution** (wellhead to manifold)")
+                                    st.dataframe(surf_tab_.style.format(precision=2), hide_index=True, width="stretch")
+                                if hasattr(r.ipr_curve, "layer_table"):
+                                    st.markdown("**Layer contributions at the solution**")
+                                    st.dataframe(ipr2.layer_split(r.ipr_curve, r.pwf).style.format(precision=2),
+                                                 hide_index=True, width="stretch")
+                                with st.expander("Pressure and temperature profile at the solution"):
+                                    st.dataframe(prof_.style.format(precision=3), hide_index=True, width="stretch")
+                            st.download_button("Download IPR/VLP table (CSV)", rt_.to_csv(index=False).encode(),
+                                               "system_analysis.csv")
             elif mode == CALC_MODES[1]:
-                traverse_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface)
+                traverse_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
+                              ss.get("esp_equipment") if ESP_ON else None)
             else:
-                vfp_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface)
+                vfp_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
+                         ss.get("esp_equipment") if ESP_ON else None)
 
 
 # ================================================================ tab 7: design (continuous gas lift)
@@ -4546,11 +5457,539 @@ def gaslift_tab(o, eqd, ipr_curve):
                                  "Casing pressure, kick-off (psia)": res.pc_ko})
             st.dataframe(prof.style.format(precision=2), hide_index=True, width="stretch", height=380)
 
+def igl_design_plot(res, inp, well, gas, pso_list):
+    """Intermittent gas lift spacing plot: pressure against TVD with the casing lines, kill and unloading lines."""
+    fig, ax = plt.subplots(figsize=(7.6, 7.2))
+    v = res.valves
+    dmax = float(v["Depth (ft)"].max())
+    z = np.linspace(0.0, dmax, 60)
+    for k, pso in enumerate(pso_list):
+        pc = [wigl.casing_at_depth(gas, pso, d, well) for d in z]
+        ax.plot(pc, z, color=wplt.SERIES[1], lw=1.6 if k == 0 else 0.9, ls="-" if k == 0 else "--",
+                label="Casing opening pressure lines (Pso per valve)" if k == 0 else None)
+    ax.plot(inp.p_wh + inp.g_u * z, z, color=wplt.SERIES[0], lw=1.6, label=f"Unloading gradient {inp.g_u:.3f} psi/ft")
+    if inp.well_killed:
+        d1 = float(v["Depth (ft)"].iloc[0])
+        ax.plot([inp.p_wh, inp.p_wh + inp.g_kill * d1], [0, d1], color=wplt.SERIES[2], lw=1.2,
+                label=f"Kill fluid {inp.g_kill:.3f} psi/ft")
+    pt0, d0 = inp.p_wh + inp.g_u * float(v["Depth (ft)"].iloc[0]), float(v["Depth (ft)"].iloc[0])
+    for k in range(1, len(v)):
+        d1 = float(v["Depth (ft)"].iloc[k])
+        ax.plot([pt0, pt0 + inp.g_s * (d1 - d0)], [d0, d1], color=wplt.SERIES[2], lw=0.8, ls=":")
+        pt0, d0 = inp.p_wh + inp.g_u * d1, d1
+    pl = res.cycle["Tubing load at valve (psig)"]
+    ax.plot([res.cycle["Pressure on top of slug (psig)"], pl], [dmax - (pl - res.cycle["Pressure on top of slug (psig)"])
+                                                                / inp.g_s, dmax],
+            color=wplt.SERIES[3], lw=2.0, label="Starting slug (tubing load)")
+    xmax = float(v["Opening pressure at depth (psig)"].max()) * 1.12
+    for _, r in v.iterrows():
+        ax.axhline(r["Depth (ft)"], color=wplt.INK2, lw=0.6, alpha=0.5)
+        ax.scatter([r["Opening pressure at depth (psig)"]], [r["Depth (ft)"]], marker=">", s=46, zorder=6,
+                   color="#2ca02c" if r["Role"] == "Operating" else wplt.INK)
+        ax.text(xmax * 0.995, r["Depth (ft)"], f"Valve {int(r['Valve'])}  {r['Port (in)']} in", ha="right",
+                va="bottom", fontsize=7.5)
+    ax.set_xlim(0, xmax)
+    ax.set_ylim(dmax * 1.03, 0)
+    ax.set_xlabel("Pressure (psig)")
+    ax.set_ylabel("True vertical depth (ft)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=7.5, loc="lower left")
+    c = res.cycle
+    ax.set_title(f"Intermittent gas lift: {c['Liquid rate (B/D)']:,.1f} STB/d, {c['Cycles per day']:.1f} cycles/day, "
+                 f"{c['Gas per cycle (scf)']:,.0f} scf/cycle", fontsize=9.5)
+    fig.tight_layout()
+    return fig
+
+
+def igl_sens_plot(sens):
+    fig, ax = plt.subplots(figsize=(7.6, 4.2))
+    ax.plot(sens["Pvo - load (psi)"], sens["Liquid rate (B/D)"], marker="o", color=wplt.SERIES[0], lw=1.8,
+            label="Liquid rate")
+    ax.set_xlabel("Valve opening pressure - tubing load (psi)")
+    ax.set_ylabel("Liquid rate (STB/d)")
+    ax2 = ax.twinx()
+    ax2.plot(sens["Pvo - load (psi)"], sens["Injection GLR (scf/bbl)"], marker="s", color=wplt.SERIES[1], lw=1.4,
+             ls="--", label="Injection GLR")
+    ax2.set_ylabel("Injection GLR (scf/STB)")
+    ax.grid(alpha=0.3, ls="--")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def igl_spacing_plot(tab):
+    fig, ax = plt.subplots(figsize=(7.0, 6.6))
+    d = tab["Valve Depth (ft)"].to_numpy()
+    ax.plot(tab["Spacing Pressure (psig)"], d, color="#2ca02c", marker="s", lw=1.8, label="Spacing pressure")
+    ax.plot(tab["Closing Pressure (psig)"], d, color=wplt.SERIES[1], marker="+", lw=1.6, label="Closing pressure")
+    ax.plot(tab["Injection Pressure (psig)"], d, color=wplt.SERIES[0], marker="o", lw=1.6, label="Injection pressure")
+    for k in range(1, len(tab)):
+        ax.annotate("", xy=(tab["Closing Pressure (psig)"].iloc[k], d[k]),
+                    xytext=(tab["Spacing Pressure (psig)"].iloc[k], d[k]), arrowprops=dict(arrowstyle="->", lw=1.0))
+        ax.plot([tab["Spacing Pressure (psig)"].iloc[k - 1], tab["Injection Pressure (psig)"].iloc[k] if k == 1 else
+                 tab["Closing Pressure (psig)"].iloc[k]], [d[k - 1], d[k]], color=wplt.INK2, lw=0.7)
+    ax.set_ylim(max(d) * 1.08, 0)
+    ax.set_xlabel("Pressure (psig)")
+    ax.set_ylabel("Depth (ft)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=8, loc="lower left")
+    ax.set_title("Valve spacing - constant surface closing pressure", fontsize=9.5)
+    fig.tight_layout()
+    return fig
+
+
+def igl_optiflow_plot(tab, p_wh, g_unl):
+    fig, ax = plt.subplots(figsize=(7.0, 6.6))
+    d = tab["Depth (ft TVD)"].to_numpy()
+    ax.plot(tab["Opening pressure at depth (psig)"], d, color=wplt.SERIES[0], marker="o", lw=1.6,
+            label="Valve opening pressure at depth")
+    ax.plot(tab["Tubing pressure max (psig)"], d, color=wplt.SERIES[1], marker="^", lw=1.2, ls="--",
+            label="Maximum spacing line")
+    ax.plot(tab["Tubing pressure min (psig)"], d, color="#2ca02c", marker="s", lw=1.2, ls="--",
+            label="Minimum spacing line (tubing pressure)")
+    ax.plot([p_wh, p_wh + g_unl * d[0]], [0, d[0]], color=wplt.INK2, lw=1.0, label="Unloading gradient")
+    for k in range(1, len(d)):
+        p0 = tab["Tubing pressure min (psig)"].iloc[k - 1]
+        ax.plot([p0, p0 + g_unl * (d[k] - d[k - 1])], [d[k - 1], d[k]], color=wplt.INK2, lw=0.8)
+    for x in d:
+        ax.axhline(x, color=wplt.INK2, lw=0.5, alpha=0.5)
+    ax.set_ylim(max(d) * 1.05, 0)
+    ax.set_xlim(0, None)
+    ax.set_xlabel("Pressure (psig)")
+    ax.set_ylabel("True vertical depth (ft)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=8, loc="lower left")
+    ax.set_title("Valve spacing - Opti-Flow", fontsize=9.5)
+    fig.tight_layout()
+    return fig
+
+
+def igl_system_plot(curve, sol):
+    fig, ax = plt.subplots(figsize=(7.6, 4.8))
+    ax.plot(curve["Intermittent rate (STB/d)"], curve["Flowing BHP (psig)"], color=wplt.SERIES[0], lw=1.8,
+            label="Intermittent 'VLP' (by starting slug)")
+    ax.plot(curve["IPR rate (STB/d)"], curve["Flowing BHP (psig)"], color=wplt.SERIES[1], lw=1.8, label="IPR")
+    if sol is not None:
+        ax.scatter([sol["Daily Production Rate (STB/d)"]], [sol["Flowing BHP (psig)"]], s=60, zorder=6, color=wplt.INK)
+    ax.set_xlabel("Average liquid rate (STB/d)")
+    ax.set_ylabel("Pressure at the operating valve (psig)")
+    ax.set_xlim(0, None)
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def igl_prosper_tab(o, eqd, ipr_curve):
+    """Design | Intermittent Gas Lift, PROSPER's model: White et al. (1963) slug velocity and fall back."""
+    st.caption("PROSPER's intermittent model (Design | Intermittent Gas Lift): the slug above the operating valve "
+               "(tubing liquid level to valve) is lifted at the slug velocity of White et al. (1963), "
+               "vs = 1430 (Ap/At) sqrt((Pc/Pt)^2 - Pc/Pt), solved with the slug pressure Pt = Pwh + G S (1 + f vs^2/2gd); "
+               "fall back FB = D / (1 + vs/vb); one cycle is the time for the produced slug to surface; gas per cycle "
+               "is the tubing volume above the produced slug. No IPR is involved: the liquid level is an input.")
+    g = 14.696
+    gmd, gt = eqd["geothermal"]
+    top_, secs_, pts_ = eqd["downhole"]
+    path = vlp_path(eqd, "tubing", ())
+    fluid, fluid_note = vlp_fluid(o, "oil", 6000.0, float(np.min(gt)) - 10, float(np.max(gt)) + 10)
+    if fluid is None:
+        st.warning(fluid_note)
+        return
+    seg_at = lambda md: int(np.clip(np.searchsorted(path.md, md) - 1, 0, len(path.d_h) - 1))
+    t_id = float(path.d_h[seg_at(float(val("iglp_md", path.md[-1] * 0.8)) - 1.0)] * 12)
+    tvd_at = lambda md: float(np.interp(md, path.md, path.tvd))
+    temp = lambda d: float(np.interp(d, path.tvd, path.t_form))
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Input data**")
+        c = st.columns(2)
+        p_inj = num(c[0], "Surface injection pressure (psia)", "iglp_pinj", 1514.7, 50.0, 2e4)
+        inj_md = num(c[1], "Injection depth (ft MD)", "iglp_md", float(round(path.md[-1] * 0.8)), float(path.md[0]) + 10,
+                     float(path.md[-1]))
+        c = st.columns(2)
+        sg = num(c[0], "Gas lift gas gravity", "iglp_sg", float(val("gl_sg", 0.70)), 0.55, 2.0, None, "%.3f")
+        pwh = num(c[1], "Wellhead pressure (psia)", "iglp_pwh", 264.7, 14.7, 5000.0)
+        c = st.columns(2)
+        port = num(c[0], "Valve port size (1/64 in)", "iglp_port", 24.0, 4.0, 128.0, None, "%.4g")
+        wc = num(c[1], "Water cut (%)", "iglp_wc", float(val("gl_wc", 0.0)), 0.0, 100.0)
+        c = st.columns(2)
+        level = num(c[0], "Tubing liquid level (ft MD)", "iglp_level", float(round(path.md[-1] * 0.5)),
+                    float(path.md[0]), float(path.md[-1]))
+        gor = num(c[1], "Total GOR (scf/STB)", "iglp_gor", float(val("sys_gor", 300.0)), 0.0, 1e5,
+                  help="Gas in solution in the slug (liquid density and viscosity).")
+        vb_mode = sel(st, "Bubble velocity", ["PROSPER-calibrated", "Entered"], "iglp_vbm",
+                      help="White et al. measured vb as a constant for a fluid and tubing size. PROSPER's values vary "
+                           "with slug velocity, slug pressure and water cut; the calibrated form reproduces seven "
+                           "PROSPER runs (4.052-in tubing) within 0.1 %; other tubing sizes are untested.")
+        vb_in = num(st, "Bubble velocity (ft/s)", "iglp_vb", 2.3, 0.1, 20.0, None, "%.4g", disabled=vb_mode != "Entered")
+        st.caption(f"Tubing ID at the valve {t_id:.3f} in. Liquid properties from the PVT at the bottom-hole temperature "
+                   f"({float(path.t_form[-1]):.0f} °F) and the average slug pressure; Moody friction. {fluid_note}.")
+        go = st.button("Calculate", type="primary", key="iglp_go")
+        st.markdown("**Valves**")
+        vmeth = sel(st, "Valve spacing", ["Constant surface closing pressure", "Opti-Flow"], "iglp_vmeth",
+                    help="Constant surface closing pressure: PROSPER's procedure (Tutorial 24). Opti-Flow (Axelson; "
+                         "Takacs, Gas Lift Manual 6.5.3): for wells with little information on potential - injection "
+                         "always at the deepest possible valve, tubing pressure taken as a fraction of the gas "
+                         "pressure at each valve.")
+        c = st.columns(2)
+        g_unl = num(c[0], "Unloading fluid gradient (psi/ft)", "iglp_gu", 0.46, 0.2, 0.7, None, "%.3f")
+        max_md = num(c[1], "Maximum depth of injection (ft MD)", "iglp_maxmd", float(round(path.md[-1] * 0.8)),
+                     float(path.md[0]) + 10, float(path.md[-1]))
+        lg_ = wgl.LiftGas(sg, t_surface=temp(float(path.tvd[0])))
+        if vmeth == "Constant surface closing pressure":
+            c = st.columns(2)
+            sf = num(c[0], "Spacing factor (psi/ft)", "iglp_sf", 0.1, 0.0, 0.5, None, "%.3f",
+                     help="Slope of the spacing pressure line from the wellhead pressure; set by tubing size and rate.")
+            psc = num(c[1], "Surface closing pressure (psia)", "iglp_psc", 814.7, 14.7, 2e4)
+            gg_def = wigl.annulus_gas_gradient(lg_, p_inj - g, float(path.tvd[0]), tvd_at(max_md), temp)
+            c = st.columns(2)
+            gg_calc = flag(c[0].checkbox, "Calculate annulus gas gradient", "iglp_ggc", True,
+                           help="Gas density at the average column pressure and temperature between the wellhead and "
+                                "the maximum depth (PROSPER's tutorial value is about 1 % higher).")
+            gg = gg_def if gg_calc else num(c[1], "Annulus gas gradient (psi/ft)", "iglp_gg", round(gg_def, 5), 0.001,
+                                            0.2, None, "%.5f")
+            if gg_calc:
+                c[1].text_input("Annulus gas gradient (psi/ft)", f"{gg_def:.5f}", disabled=True, key="iglp_gg_show")
+        else:
+            c = st.columns(2)
+            sbhp = num(c[0], "Static BHP (psia)", "iglp_sbhp", float(ipr_curve.pr) if ipr_curve is not None else 2000.0,
+                       14.7, 2e4, help="Sets the static liquid level, Lperf - SBHP / unloading gradient (eq. 6.11). "
+                                       "Default: the IPR reservoir pressure.")
+            perf_md = num(c[1], "Perforation depth (ft MD)", "iglp_perf", float(path.md[-1]), float(path.md[0]) + 10,
+                          float(path.md[-1]))
+            c = st.columns(3)
+            odrop = num(c[0], "Opening pressure below injection (psi)", "iglp_odrop", 100.0, 0.0, 1000.0,
+                        help="Popen = Pinj - this (Takacs: 100).")
+            tmarg = num(c[1], "Top valve margin (psi)", "iglp_tmarg", 50.0, 0.0, 500.0)
+            ustep = num(c[2], "Unloading valve Pso step (psi)", "iglp_ustep", 20.0, 0.0, 200.0,
+                        help="Valves above the static level open this much higher per valve (counted up from the "
+                             "deepest) so the passing slug does not open them (Takacs Table 6-2: 20).")
+            c = st.columns(4)
+            a_lo = num(c[0], "Above static: min line (%)", "iglp_alo", 30.0, 1.0, 100.0)
+            a_hi = num(c[1], "Above static: max line (%)", "iglp_ahi", 90.0, 1.0, 100.0)
+            b_lo = num(c[2], "Below static: min line (%)", "iglp_blo", 55.0, 1.0, 100.0)
+            b_hi = num(c[3], "Below static: max line (%)", "iglp_bhi", 85.0, 1.0, 100.0)
+            ovalve = sel(st, "Valve", list(wigl.IGL_VALVES) + list(wgl.VALVES), "iglp_ovalve",
+                         help="R = port / bellows area for the settings; the port is the valve port size above.")
+        go_v = st.button("Valves", key="iglp_valves")
+        st.markdown("**System analysis**")
+        st.caption("PROSPER Calculation | System for an intermittent well: the starting slug (and so the liquid "
+                   "level) is found where the IPR rate at the slug pressure equals the intermittent rate. PROSPER "
+                   "takes the slug pressure at the valve as the flowing BHP.")
+        add_below = flag(st.checkbox, "Add the liquid column below the valve to the BHP", "iglp_below", False,
+                         help="Off as in PROSPER. On: BHP at the IPR datum = slug pressure + liquid gradient x "
+                              "(datum - valve depth).")
+        go_s = st.button("System", key="iglp_sys", disabled=ipr_curve is None)
+    lg = wgl.LiftGas(sg, t_surface=temp(float(path.tvd[0])))
+    with right:
+        if go_s:
+            try:
+                curve_ = ipr_curve
+                if curve_.fluid == "oil":
+                    try:
+                        curve_ = rebuild_ipr({"wc": wc / 100.0})
+                    except ValueError:
+                        pass
+                sol, crv = wigl.prosper_system(
+                    fluid, lg, p_inj - g, pwh - g, float(path.tvd[0]), tvd_at(inj_md), port, t_id, wc, temp, lambda pwf: float(wgl.ipr_rate(curve_, pwf + g)), gor=gor,
+                    rough_in=float(path.rough[seg_at(inj_md - 1.0)] * 12), t_fluid=float(path.t_form[-1]),
+                    v_bubble=vb_in if vb_mode == "Entered" else None,
+                    below_valve_grad=0.0, perf_tvd=float(path.tvd[-1]))
+                if add_below and sol is not None:
+                    gl_ = sol["Liquid gradient (psi/ft)"]
+                    sol, crv = wigl.prosper_system(
+                        fluid, lg, p_inj - g, pwh - g, float(path.tvd[0]), tvd_at(inj_md), port, t_id, wc, temp,
+                        lambda pwf: float(wgl.ipr_rate(curve_, pwf + g)), gor=gor,
+                        rough_in=float(path.rough[seg_at(inj_md - 1.0)] * 12), t_fluid=float(path.t_form[-1]),
+                        v_bubble=vb_in if vb_mode == "Entered" else None, below_valve_grad=gl_,
+                        perf_tvd=float(path.tvd[-1]))
+                ss["iglp_sys_res"] = (sol, crv)
+            except (ValueError, RuntimeError, ZeroDivisionError) as e:
+                ss["iglp_sys_res"] = str(e)
+        sr = ss.get("iglp_sys_res")
+        if isinstance(sr, str):
+            st.error(sr)
+        elif sr is not None:
+            sol, crv = sr
+            st.markdown("**System analysis**")
+            if sol is None:
+                st.warning("No solution: the intermittent rate does not meet the IPR for any slug length (the "
+                           "injection pressure may not lift a slug heavy enough, or the well flows more than the "
+                           "intermittent cycle can remove).")
+            else:
+                keys_ = ["Daily Production Rate (STB/d)", "Flowing BHP (psig)", "Liquid Level (ft below surface)",
+                         "Downhole Injection Pressure (psig)", "Gas Injection Rate (MMscf/day)",
+                         "Gas Injection Rate, in situ (MMcf/day)", "Slug Velocity (ft/s)", "Bubble Velocity (ft/s)",
+                         "Fall Back (ft)", "Produced Slug Length (ft)", "Produced Slug Volume (bbl)",
+                         "Pcasing / Pslug", "Produced/Accumulated Slug Length", "Starting Slug Length / Valve Depth",
+                         "Time To Surface (s)", "Cycle Frequency (1/hour)"]
+                rows_ = [(k_.rsplit(" (", 1)[0], sol[k_], k_.rsplit(" (", 1)[1][:-1] if k_.endswith(")") else "")
+                         for k_ in keys_ if k_ in sol]
+                st.dataframe(pd.DataFrame(rows_, columns=["Result", "Value", "Units"]).style.format(
+                    {"Value": "{:,.6g}"}), hide_index=True, width="stretch")
+            if sol is not None and sol.get("Second solution (longer slug)"):
+                st.caption("The intermittent curve crosses the IPR a second time at a longer slug (higher BHP, lower "
+                           "rate); as PROSPER, the shorter-slug solution is reported.")
+            if len(crv):
+                st.pyplot(igl_system_plot(crv, sol), clear_figure=True)
+        if go:
+            try:
+                r = wigl.prosper_intermittent(
+                    fluid, lg, p_inj - g, pwh - g, float(path.tvd[0]), tvd_at(inj_md), tvd_at(level), port, t_id, wc,
+                    temp, gor=gor, rough_in=float(path.rough[seg_at(inj_md - 1.0)] * 12), t_fluid=float(path.t_form[-1]),
+                    v_bubble=vb_in if vb_mode == "Entered" else None)
+                ss["iglp_res"] = r
+            except (ValueError, RuntimeError, ZeroDivisionError) as e:
+                ss["iglp_res"] = {"note": str(e)}
+        r = ss.get("iglp_res")
+        if r is not None:
+            st.markdown("**Results**")
+            if "note" in r:
+                st.error(r["note"])
+            rows_ = [(k_.rsplit(" (", 1)[0], v_, k_.rsplit(" (", 1)[1][:-1] if k_.endswith(")") else "")
+                     for k_, v_ in r.items() if k_ != "note"]
+            st.dataframe(pd.DataFrame(rows_, columns=["Result", "Value", "Units"]).style.format(
+                {"Value": "{:,.6g}"}), hide_index=True, width="stretch")
+        if go_v:
+            try:
+                if vmeth == "Constant surface closing pressure":
+                    ss["iglp_vtab"] = wigl.constant_psc_spacing(p_inj - g, pwh - g, psc - g, g_unl, sf, gg, max_md,
+                                                                  float(path.md[0]))
+                else:
+                    vt = wigl.IGL_VALVES.get(ovalve) or wgl.VALVES[ovalve]
+                    tab_, lst_ = wigl.optiflow_spacing(
+                        lg, p_inj - g, pwh - g, g_unl, sbhp - g, tvd_at(perf_md), tvd_at(max_md), temp,
+                        wh_tvd=float(path.tvd[0]), open_drop=odrop, top_margin=tmarg,
+                        above=(a_lo / 100, a_hi / 100), below=(b_lo / 100, b_hi / 100), unl_step=ustep, valve=vt,
+                        port_64=int(round(port)))
+                    tab_.insert(2, "Depth (ft MD)", [float(np.interp(x, path.tvd, path.md)) for x in tab_["Depth (ft)"]])
+                    ss["iglp_vtab"] = ("optiflow", tab_.rename(columns={"Depth (ft)": "Depth (ft TVD)"}), lst_)
+            except ValueError as e:
+                ss["iglp_vtab"] = str(e)
+        vt_ = ss.get("iglp_vtab")
+        if isinstance(vt_, tuple):
+            st.markdown("**Valve spacing - Opti-Flow**")
+            st.dataframe(vt_[1].style.format(precision=2), hide_index=True, width="stretch")
+            st.caption(f"Static liquid level {vt_[2]:,.0f} ft TVD. Spacing lines: gas columns from "
+                       f"{a_lo:.0f} / {a_hi:.0f} % of the surface opening pressure above the static level and "
+                       f"{b_lo:.0f} / {b_hi:.0f} % below; tubing pressure at each valve from the minimum line.")
+            st.pyplot(igl_optiflow_plot(vt_[1], pwh - g, g_unl), clear_figure=True)
+        elif isinstance(vt_, str):
+            st.error(vt_)
+        elif vt_ is not None:
+            st.markdown("**Valve spacing - constant surface closing pressure**")
+            st.dataframe(vt_.style.format(precision=2), hide_index=True, width="stretch")
+            st.caption(f"Deepest valve {vt_['Valve Depth (ft)'].iloc[-1]:,.1f} ft: use it as the injection depth.")
+            st.pyplot(igl_spacing_plot(vt_), clear_figure=True)
+
+
+def igl_tab(o, eqd, ipr_curve):
+    """Design | Intermittent gas lift - Brown, The Technology of Artificial Lift Methods Vol. 2a, section 3.43."""
+    st.caption("Intermittent gas lift after Brown (Vol. 2a, 3.43): valve spacing with unbalanced pressure valves and a "
+               "surface opening pressure drop per valve, the operating valve port from the gas needed per cycle and "
+               "the casing pressure drop that supplies it (choke or time-cycle control), valve settings, and the "
+               "production from Brown's weighted-average flowing BHP (slug travel, after-flow and build-up periods, "
+               "with or without a standing valve, fallback per 1000 ft) with the IPR for the feed-in. Brown: consider "
+               "continuous lift above about 200 B/D in 2-in tubing (300 in 3-in, 400-600 with chambers).")
+    gmd, gt = eqd["geothermal"]
+    top_, secs_, pts_ = eqd["downhole"]
+    tub = secs_[secs_["Type"] == "Tubing"]
+    if not len(tub):
+        st.info("Intermittent gas lift needs tubing in the Equipment Data.")
+        return
+    t_od, c_id = tub["Tubing OD (in)"].iloc[-1], tub["Casing ID (in)"].iloc[-1]
+    if not (pd.notna(t_od) and pd.notna(c_id) and c_id > t_od):
+        st.info("Enter the tubing OD and casing ID of the tubing sections (Equipment Data): the annulus stores the "
+                "gas for each cycle.")
+        return
+    path = vlp_path(eqd, "tubing", ())
+    t_id = float(path.d_h[-1] * 12)
+    perf_tvd = float(path.tvd[-1])
+    bottom_tub = float(tub["MD bottom (ft)"].max())
+    fluid, fluid_note = vlp_fluid(o, "oil", max(float(ipr_curve.pr), 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                  float(np.max(gt)) + 10)
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Design options**")
+        c = st.columns(2)
+        control = sel(c[0], "Surface control", ["Time cycle", "Choke"], "igl_ctrl",
+                      help="Time cycle (intermitter): half of the casing drop that supplies the gas is put in the valve "
+                           "spread. Choke: the whole drop - a larger port.")
+        spacing = sel(c[1], "Spacing", ["Graphical (gas column)", "Analytical (Brown 3.4354)"], "igl_spacing",
+                      help="Graphical: the load line from each valve meets the next valve's casing line with the gas "
+                           "column. Analytical: Brown eq. 3.451-3.455, gas column neglected, the pressure of the valve "
+                           "above used for the next one.")
+        c = st.columns(2)
+        valve = sel(c[0], "Valve", list(wigl.IGL_VALVES) + list(wgl.VALVES), "igl_valve",
+                    help="Unbalanced pressure (casing) valves; Brown Table 3.488 R values.")
+        vt = wigl.IGL_VALVES.get(valve) or wgl.VALVES[valve]
+        ports = list(vt.ports)
+        unl_port = sel(c[1], "Unloading valve port", ports, "igl_uport", 20 if 20 in ports else ports[0],
+                       format_func=lambda p_: f"{wigl.port_label(p_)} in")
+        c = st.columns(2)
+        op_auto = sel(c[0], "Operating valve port", ["From gas requirement"] + ports, "igl_oport",
+                      format_func=lambda p_: p_ if isinstance(p_, str) else f"{wigl.port_label(p_)} in")
+        load = sel(c[1], "Tubing load", ["Half reservoir pressure", "Pvo - dP"], "igl_load",
+                   help="Brown: a design load of half the static BHP, or the valve opening pressure less 150-300 psi.")
+        c = st.columns(2)
+        killed = flag(c[0].checkbox, "Well loaded to the surface (killed)", "igl_killed", True,
+                      help="Off: the top valve is placed at the static fluid level.")
+        sv = flag(c[1].checkbox, "Standing valve", "igl_sv", True,
+                  help="Recommended for intermittent installations (Brown): the formation does not see the gas "
+                       "pressure while the slug is lifted.")
+        dome_hp = flag(st.checkbox, "Dome correction > 1200 psig (Winkler-Eads)", "igl_dome_hp", True)
+        st.markdown("**Pressures and gradients**")
+        c = st.columns(2)
+        p_ko = num(c[0], "Available injection pressure (psia)", "igl_pko", float(val("gl_pko", 1064.7)), 50.0, 2e4)
+        pwh = num(c[1], "Wellhead pressure on top of slug (psia)", "igl_pwh", 94.7, 14.7, 5000.0)
+        c = st.columns(2)
+        m_top = num(c[0], "Top valve margin below available (psi)", "igl_mtop", 50.0, 0.0, 500.0)
+        dpso = num(c[1], "Surface opening drop per valve (psi)", "igl_dpso", 25.0, 0.0, 200.0,
+                   help="Brown recommends 10-25 psi.")
+        c = st.columns(2)
+        op_drop = num(c[0], "Extra drop at operating valve (psi)", "igl_opdrop", 50.0, 0.0, 300.0,
+                      help="25-100 psi flags the operating valve and keeps the upper valves closed (Brown).")
+        dp_load = num(c[1], "Pvo - tubing load (psi)", "igl_dpl", 200.0, 50.0, 600.0, disabled=load != "Pvo - dP",
+                      help="Brown: start with 200-300; 150-170 gives the lowest GLR, 300-400 more liquid.")
+        gs_pvt = np.nan
+        if fluid is not None:
+            try:
+                st_ = fluid.state(np.array([max(float(ipr_curve.pr) / 2, 100.0)]), np.array([float(np.mean(gt))]),
+                                  {"q": np.array([100.0]), "wc": np.array([float(val("igl_wc", 0.0)) / 100]),
+                                   "gor": np.array([0.0])})
+                gs_pvt = float(st_["rho_l"][0]) / 144.0
+            except Exception:
+                gs_pvt = np.nan
+        c = st.columns(2)
+        g_s = num(c[0], "Well fluid gradient (psi/ft)", "igl_gs", round(gs_pvt, 3) if np.isfinite(gs_pvt) else 0.40,
+                  0.2, 0.6, None, "%.3f", help="Dead liquid at the design water cut from the PVT by default.")
+        g_kill = num(c[1], "Kill fluid gradient (psi/ft)", "igl_gkill", 0.40, 0.2, 0.7, None, "%.3f",
+                     disabled=not killed)
+        c = st.columns(2)
+        gu_default = wigl.unloading_gradient_rate(200.0, t_id)
+        g_u = num(c[0], "Unloading gradient (psi/ft)", "igl_gu", round(gu_default, 3), 0.005, 0.3, None, "%.3f",
+                  help="Brown: minimum 0.04 psi/ft in 2-in and 2.5-in tubing; Otis Fig 3F gives 0.064 at 200 B/D "
+                       "in 2-in. Default: Fig 3F at 200 B/D scaled to this tubing.")
+        wc = num(c[1], "Water cut (%)", "igl_wc", float(val("gl_wc", 0.0)), 0.0, 99.0)
+        st.markdown("**Slug and cycle**")
+        c = st.columns(2)
+        fb = num(c[0], "Fallback (% per 1000 ft)", "igl_fb", 7.0, 0.0, 15.0, None, "%.3g",
+                 help="Brown: 5-7 % per 1000 ft in 2-in tubing (3-5 % for chambers); field data about 10 %.")
+        top_allow = num(c[1], "Gas on top of slug above Pwh (psi)", "igl_topa", 10.0, 0.0, 200.0)
+        c = st.columns(2)
+        t1f = num(c[0], "Slug travel, Time I (min/1000 ft)", "igl_t1", 1.5, 0.3, 5.0, None, "%.3g",
+                  help="Brown, 2-in tubing: 1.5 min per 1000 ft (about 1000 ft/min slug velocity, valve open).")
+        t2f = num(c[1], "After surfacing, Time II (min/1000 ft)", "igl_t2", 0.5, 0.0, 5.0, None, "%.3g")
+        max_md = num(st, "Operating valve depth (ft MD)", "igl_maxmd", float(round(bottom_tub - 30.0)), 100.0,
+                     float(path.md[-1]), help="The deepest valve, above the packer.")
+        st.markdown("**Lift gas**")
+        c = st.columns(5)
+        lg = wgl.LiftGas(num(c[0], "Gravity", "igl_sg", float(val("gl_sg", 0.70)), 0.55, 2.0, None, "%.3f"),
+                         num(c[1], "CO2 (%)", "igl_co2", 0.0, 0.0, 100.0), num(c[2], "N2 (%)", "igl_n2", 0.0, 0.0, 100.0),
+                         num(c[3], "H2S (%)", "igl_h2s", 0.0, 0.0, 100.0),
+                         num(c[4], "Surface T (°F)", "igl_tg", float(val("gl_tg", 80.0)), 0.0, 300.0))
+        st.caption(f"Tubing ID {t_id:.3f} in, OD {t_od:.3f} in, casing ID {c_id:.3f} in. IPR: "
+                   f"{ss.get('ipr_meta', {}).get('model', '')} (Pr {ipr_curve.pr:,.0f} psia, datum {path.md[-1]:,.0f} "
+                   f"ft MD). Gradient from PVT: {gs_pvt:.3f} psi/ft.")
+        go = st.button("Design", type="primary", key="igl_go")
+    if ipr_curve.fluid == "oil":
+        try:
+            ipr_curve = rebuild_ipr({"wc": wc / 100.0})
+        except ValueError:
+            pass
+    g = 14.696
+    max_tvd = float(np.interp(max_md, path.md, path.tvd))
+    inp = wigl.IGLInput(p_ko=p_ko - g, top_margin=m_top, p_wh=pwh - g, pso_drop=dpso, op_drop=op_drop, g_s=g_s,
+                        g_kill=g_kill, g_u=g_u, well_killed=killed, spacing=spacing, max_depth=max_tvd, valve=valve,
+                        control=control, unloading_port=int(unl_port),
+                        operating_port=None if isinstance(op_auto, str) else int(op_auto), load=load,
+                        dp_load=dp_load, fallback=fb, top_allowance=top_allow, t1_factor=t1f, t2_factor=t2f,
+                        standing_valve=sv, high_pressure_dome=dome_hp)
+    curve = ipr_curve
+    temp = lambda d: float(np.interp(d, path.tvd, path.t_form))
+    well = wigl.IGLWell(t_id, float(t_od), float(c_id), perf_tvd, float(curve.pr) - g,
+                        lambda pwf: float(wgl.ipr_rate(curve, pwf + g)), temp, t_surface=lg.t_surface)
+    sig = (repr(inp), repr(lg), t_id, float(t_od), float(c_id), perf_tvd, float(curve.pr), float(curve.aof))
+    with right:
+        if go:
+            try:
+                with st.spinner("Designing..."):
+                    res = wigl.design(inp, lg, well)
+                    sens = wigl.load_sensitivity(inp, lg, well, res)
+                ss["igl_res"] = {"sig": sig, "res": res, "sens": sens, "err": None,
+                                 "inp": inp, "well": well, "gas": lg}
+            except (ValueError, RuntimeError, ZeroDivisionError) as e:
+                ss["igl_res"] = {"sig": sig, "res": None, "err": str(e)}
+        out = ss.get("igl_res")
+        if out is None:
+            st.info("Set the design options and press Design.")
+            return
+        if out["err"]:
+            st.error(f"Design failed: {out['err']}")
+            return
+        if out["sig"] != sig:
+            st.info("Inputs have changed since the last design - press Design to update.")
+        res = out["res"]
+        c_ = res.cycle
+        st.markdown("**Design results**")
+        summ = pd.DataFrame([
+            ("Liquid rate", c_["Liquid rate (B/D)"], "STB/d"),
+            ("Oil rate", c_["Liquid rate (B/D)"] * (1 - wc / 100.0), "STB/d"),
+            ("Cycle time", c_["Cycle time (min)"], "min"),
+            ("Cycles per day", c_["Cycles per day"], ""),
+            ("Recovered per cycle", c_["Recovered per cycle (bbl)"], "bbl"),
+            ("Gas per cycle", c_["Gas per cycle (scf)"], "scf"),
+            ("Injection gas", c_["Injection gas (Mscf/d)"] / 1000.0, "MMscf/d"),
+            ("Injection GLR", c_["Injection GLR (scf/bbl)"], "scf/STB"),
+            ("Weighted-average flowing BHP", c_["Weighted-average flowing BHP (psig)"] + g, "psia"),
+            ("Operating valve", f"{res.valves['Depth (ft)'].iloc[-1]:,.0f} ft TVD, port "
+                                f"{res.gas['Operating port']} in", ""),
+        ], columns=["Result", "Value", "Units"])
+        summ["Value"] = [f"{v_:,.4g}" if isinstance(v_, (float, np.floating)) else v_ for v_ in summ["Value"]]
+        st.dataframe(summ, hide_index=True, width="stretch")
+        for m_ in res.notes:
+            st.warning(m_)
+        vt_ = res.valves.copy()
+        vt_.insert(2, "Depth (ft MD)", [float(np.interp(d_, path.tvd, path.md)) for d_ in vt_["Depth (ft)"]])
+        vt_ = vt_.rename(columns={"Depth (ft)": "Depth (ft TVD)"})
+        st.dataframe(vt_.style.format(precision=2), hide_index=True, width="stretch")
+        st.download_button("Download valve table (CSV)", vt_.to_csv(index=False).encode(), "intermittent_valves.csv")
+        t1, t2, t3, t4 = st.tabs(["Design plot", "Cycle", "Gas and port", "Load sensitivity"])
+        psos = list(res.valves["Surface opening pressure (psig)"])
+        with t1:
+            st.pyplot(igl_design_plot(res, out["inp"], out["well"], out["gas"], psos), clear_figure=True)
+        with t2:
+            st.caption("Brown's weighted-average flowing BHP: Time I slug travel (valve open), Time II after the slug "
+                       "surfaces (minimum pressure), Time III build-up from the minimum back to the tubing load. "
+                       "Pressures at the operating valve; the BHP adds the liquid below the valve.")
+            rows_ = [(k_, v_) for k_, v_ in c_.items()]
+            st.dataframe(pd.DataFrame(rows_, columns=["Result", "Value"]).style.format(precision=4, na_rep="—"),
+                         hide_index=True, width="stretch")
+        with t3:
+            st.dataframe(pd.DataFrame([(k_, v_ if isinstance(v_, str) else f"{v_:,.4g}") for k_, v_ in
+                                       res.gas.items()], columns=["Result", "Value"]),
+                         hide_index=True, width="stretch")
+            st.caption("Gas per cycle: Brown eq. 3.439-3.446 (the tubing above the valve less the slug left at "
+                       "the surface, at the average pressure under the slug). The annulus above the valve supplies it "
+                       "by a casing pressure drop; under choke control the whole drop is put in the valve spread, "
+                       "under time-cycle control half. Port: R = spread / (Pvo - Pt), the largest port not above.")
+        with t4:
+            sens = out["sens"]
+            if len(sens):
+                st.pyplot(igl_sens_plot(sens), clear_figure=True)
+                st.dataframe(sens.style.format(precision=2), hide_index=True, width="stretch")
+                st.caption("Same valve and injection pressure, tubing load varied. Brown: more Pvo - load gives more "
+                           "liquid at a higher GLR; 150-170 psi gives the lowest GLR.")
+
 
 with tabs[6]:
     st.header("Design")
-    st.radio("Artificial lift", ["Gas lift (continuous)"], horizontal=True, key="design_kind",
-             help="Further artificial lift designs (ESP, rod pump, ...) can be added here.")
+    design_kind = st.radio("Artificial lift", ["Gas lift (continuous)", "Gas lift (intermittent)",
+                                               "Electrical submersible pump"], horizontal=True,
+                           key="design_kind", help="Further artificial lift designs (ESP, rod pump, ...) can be added "
+                                                   "here.")
     o = ss.get("options")
     eqd = ss.get("equipment", {})
     ipr_curve = ss.get("ipr_curve")
@@ -4558,15 +5997,25 @@ with tabs[6]:
     if o is None or o.errors:
         blocker = "Fix the configuration in the Options summary first."
     elif o.is_gas or o.is_injector:
-        blocker = "Continuous gas lift design applies to oil producers."
+        blocker = "Artificial lift design applies to oil producers."
     elif o.flow_type != "tubing":
-        blocker = "Gas lift design needs tubing flow (the lift gas goes down the annulus)."
+        blocker = ("Artificial lift design needs tubing flow (lift gas or produced gas goes up the annulus; the "
+                   "pump sits on the tubing).")
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
         blocker = "Complete the Equipment Data tab first."
     elif ipr_curve is None or ipr_curve.fluid != "oil":
         blocker = "Calculate an oil IPR in the IPR Data tab first."
     if blocker:
         st.info(blocker)
+    elif design_kind == "Electrical submersible pump":
+        esp_tab(o, eqd, ipr_curve)
+    elif design_kind == "Gas lift (intermittent)":
+        igl_method = st.radio("Method", ["PROSPER (White et al. slug model)", "Brown (weighted-average BHP)"],
+                              horizontal=True, key="igl_method")
+        if igl_method.startswith("PROSPER"):
+            igl_prosper_tab(o, eqd, ipr_curve)
+        else:
+            igl_tab(o, eqd, ipr_curve)
     else:
         gaslift_tab(o, eqd, ipr_curve)
 

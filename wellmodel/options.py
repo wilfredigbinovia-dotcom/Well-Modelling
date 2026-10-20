@@ -40,13 +40,29 @@ SAND_CONTROL = {
     "slotted_liner": "Slotted liner",
 }
 
+SEPARATORS = {
+    "single_stage": "Single-stage separator",
+}
+WATER_VAPOUR = {
+    "none": "No calculations",
+    "calculate": "Calculate condensed water vapour",
+}
+
+ARTIFICIAL_LIFT = {
+    "none": "None",
+    "esp": "Electrical submersible pump",
+}
+
 FIELDS = {  # field -> (display name, choices)
     "fluid_type": ("Fluid", FLUID_TYPES),
     "method": ("Method", METHODS),
+    "separator": ("Separator", SEPARATORS),
+    "water_vapour": ("Water vapour", WATER_VAPOUR),
     "flow_type": ("Flow type", FLOW_TYPES),
     "well_type": ("Well type", WELL_TYPES),
     "completion": ("Completion", COMPLETIONS),
     "sand_control": ("Sand control", SAND_CONTROL),
+    "artificial_lift": ("Artificial lift", ARTIFICIAL_LIFT),
 }
 
 # What the calculation engine models today. Anything else is accepted as a
@@ -56,6 +72,9 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "method": {"black_oil", "eos"},
     "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer"},
+    "artificial_lift": {"none", "esp"},
+    "separator": {"single_stage"},
+    "water_vapour": {"none", "calculate"},
 }
 # Completion and sand control change near-wellbore pressure drop. Until they
 # are modelled explicitly, that drop is absorbed in the PI fitted to tests.
@@ -76,10 +95,13 @@ class Issue:
 class WellOptions:
     fluid_type: str = "oil"
     method: str = "black_oil"
+    separator: str = "single_stage"
+    water_vapour: str = "none"
     flow_type: str = "tubing"
     well_type: str = "producer"
     completion: str = "cased_hole"
     sand_control: str = "none"
+    artificial_lift: str = "none"
 
     def __post_init__(self):
         for f, (name, choices) in FIELDS.items():
@@ -107,9 +129,10 @@ class WellOptions:
 
     def describe(self) -> str:
         sc = "" if self.sand_control == "none" else f" with {self.label('sand_control').lower()}"
+        al = "" if self.artificial_lift == "none" else f", {self.label('artificial_lift').lower()}"
         return (f"{self.label('well_type')} - {self.label('fluid_type').lower()} "
                 f"({self.label('method').lower()}), {self.label('flow_type').lower()}, "
-                f"{self.label('completion').lower()} completion{sc}")
+                f"{self.label('completion').lower()} completion{sc}{al}")
 
     # --------------------------------------------------------- validation
     def validate(self) -> list[Issue]:
@@ -148,6 +171,18 @@ class WellOptions:
             add("info", ["completion", "sand_control"],
                 "Cased-hole gravel pack: most of the extra pressure drop is in the "
                 "gravel-filled perforation tunnels, so perforation details matter.")
+        if self.artificial_lift == "esp":
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "An electrical submersible pump applies to oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "An ESP produces up the tubing: choose Tubing flow (gas from the separator goes up the "
+                    "annulus).")
+        if self.water_vapour == "calculate" and not (self.fluid_type == "dry_wet_gas" and self.method == "black_oil"):
+            add("warning", ["water_vapour", "fluid_type", "method"],
+                "Condensed water vapour is calculated for dry and wet gas with the black-oil method only; it is "
+                "ignored for this fluid.")
         if self.uses_annulus and self.well_type == "producer" and self.fluid_type == "oil":
             add("info", ["flow_type"],
                 "Oil flowing up the annulus has a large flow area: expect higher liquid "
@@ -236,6 +271,10 @@ class WellOptions:
             "wire_wrapped_screen": ["Wire-wrapped screen: screen OD/ID and slot (gauge) width"],
             "slotted_liner": ["Slotted liner: OD/ID, slot width and length, slots per foot"],
         }[self.sand_control]
+        if self.artificial_lift == "esp":
+            eq += ["ESP: pump depth (the tubing ends at the pump; casing ID below it), pump, motor and cable "
+                   "(or run the ESP design), number of stages, operating frequency, cable length, gas separator "
+                   "efficiency; tubing OD and casing ID for the motor annulus"]
 
         # ---- Inflow
         if self.well_type == "producer":

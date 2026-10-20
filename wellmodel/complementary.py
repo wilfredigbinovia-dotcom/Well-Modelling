@@ -152,14 +152,19 @@ def summary(rows) -> dict:
     r = col("Velocity / Erosional Velocity")
     if r.size:
         out["Max. velocity / erosional velocity"] = float(r.max())
-        out["Min. erosional velocity (ft/s)"] = float(col("Erosional Velocity (ft/s)").min())
-        out["Max. C factor (flow)"] = float(col("C Factor (flow)").max())
-        out["Min. C factor (flow)"] = float(col("C Factor (flow)").min())
+        for k_, lab_, fn_ in (("Erosional Velocity (ft/s)", "Min. erosional velocity (ft/s)", np.min),
+                              ("C Factor (flow)", "Max. C factor (flow)", np.max),
+                              ("C Factor (flow)", "Min. C factor (flow)", np.min)):
+            a_ = col(k_)
+            if a_.size:
+                out[lab_] = float(fn_(a_))
     t = col("Gas Velocity / Loading Velocity")
     if t.size:
         out["Min. gas velocity / Turner velocity"] = float(t.min())
         out["Liquid loading (Turner)"] = "Loading" if t.min() < 1.0 else "No loading"
-        out["Max. Turner critical gas rate (MMscf/d)"] = float(col("Critical Gas Rate (MMscf/day)").max())
+        qc = col("Critical Gas Rate (MMscf/day)")
+        if qc.size:
+            out["Max. Turner critical gas rate (MMscf/d)"] = float(qc.max())
     if rows and "Erosion Rate (mm/year)" in rows[0]:
         e = col("Erosion Rate (mm/year)")
         if e.size:
