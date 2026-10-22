@@ -36,13 +36,15 @@ def _split(axes, bhp=None):
 
 
 def vfp_table(path, fluid, kind, correlation, p1, p2, u, flo, thp, wfr, gfr, hc=None, surface=None, esp=None,
-              alq=None):
+              alq=None, lift=None):
     """Bottom-node pressure array shaped (n_thp, n_wfr, n_gfr, n_flo). thp is the top-node pressure (the manifold
     when surface equipment is given - a SurfaceSetup from system.py). esp: the installed pump (Equipment tab dict:
     pump_md, pump, stages, freq, wear, sep, motor) - the tables then include the pump (NaN where it pumps the well
     off). alq: ESP operating frequencies (Hz) as the artificial-lift axis; axes are then (thp, wfr, gfr, alq, flo)
     and the array is shaped (n_thp, n_wfr, n_gfr, n_alq, n_flo)."""
     hc = hc or HeatCapacities()
+    if lift is not None:
+        return _vfp_gas_lift(path, fluid, kind, correlation, p1, p2, u, flo, thp, wfr, gfr, hc, surface, lift, alq)
     if alq is not None and len(alq):
         if esp is None:
             raise ValueError("A frequency (ALQ) axis needs the ESP.")
@@ -74,6 +76,35 @@ def vfp_table(path, fluid, kind, correlation, p1, p2, u, flo, thp, wfr, gfr, hc=
     with np.errstate(all="ignore"):
         P, _ = V.traverse(path, fluid, top, case, correlation, p1, p2, u, hc)
     return axes, P[:, -1].reshape(shape), top.reshape(shape)
+
+
+def _vfp_gas_lift(path, fluid, kind, correlation, p1, p2, u, flo, thp, wfr, gfr, hc, surface, lift, alq):
+    """Gas-lifted lift curves (gaslift_system.GasLiftSetup). ALQ: lift-gas rate (MMscf/d) - or the casing head
+    pressure (psia) for the multipoint method, where the gas rate is a result. No ALQ values: the lift setup's own
+    gas rate (or casing pressure) for every point."""
+    from . import gaslift_system as GLS
+    if kind != "oil":
+        raise ValueError("Gas-lifted lift curves are for oil wells.")
+    mp = lift.multipoint
+    al = [lift.p_casing if mp else lift.qgi] if alq is None or not len(alq) else alq
+    axes = [np.asarray(sorted(set(map(float, a))), float) for a in (thp, wfr, gfr, al, flo)]
+    n = int(np.prod([len(a) for a in axes]))
+    if n > MAX_POINTS:
+        raise ValueError(f"{n:,} points - reduce the number of values (limit {MAX_POINTS:,}).")
+    if any(len(a) == 0 for a in axes):
+        raise ValueError("Every axis needs at least one value.")
+    T_, W_, G_, A_, F_ = (g.ravel() for g in np.meshgrid(*axes, indexing="ij"))
+    case = _case(kind, F_, W_, G_)
+    top = _top(path, fluid, kind, T_, case, hc, u, surface)
+    cols = lift.row_inputs({}, F_)
+    cols["_pcs" if mp else "_qgi"] = A_
+    shape = tuple(len(a) for a in axes)
+    with np.errstate(all="ignore"):
+        st = GLS.lift_traverse(path, fluid, top, {**case, **cols}, lift, correlation, p1, p2, u, hc)
+    bhp, top = st.P[:, -1].reshape(shape), top.reshape(shape)
+    if alq is None or not len(alq):
+        return [axes[i] for i in (0, 1, 2, 4)], bhp[:, :, :, 0, :], top[:, :, :, 0, :]
+    return axes, bhp, top
 
 
 def _top(path, fluid, kind, T_, case, hc, u, surface):
@@ -117,7 +148,7 @@ def vfp_checks(axes, bhp, esp=False):
     return out
 
 
-def vfp_csv(kind, axes, bhp, wh=None):
+def vfp_csv(kind, axes, bhp, wh=None, alq_label="ESP frequency (Hz)"):
     (thp, wfr, gfr, alq, flo), bhp = _split(axes, bhp)
     if wh is not None:
         wh = np.asarray(wh, float) if alq is not None else np.asarray(wh, float)[:, :, :, None, :]
@@ -131,7 +162,7 @@ def vfp_csv(kind, axes, bhp, wh=None):
                         r = {"Top node pressure (psia)": t, f"{a['wfr'][0]} ({a['wfr'][1]})": w,
                              f"{a['gfr'][0]} ({a['gfr'][1]})": g}
                         if alq is not None:
-                            r["ESP frequency (Hz)"] = alq[l_]
+                            r[alq_label] = alq[l_]
                         r[f"{a['flo'][0]} ({a['flo'][1]})"] = f
                         r["Bottom node pressure (psia)"] = bhp[i, j, k, l_, m]
                         if wh is not None:
@@ -145,7 +176,11 @@ def _line(vals, fmt="{:.6g}", per=6):
     return "\n".join("  " + " ".join(s[i:i + per]) for i in range(0, len(s), per)) + " /"
 
 
-def eclipse_vfpprod(kind, axes, bhp, table_no=1, datum_tvd=0.0, title=""):
+ALQ_NAMES = {"esp": ("ESP frequency (Hz)", "' '"), "gas_lift": ("lift gas rate (Mscf/d)", "'GRAT'"),
+             "multipoint": ("casing head pressure (psia)", "' '")}
+
+
+def eclipse_vfpprod(kind, axes, bhp, table_no=1, datum_tvd=0.0, title="", alq_kind="esp"):
     """Eclipse VFPPROD keyword, FIELD units. Oil: FLO=LIQ (STB/d), WFR=WCT (fraction), GFR=GOR (Mscf/STB).
     Gas: FLO=GAS (Mscf/d), WFR=WGR (STB/Mscf), GFR=OGR (STB/Mscf). THP and BHP in psia, datum in ft TVD.
     With an ESP frequency axis, ALQ is the frequency in Hz (ALQ type left undefined, ' '). Blank points (an ESP
@@ -153,6 +188,9 @@ def eclipse_vfpprod(kind, axes, bhp, table_no=1, datum_tvd=0.0, title=""):
     at every point."""
     (thp, wfr, gfr, alq, flo), bhp = _split(axes, bhp)
     thp, wfr, gfr, flo = (np.asarray(a, float) for a in (thp, wfr, gfr, flo))
+    alq_name, alq_type = ALQ_NAMES[alq_kind]
+    if alq is not None and alq_kind == "gas_lift":
+        alq = np.asarray(alq, float) * 1000.0                    # MMscf/d -> Mscf/d
     if np.isnan(bhp).any():
         bhp = _fill_rates(bhp, flo)
     if kind == "oil":
@@ -163,11 +201,12 @@ def eclipse_vfpprod(kind, axes, bhp, table_no=1, datum_tvd=0.0, title=""):
         types = ("'GAS'", "'WGR'", "'OGR'")
     out = ["-- Generated by wellmodel" + (f": {title}" if title else ""),
            f"-- {len(flo)} rates x {len(thp)} THP x {len(wfr)} WFR x {len(gfr)} GFR"
-           + (", no artificial lift (ALQ = 0)" if alq is None else f" x {len(alq)} ALQ = ESP frequency (Hz)"),
+           + (", no artificial lift (ALQ = 0)" if alq is None else f" x {len(alq)} ALQ = {alq_name}"),
            "VFPPROD", "-- Table  Datum(ft)  FLO    WFR    GFR    THP    ALQ   Units    Tabulated",
-           f"   {int(table_no)}  {datum_tvd:.2f}  {types[0]}  {types[1]}  {types[2]}  'THP'  ' '  'FIELD'  'BHP' /",
+           f"   {int(table_no)}  {datum_tvd:.2f}  {types[0]}  {types[1]}  {types[2]}  'THP'  "
+           f"{alq_type if alq is not None else chr(39) + ' ' + chr(39)}  'FIELD'  'BHP' /",
            "-- FLO values", _line(f_flo), "-- THP values (psia)", _line(thp),
-           "-- WFR values", _line(f_wfr), "-- GFR values", _line(f_gfr), "-- ALQ values" + ("" if alq is None else " (ESP frequency, Hz)"),
+           "-- WFR values", _line(f_wfr), "-- GFR values", _line(f_gfr), "-- ALQ values" + ("" if alq is None else f" ({alq_name})"),
            "  0 /" if alq is None else _line(np.asarray(alq, float)),
            "-- NTHP NWFR NGFR NALQ  BHP (psia) for each FLO value"]
     for i in range(len(thp)):

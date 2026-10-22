@@ -646,7 +646,36 @@ def ansari(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
 
 # ---------------------------------------------------------------------------
 PE2_SLUG_SLIP = 0.155          # ft/s - slug-flow slip velocity calibrated on PROSPER PE2 gradients (Abura 2S)
-PE2_SLUG_GRAVITY = 1.0145      # slug-flow static gradient / in-situ density, same calibration
+PE2_SLUG_GRAVITY = 1.0145      # slug-flow static gradient / in-situ density, same calibration (T23: 1.046 / P1 1.03108)
+PE2_SLUG_FRICTION = 1.28       # slug friction / Hagedorn & Brown friction (PROSPER T23 gas-lift traverses at P2
+#                                1.00278: 1.26-1.31; Abura 2S slug row: 1.28)
+PE2_HB_R = (-0.08631087, -1.84429638, -8.66210136)   # PE2 / our HB chart fit, quadratic in ln X (T23 traverses)
+PE2_HB_U = (-10.684034, -9.199713)                    # ln X: vertex (held below) and where the ratio returns to 1
+
+
+def _pe2_hb_holdup(vsl, vsg, rho_l, mu_l, sig_l, d, p):
+    """Hagedorn & Brown holdup as PROSPER's PE2 gives it at high gas velocities: our HB chart fit (HL/psi vs X) is
+    up to 19 % low at the left end of the chart (X = 2e-5 - 1e-4) against PROSPER PE2 gradients (Tutorial 23, 5 and
+    20 MMscf/d of lift gas, vsg 11-82 ft/s, with PROSPER's liquid surface tension - vlp.sigma_liquid) - corrected
+    there by a ratio fitted on those traverses (within 0.2 %)."""
+    k = (rho_l / sig_l) ** 0.25
+    nlv = 1.938 * vsl * k
+    ngv = np.maximum(1.938 * vsg * k, 1e-9)
+    nd = 120.872 * d * np.sqrt(rho_l / sig_l)
+    nl = 0.15726 * mu_l * (1.0 / (rho_l * sig_l ** 3)) ** 0.25
+    cnl = ((0.0019 + 0.0322 * nl - 0.6642 * nl ** 2 + 4.9951 * nl ** 3)
+           / (1 - 10.0147 * nl + 33.8696 * nl ** 2 + 277.2817 * nl ** 3))
+    cnl = np.clip(cnl, 0.0019, 0.0115)
+    x1 = nlv / ngv ** 0.575 * (np.maximum(p, 14.7) / 14.7) ** 0.1 * cnl / nd
+    hl_psi = np.sqrt(np.clip((0.0047 + 1123.32 * x1 + 729489.64 * x1 ** 2)
+                             / (1 + 1097.1566 * x1 + 722153.97 * x1 ** 2), 0, 1))
+    x2 = ngv * nl ** 0.380 / nd ** 2.14
+    psi = ((1.0886 - 69.9473 * x2 + 2334.3497 * x2 ** 2 - 12896.683 * x2 ** 3)
+           / (1 - 53.4401 * x2 + 1517.9369 * x2 ** 2 - 8419.8115 * x2 ** 3))
+    psi = np.where(x2 < 0.01, 1.0, np.clip(psi, 1.0, 1.83))
+    u = np.clip(np.log(np.maximum(x1, 1e-30)), PE2_HB_U[0], PE2_HB_U[1])
+    r = np.maximum(np.polyval(PE2_HB_R, u), 1.0)
+    return np.clip(hl_psi * r * psi, 0.0, 1.0)
 
 
 def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
@@ -655,8 +684,10 @@ def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
 
     Bubble flow (Griffith & Wallis limit, gas fraction below max(1.071 - 0.2218 vm^2/d, 0.13)): Griffith holdup
     (slip 0.8 ft/s) and Griffith friction - as in the modified Hagedorn & Brown. Slug flow: holdup from a constant
-    slip velocity (0.155 ft/s, at least the no-slip holdup), a static gradient 1.45 % above the in-situ density
-    (as PROSPER PE2 reports) and the Duns & Ros bubble/slug friction. Transition and
+    slip velocity (0.155 ft/s, at least the no-slip holdup) or, where larger (high gas velocities), the Hagedorn &
+    Brown holdup as PROSPER's PE2 gives it (_pe2_hb_holdup); a static gradient 1.45 % above the in-situ density (as
+    PROSPER PE2 reports); friction 1.28 x the Hagedorn & Brown friction (PROSPER T23 gas-lift traverses at vsg
+    7-82 ft/s, and Abura 2S). Transition and
     mist (Duns & Ros map): no-slip holdup with the Duns & Ros mist friction (film roughness). NOT Petroleum
     Experts' PE2 - an approximation of it."""
     vm, lam = _no_slip_lambda(vsl, vsg)
@@ -672,13 +703,16 @@ def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     vs = PE2_SLUG_SLIP
     disc = np.maximum((1 + vm / vs) ** 2 - 4 * vsg / vs, 0.0)
     hl_s = np.clip(1 - 0.5 * (1 + vm / vs - np.sqrt(disc)), lam, 1.0)
-    fm1 = friction_factor(rho_l * vsl * d / (mu_l * CP_TO_LBFTS), rough / d)
-    nd = 120.872 * d * np.sqrt(rho_l / sig_l)
-    x2 = fm1 * vsg * nd ** (2 / 3) / np.maximum(vsl, 1e-9)
-    ff2 = _li(x2, *_F2V)
-    ff3 = 1 + fm1 * np.sqrt(vsg / (50 * np.maximum(vsl, 1e-9)))
-    f_s = fm1 * ff2 / ff3 * rho_l * vsl * vm / (2 * G * d) / 144.0
-    e_s = PE2_SLUG_GRAVITY * (rho_l * hl_s + rho_g * (1 - hl_s)) * sin_t / 144.0
+    # at high gas velocities PROSPER's PE2 holdup follows Hagedorn & Brown (its chart), above the small-slip value
+    hl_s = np.maximum(hl_s, _pe2_hb_holdup(vsl, vsg, rho_l, mu_l, sig_l, d, p))
+    # slug friction: Hagedorn & Brown's form (no-slip density squared over the slip density, two-phase viscosity
+    # mu_L^HL mu_G^(1-HL)) times 1.28 - PROSPER PE2 gradients, both T23 traverses and Abura 2S
+    rho_ss = rho_l * hl_s + rho_g * (1 - hl_s)
+    rho_nn = rho_l * lam + rho_g * (1 - lam)
+    mu_ss = mu_l ** hl_s * mu_g ** (1 - hl_s)
+    ff_s = friction_factor(rho_nn * vm * d / (mu_ss * CP_TO_LBFTS), rough / d)
+    f_s = PE2_SLUG_FRICTION * ff_s * rho_nn ** 2 * vm * vm / (2 * G * d * rho_ss) / 144.0
+    e_s = PE2_SLUG_GRAVITY * rho_ss * sin_t / 144.0
     # beyond the Duns & Ros slug boundary PROSPER's PE2 reports no-slip holdup and the Duns & Ros mist (film
     # roughness) friction, in the transition region too (Tutorial 02 gas well: holdup = no-slip, friction within 1 %)
     e_m, f_m, hl_m = _dr_mist(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, mixture=True)

@@ -19,6 +19,7 @@ import pandas as pd
 from . import complementary as CX
 from . import surface as SF
 from . import vlp as V
+from . import gaslift_system as GLS
 from .correlations import CORRELATIONS, NEEDS_GLR, no_slip
 from .equipment import HeatCapacities
 
@@ -212,7 +213,7 @@ def _roots(rates, diff):
 
 def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, correlation, p1=1.0, p2=1.0,
                 hc: HeatCapacities | None = None, method="Automatic - Geometric", n=25, user_rates=None,
-                allow_left=False, surface: SurfaceSetup | None = None, node="bottom"):
+                allow_left=False, surface: SurfaceSetup | None = None, node="bottom", lift=None):
     """Solve every case. path_for(tubing_id) -> FlowPath; ipr_for(changes) -> IPR curve (changes: pr, j, skin).
     base holds whp, u, wc/gor (oil, wc in %) or wgr/sep_gor (gas); each case overrides some of them.
     With surface equipment, whp is the manifold pressure and 'choke' (64ths) may be sensitised.
@@ -220,6 +221,20 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
     downstream). The solution rate does not depend on the node, so it is solved at the bottom node in both cases."""
     hc = hc or HeatCapacities()
     scale = 1000.0 if kind == "gas" else 1.0          # VLP rate units -> IPR units
+    if lift is not None and (node == "top" or kind != "oil"):
+        raise ValueError("Gas lift: oil producers with the bottom node as the solution node only.")
+
+    def trav(path, whp, case, plist, qlist, u):
+        """Tubing traverse; with gas lift, the lift columns of each case are added from its params."""
+        if lift is None:
+            return V.traverse(path, fluid, whp, case, correlation, p1, p2, u, hc)
+        cols = {}
+        for p_, q_ in zip(plist, qlist):
+            for k_, v_ in lift.row_inputs(p_, q_).items():
+                cols.setdefault(k_, []).append(v_)
+        st_ = GLS.lift_traverse(path, fluid, whp, {**case, **{k_: np.concatenate(v_) for k_, v_ in cols.items()}},
+                                lift, correlation, p1, p2, u, hc)
+        return st_.P, st_.T
     prep = []
     for c in cases:
         p = {**base, **c}
@@ -248,7 +263,7 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
             for k, v in _flu(kind, p, curve_i, rates).items():
                 flu.setdefault(k, []).append(v)
         case = {"q": np.concatenate(qs), **{k: np.concatenate(v) for k, v in flu.items()}}
-        P, _ = V.traverse(path, fluid, np.concatenate(whps), case, correlation, p1, p2, u, hc)
+        P, _ = trav(path, np.concatenate(whps), case, [prep[i][0] for i in idx], qs, u)
         bottom = P[:, -1]
         pos = 0
         for i in idx:
@@ -301,8 +316,8 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
             for i, _, q0 in items:
                 for kk, v in _flu(kind, results[i].params, results[i].ipr_curve, [q0]).items():
                     flu.setdefault(kk, []).append(float(v[0]))
-            P, _ = V.traverse(path, fluid, whp, {"q": q_arr, **{kk: np.array(v) for kk, v in flu.items()}},
-                              correlation, p1, p2, u, hc)
+            P, _ = trav(path, whp, {"q": q_arr, **{kk: np.array(v) for kk, v in flu.items()}},
+                        [results[i].params for i, _, _ in items], [np.array([q0]) for _, _, q0 in items], u)
             wh_of = {i: w for (i, _, _), w in zip(items, whp)}
             for (i, k, q0), pv in zip(items, P[:, -1]):
                 r = results[i]
@@ -336,8 +351,21 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
         path = paths[r.params.get("tubing_id")]
         qq = np.append(r.rates, r.q if r.q is not None else r.rates[-1])
         case = {"q": qq, **_flu(kind, r.params, r.ipr_curve, qq)}
-        w, cp = fluid.mass_cp(case, hc)
-        tt = V.temperature_profile(path, w, cp, float(r.params["u"]))[:, 0]
+        if lift is not None:
+            st_ = GLS.lift_traverse(path, fluid, float(r.params["whp"]), {**case, **lift.row_inputs(r.params, qq)},
+                                    lift, correlation, p1, p2, float(r.params["u"]), hc)
+            tt = st_.T[:, 0]
+            if r.q is not None:
+                r.details["gas_lift"] = GLS.solution_state(st_, lift, path, -1)
+                gap = float(st_.P[-1, -1]) - r.pwf
+                if abs(gap) > max(5.0, 0.005 * r.pwf):
+                    r.note = (r.note + " " if r.note else "") + (
+                        f"Gas lift injection limit: the VLP jumps at this rate (lifted bottom-node pressure "
+                        f"{st_.P[-1, -1]:,.0f} psia, IPR {r.pwf:,.0f} psia) - at higher rates the casing pressure "
+                        "cannot keep the injection going, so the well cannot reach a steady lifted rate above it.")
+        else:
+            w, cp = fluid.mass_cp(case, hc)
+            tt = V.temperature_profile(path, w, cp, float(r.params["u"]))[:, 0]
         r.wht, r.wht_q = tt[:-1], (float(tt[-1]) if r.q is not None else None)
         if r.pwh is not None and r.q is not None:
             r.pwh_q = float(np.interp(r.q, r.rates, r.pwh))

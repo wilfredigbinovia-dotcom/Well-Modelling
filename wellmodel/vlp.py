@@ -137,6 +137,34 @@ def _sigma_water(p, t):
     return np.clip(70.0 - (np.asarray(t, float) - 74.0) * (17.0 / 206.0), 35.0, 75.0) + 0 * np.asarray(p, float)
 
 
+# Liquid surface tension as PROSPER gives it for oil wells (its gradient exports, Tutorial 23 Logie well, 80 % water cut,
+# 535-3070 psia, 155-210 F): gas-oil after Abdul-Majeed et al. scaled to PROSPER (within 6 %), gas-water by
+# Macleod-Sugden with refitted parachor terms (within 1 %), and a liquid value weighted heavily toward the oil:
+# sigma_L = (fo sigma_o + 0.037 fw sigma_w) / (fo + 0.037 fw), fo/fw the surface oil/water fractions (PROSPER: 18 dyne/cm
+# at 80 % water cut where a volume average gives 54). The PE2-style correlation was calibrated with these values.
+IFT_OIL = (0.71186562, 0.00370302, -0.00860142)
+IFT_WATER = (2.91384104, 3.8688207)
+IFT_WATER_WEIGHT = 0.037
+
+
+def sigma_oil_prosper(api, t, rs):
+    a, k, e = IFT_OIL
+    od = (1.17013 - 1.694e-3 * np.asarray(t, float)) * (38.085 - 0.259 * api)
+    return np.maximum(a * od * (e + (1 - e) * np.exp(-k * np.asarray(rs, float))), 0.5)
+
+
+def sigma_water_oilwell(rho_w, rho_g):
+    a, b = IFT_WATER
+    x = a * np.asarray(rho_w, float) / 62.428 - b * np.asarray(rho_g, float) / 62.428
+    return np.clip(np.maximum(x, 0.5) ** 4, 1.0, 100.0)
+
+
+def sigma_liquid(so, sw, wc):
+    fo = 1 - np.asarray(wc, float)
+    k = IFT_WATER_WEIGHT
+    return (fo * so + k * (1 - fo) * sw) / np.maximum(fo + k * (1 - fo), 1e-9)
+
+
 def sigma_water_gas(rho_w, rho_g):
     """Water-gas interfacial tension (dyne/cm), Macleod-Sugden: sigma^(1/4) = 52.43 rho_w/18.015 - 4.549 rho_g
     (densities g/cc; water parachor 52.4, gas 4.549 per unit molar mass) - fitted to PROSPER's water/gas IFT for
@@ -202,7 +230,7 @@ class BlackOilFluid:
         fo = np.where(ql > 1e-15, q_o / np.maximum(ql, 1e-15), 1 - wc)
         return dict(ql=ql, qg=q_g, rho_l=fo * rho_o + (1 - fo) * rho_w, rho_g=rho_g,
                     mu_l=fo * mu_o + (1 - fo) * mu_w, mu_g=mu_g,
-                    sig=fo * _sigma_oil(inp.api, p, t) + (1 - fo) * _sigma_water(p, t))
+                    sig=sigma_liquid(sigma_oil_prosper(inp.api, t, rs), sigma_water_oilwell(rho_w, rho_g), wc))
 
     def mass_cp(self, case, hc: HeatCapacities):
         inp = self.inp

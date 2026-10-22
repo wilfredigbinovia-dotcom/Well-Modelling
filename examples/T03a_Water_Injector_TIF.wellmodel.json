@@ -1,0 +1,465 @@
+{
+ "format": "wellmodel-project",
+ "version": 1,
+ "name": "T03a Water Injector TIF",
+ "saved": "2026-10-21T13:05:22+00:00",
+ "inputs": {
+  "eq_cpg": 0.51,
+  "calc_mode": "System analysis (IPR + VLP)",
+  "eq_cpo": 0.53,
+  "eq_tsur": 60.0,
+  "eq_cpw": 1.0,
+  "eq_u": 8.0,
+  "eq_usur": 8.0,
+  "pvt_sal": 200000.0,
+  "eq_tinj": 60.0,
+  "ipr_model_inj": "Thermally Induced Fracture",
+  "ipr_pr": 4114.696,
+  "ipr_t_inj_res": 210.0,
+  "ipr_k": 50.0,
+  "ipr_h": 100.0,
+  "ipr_area": 250.0,
+  "ipr_rw": 0.354,
+  "ipr_skin_inj": 3.0,
+  "ipr_tif_tinj": 120.0,
+  "ipr_tdays": 20.0,
+  "ipr_phi": 0.18,
+  "ipr_tif_qh": 12000.0,
+  "ipr_tif_mur": 0.35734,
+  "ipr_tif_bres": 1.4116,
+  "ipr_tif_sig": 5314.696,
+  "ipr_tif_sweep": 0.75,
+  "ipr_ca": 31.6
+ },
+ "widgets": {
+  "opt_completion": "cased_hole",
+  "opt_method": "black_oil",
+  "opt_well_type": "water_injector",
+  "opt_sand_control": "none",
+  "opt_fluid_type": "oil",
+  "opt_flow_type": "tubing",
+  "opt_separator": "single_stage",
+  "opt_water_vapour": "none",
+  "opt_artificial_lift": "none",
+  "sys_sens_on": false,
+  "eq_filter_on": false,
+  "_vl_sys_inj_whp": [
+   1264.696
+  ]
+ },
+ "tables": {
+  "eq_survey": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "True Vertical Depth (ft)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      9000.0,
+      9000.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "True Vertical Depth (ft)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_surface": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Fitting",
+     "Pipe Length (ft)",
+     "TVD of End Point (ft)",
+     "Pipe Inside Diameter (in)",
+     "Pipe Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Fitting": "object",
+    "Pipe Length (ft)": "float64",
+    "TVD of End Point (ft)": "float64",
+    "Pipe Inside Diameter (in)": "float64",
+    "Pipe Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_downhole": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Measured Depth (ft)",
+     "Tubing Inside Diameter (in)",
+     "Tubing Inside Roughness (in)",
+     "Tubing Outside Diameter (in)",
+     "Tubing Outside Roughness (in)",
+     "Casing Inside Diameter (in)",
+     "Casing Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3
+    ],
+    "data": [
+     [
+      null,
+      "Xmas Tree",
+      600.0,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      8500.0,
+      5.2,
+      0.0006,
+      null,
+      null,
+      null,
+      null,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "Casing",
+      9000.0,
+      null,
+      null,
+      null,
+      null,
+      6.4,
+      0.0006,
+      1.0,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Measured Depth (ft)": "float64",
+    "Tubing Inside Diameter (in)": "float64",
+    "Tubing Inside Roughness (in)": "float64",
+    "Tubing Outside Diameter (in)": "float64",
+    "Tubing Outside Roughness (in)": "float64",
+    "Casing Inside Diameter (in)": "float64",
+    "Casing Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_geo": {
+   "__df__": {
+    "columns": [
+     "Formation Measured Depth (ft)",
+     "Formation Temperature (deg F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "data": [
+     [
+      0.0,
+      60.0
+     ],
+     [
+      600.0,
+      40.0
+     ],
+     [
+      9000.0,
+      210.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Formation Measured Depth (ft)": "float64",
+    "Formation Temperature (deg F)": "float64"
+   },
+   "index_name": "Point"
+  }
+ },
+ "extras": {}
+}

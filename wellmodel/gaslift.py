@@ -20,7 +20,10 @@ Units: psia, degF, ft MD/TVD; liquid STB/d, lift gas MMscf/d.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
+
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -172,6 +175,7 @@ class Lifted:
     inj_t: np.ndarray        # tubing temperature at the injection point
     limited: np.ndarray      # True where the maximum (or fixed) injection depth decided the point
     no_injection: np.ndarray  # True where the casing cannot inject anywhere (casing < tubing + dP at the top)
+    pc: np.ndarray | None = None   # casing pressure used (cases x nodes)
 
 
 def lifted_traverse(*args, **kw):
@@ -198,11 +202,15 @@ def _lifted_traverse(path: V.FlowPath, fluid, top_p, case, qgi, correlation="hag
     corr = CORRELATIONS[correlation]
     lift = lifted_case(case, qg)
     max_md = path.md[-1] if max_md is None else min(float(max_md), path.md[-1])
-    if pc is not None:
+    pc_fn = pc if callable(pc) else None
+    if pc is not None and pc_fn is None:
         pc = np.broadcast_to(np.atleast_2d(np.asarray(pc, float)), (nc, n))
+    dp_valve = np.broadcast_to(np.asarray(dp_valve, float), (nc,)) if np.ndim(dp_valve) else dp_valve
     inj_guess = np.full(nc, max_md) if fix is None else fix
     for it in range(max(passes, 1)):
         T = _temperature_split(path, fluid, case, qg, inj_guess, u, hc, gas_sg)
+        if pc_fn is not None:                  # casing pressure from the flowing temperature (and annulus friction)
+            pc = np.broadcast_to(np.atleast_2d(np.asarray(pc_fn(T, inj_guess), float)), (nc, n))
         P = np.empty((nc, n))
         p = np.maximum(top, 14.7)
         P[:, 0] = p
@@ -277,7 +285,7 @@ def _lifted_traverse(path: V.FlowPath, fluid, top_p, case, qgi, correlation="hag
             break
         inj_guess = inj_md
     inj_t = np.array([np.interp(m, path.md, T[k]) for k, m in enumerate(inj_md)])
-    return Lifted(P, T, inj_md, inj_p, inj_t, limited, none)
+    return Lifted(P, T, inj_md, inj_p, inj_t, limited, none, pc)
 
 
 def pressure_at(path, P, md):
@@ -464,6 +472,13 @@ class ValveType:
     max_port_64: int
     ports_64: tuple = PORTS_64
     r_table: tuple = ()          # (port_64, R) from the manufacturer, when known
+    manufacturer: str = ""
+    model: str = ""
+    spec: str = ""
+    kind: str = "Casing sensitive"
+    source: str = "built-in"
+    spring: float = 0.0          # proportional valves: closing pressure at depth = dome at temperature - spring, psi
+    trims: tuple = ()            # proportional valves: trim names for the ports (equivalent port sizes)
 
     def r(self, port_64):
         if self.r_table:
@@ -477,20 +492,92 @@ class ValveType:
         return tuple(p for p in self.ports_64 if p <= self.max_port_64)
 
 
+VALVE_DB_COLS = ["Manufacturer", "Model", "Specification", "Valve type", "Port (64ths in)", "R value", "Source"]
+VALVE_MANUFACTURERS = ("Altec", "Baker", "Camco", "Mcmurry-Macco", "Otis-Merla", "PTC", "Weatherford")
+VALVE_KINDS = ("Casing sensitive", "Tubing sensitive", "Proportional")
+
+
+def valve_name(manufacturer, model, spec):
+    return " ".join(str(x).strip() for x in (manufacturer, model, spec) if str(x).strip() and str(x) != "nan")
+
+
+def valves_from_table(df: pd.DataFrame, source="") -> dict:
+    """Valve types from a long table (one row per port: Manufacturer, Model, Specification, Valve type, Port (64ths
+    in), R value). The bellows area is taken from the ports' R = Ap / Ab (median); the R values themselves are used
+    for the valve mechanics, the ports listed are the sizes available."""
+    out = {}
+    if df is None or not len(df):
+        return out
+    d = df.copy()
+    d["Port (64ths in)"] = pd.to_numeric(d.get("Port (64ths in)"), errors="coerce")
+    d["R value"] = pd.to_numeric(d.get("R value"), errors="coerce")
+    d = d.dropna(subset=["Port (64ths in)", "R value"])
+    d = d[(d["Port (64ths in)"] > 0) & (d["R value"] > 0) & (d["R value"] < 1)]
+    for c in ("Manufacturer", "Model", "Specification", "Valve type"):
+        d[c] = d[c].fillna("").astype(str).str.strip() if c in d else ""
+    for (man, mod, spec), g in d.groupby(["Manufacturer", "Model", "Specification"], sort=False):
+        if not (man or mod):
+            continue
+        g = g.sort_values("Port (64ths in)").drop_duplicates("Port (64ths in)")
+        ports = tuple(float(x) if x % 1 else int(x) for x in g["Port (64ths in)"])
+        rt = tuple(zip(ports, (float(x) for x in g["R value"])))
+        ap = np.pi / 4 * (np.array(ports, float) / 64.0) ** 2
+        ab = float(np.median(ap / np.array([r for _, r in rt])))
+        kind = next((k for k in g["Valve type"] if k in VALVE_KINDS), "Casing sensitive")
+        name = valve_name(man, mod, spec)
+        src = source or (str(g["Source"].iloc[0]) if "Source" in g else "")
+        out[name] = ValveType(name, ab, int(max(ports)), ports, rt, man, mod, spec, kind, src)
+    return out
+
+
+VALVE_DB_FILE = Path(__file__).parent / "data" / "gl_valves.csv"
+
+
+def builtin_valve_table() -> pd.DataFrame:
+    try:
+        return pd.read_csv(VALVE_DB_FILE)[VALVE_DB_COLS]
+    except (OSError, KeyError, ValueError):
+        return pd.DataFrame(columns=VALVE_DB_COLS)
+
+
 VALVES = {
     "Generic 1-in IPO (Ab = 0.31 in2)": ValveType("Generic 1-in IPO (Ab = 0.31 in2)", 0.31, 16),
     "Generic 1.5-in IPO (Ab = 0.77 in2)": ValveType("Generic 1.5-in IPO (Ab = 0.77 in2)", 0.77, 32),
-    # Camco R-20, Normal (1.5-in, Ab 0.77 in2): port sizes and R values as listed by PROSPER's valve database
+    # Camco R-20, Normal (1.5-in, Ab 0.77 in2): port sizes and R values as listed by PROSPER's valve database (kept
+    # under its original name for older project files)
     "Camco R-20 Normal (1.5-in)": ValveType("Camco R-20 Normal (1.5-in)", 0.77, 36, (8, 12, 16, 20, 24, 28, 32, 36),
                                             ((8, 0.017), (12, 0.038), (16, 0.066), (20, 0.103), (24, 0.147),
-                                             (28, 0.2), (32, 0.26), (36, 0.3))),
+                                             (28, 0.2), (32, 0.26), (36, 0.3)), "Camco", "R-20", "Normal"),
 }
+VALVES.update({k: v for k, v in valves_from_table(builtin_valve_table()).items() if k != "Camco R-20 Normal"})
+# Merla LN-20R 1.5" proportional valve, as PROSPER's design treats it (user's Tutorial 23 run): closing pressure at depth
+# = PTO (1 - k) + Pc k with k 0.66 / 0.54 / 0.40 for the Small / Medium / Large trim, dome at temperature = closing
+# pressure + 220 psi (shop closing = dome at 60 F - 220). PROSPER lists no port sizes for it: the trims' gas capacity
+# is taken here as that of a 12 / 16 / 20/64 port, consistent with the trims PROSPER picked.
+VALVES['Merla LN-20R 1.5"'] = ValveType('Merla LN-20R 1.5"', 0.77, 20, (12, 16, 20), ((12, 0.66), (16, 0.54), (20, 0.40)),
+                                        "Merla", "LN-20R", '1.5"', "Proportional", "built-in", 220.0,
+                                        ("Small", "Medium", "Large"))
+BUILTIN_VALVES = tuple(VALVES)
+
+
+def register_valves(table: pd.DataFrame | None) -> list:
+    """Add (or replace) the user's valves from a valve-database table; returns their names. Built-in valves keep
+    their names; a user valve with the same name replaces the built-in one for this session."""
+    for k in [k for k, v in VALVES.items() if v.source == "user"]:
+        del VALVES[k]
+    new = valves_from_table(table, "user") if table is not None else {}
+    for k, v in new.items():
+        v.source = "user"
+        VALVES[k] = v
+    return list(new)
+
+
 ORIFICE_PORTS = (8, 10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 40, 48)
 
 
 # ================================================================ design input
 DESIGN_RATE = ("Entered by user", "Calculated from max production", "Calculated from max revenue")
-VALVE_TYPES = ("Casing sensitive",)
+VALVE_TYPES = ("Casing sensitive", "Tubing sensitive", "Proportional")
 INJECTION_POINT = ("Orifice", "Valve")
 SPACING = ("Normal", "Spacing line")
 ORIFICE_SIZING = ("Calculated dP at orifice", "Min dP across orifice")
@@ -536,6 +623,16 @@ class DesignInput:
     #                                       False: straight line from the surface gas temperature to the formation
     valve: str = next(iter(VALVES))
     economics: Economics = field(default_factory=Economics)
+    # existing mandrels (PROSPER Design | Existing Mandrels): ((MD ft, dP casing psi or NaN, max gas MMscf/d or NaN),
+    # ...) of the enabled mandrels; empty = new well (free spacing). The valves go in the mandrels: each unloading
+    # valve in the deepest mandrel the well can be unloaded to, the operating point in the deepest mandrel at or above
+    # the optimum injection depth, dummies in the rest. An entered dP casing / max gas overrides the main values.
+    mandrels: tuple = ()
+    pct_casing_wh: float = 30.0           # tubing-sensitive valves: Percentage Pcasing - Pwh (PROSPER) - the tubing
+    #                                       pressure a valve transfers at, as a fraction of the way from the flowing
+    #                                       tubing pressure to the casing pressure
+    mandrel_tol: float = 10.0             # ft MD: a mandrel this far below the computed unloading reach is accepted
+    #                                       (the reach is a calculated depth; a transferred design's rounded depths)
 
 
 # ---------------------------------------------------------------- Thornhill-Craver
@@ -585,6 +682,8 @@ def dome_at_60(pd_t_psig, t_f, high_pressure=True):
 
 
 WE_ATM = 14.4        # atmospheric pressure used by Winkler & Eads (1989)
+PROSPER_ATM = 0.0    # PROSPER applies the Winkler & Eads equations to gauge pressures (its multipoint dome pressures
+#                      at valve temperature, Tutorial 23: within 0.15 psi with 0, 4-5 psi off with 14.4)
 
 
 def _we_slope(pb_psia):
@@ -593,16 +692,17 @@ def _we_slope(pb_psia):
                     -0.267 + 0.002298 * pb + 1.84e-7 * pb * pb)
 
 
-def dome_at_t_winkler(pb60_psig, t_f):
-    """Winkler & Eads (1989) Eq. 1-3: N2 dome pressure at valve temperature (psig) from the 60 F charge (psig)."""
-    pb = np.asarray(pb60_psig, float) + WE_ATM
-    return pb + _we_slope(pb) * (np.asarray(t_f, float) - 60.0) - WE_ATM
+def dome_at_t_winkler(pb60_psig, t_f, atm=WE_ATM):
+    """Winkler & Eads (1989) Eq. 1-3: N2 dome pressure at valve temperature (psig) from the 60 F charge (psig).
+    atm: atmospheric pressure added before the equations (14.4 as Winkler & Eads; PROSPER_ATM = 0 as PROSPER)."""
+    pb = np.asarray(pb60_psig, float) + atm
+    return pb + _we_slope(pb) * (np.asarray(t_f, float) - 60.0) - atm
 
 
-def dome_60_winkler(pd_t_psig, t_f, tol=1e-6):
+def dome_60_winkler(pd_t_psig, t_f, tol=1e-6, atm=WE_ATM):
     """Winkler & Eads (1989): 60 F charge (psig) from the dome pressure at valve temperature (psig) - the PB60
     fixed-point iteration (ideal-gas start)."""
-    pbt = np.asarray(pd_t_psig, float) + WE_ATM
+    pbt = np.asarray(pd_t_psig, float) + atm
     dt = np.asarray(t_f, float) - 60.0
     pb = 520.0 * pbt / (np.asarray(t_f, float) + 460.0)
     for _ in range(100):
@@ -611,16 +711,16 @@ def dome_60_winkler(pd_t_psig, t_f, tol=1e-6):
             pb = new
             break
         pb = new
-    return pb - WE_ATM
+    return pb - atm
 
 
-def dome_at_60(pd_t_psig, t_f, high_pressure=True):
+def dome_at_60(pd_t_psig, t_f, high_pressure=True, atm=WE_ATM):
     """Dome pressure at 60 F (psig) from the dome pressure at valve temperature (psig). high_pressure (PROSPER
     'Dome pressure correction > 1200 psig' = Yes): API Ct up to 1200 psig, Winkler & Eads above."""
     api = np.asarray(pd_t_psig, float) * ct_api(t_f)
     if not high_pressure:
         return api
-    return np.where(np.asarray(pd_t_psig, float) > 1200.0, dome_60_winkler(pd_t_psig, t_f), api)
+    return np.where(np.asarray(pd_t_psig, float) > 1200.0, dome_60_winkler(pd_t_psig, t_f, atm=atm), api)
 
 
 # ---------------------------------------------------------------- stability (Asheim 1988)
@@ -660,27 +760,71 @@ def _first_crossing(x, f, x_from=-np.inf, x_to=np.inf):
     return float(xs[j - 1] + (xs[j] - xs[j - 1]) * (-fs[j - 1]) / (fs[j] - fs[j - 1]))
 
 
-def space_valves(md, tvd, p_top_unload, transfer, pc_first, pc_next, gs, psf_first, psf, min_spacing, d_op):
+def _snap(mandrels, d, above=-np.inf, tol=1e-6):
+    """Deepest mandrel in (above, d + tol] (None if none)."""
+    c = mandrels[(mandrels > above + 1e-6) & (mandrels <= d + max(tol, 1e-6))]
+    return float(c[-1]) if len(c) else None
+
+
+def space_valves(md, tvd, p_top_unload, transfer, pc_first, pc_next, gs, psf_first, psf, min_spacing, d_op,
+                 mandrels=None, tol=0.0, psf_op=None, pt_flow=None):
     """Unloading valve depths (ft MD) between the load-fluid line and the casing pressure (API RP 11V6 5.1.11-12,
     PROSPER 'Normal' spacing). md/tvd: fine depth grid; transfer(md) tubing pressure at a valve after transfer (design
     gradient or spacing line); pc_first: casing pressure on the grid used for the first valve (kick-off); pc_next(n):
     casing pressure on the grid used to space valve n+1 (surface pressure reduced for the n valves above).
-    Returns (depths, reason) - reason why the spacing stopped."""
+    mandrels: sorted mandrel depths (existing mandrels) - each valve goes in the deepest mandrel above the depth the
+    well can be unloaded to; the minimum spacing does not apply. The injection mandrel d_op counts as reached only
+    when the load fluid leaves the casing psf_op (the desired dP across the injection point) above the tubing there
+    (PROSPER: Tutorial 23 with mandrels every 600 ft puts a valve at 5600 ft although 6200 ft is within the 50 psi
+    margin of the 5000 ft valve, but not within 100 psi).
+    Returns (depths, reason) - reason why the spacing stopped ("BLOCKED ..." when no mandrel lies between a valve and
+    the deepest depth the next one could go)."""
+    psf_op = psf if psf_op is None else psf_op
+    pt_flow = transfer if pt_flow is None else pt_flow
+    tv_op = float(np.interp(d_op, md, tvd))
+
+    def reaches_op(p_top, tv_top, pc):
+        """Load-fluid line from (tv_top, p_top) at the injection mandrel within psf_op of the casing."""
+        return p_top + gs * (tv_op - tv_top) <= float(np.interp(d_op, md, pc)) - psf_op
+
     f = p_top_unload + gs * (tvd - tvd[0]) - (pc_first - psf_first)
     d1 = _first_crossing(md, f)
-    if d1 is None or d1 >= d_op:
-        return [], "kick-off pressure reaches the injection depth - no unloading valves needed"
+    if mandrels is None:
+        if d1 is None or d1 >= d_op:
+            return [], "kick-off pressure reaches the injection depth - no unloading valves needed"
+    else:
+        if reaches_op(p_top_unload, tvd[0], pc_first):
+            return [], "kick-off pressure reaches the injection mandrel - no unloading valves needed"
+        m = _snap(mandrels, min(d1, d_op) if d1 is not None else d_op, tol=tol)
+        if m is not None and m >= d_op - 1e-6:
+            m = _snap(mandrels, d_op - 1e-3)
+        if m is None:
+            return [], (f"BLOCKED: no mandrel above {d1 if d1 is not None else d_op:,.0f} ft MD, the deepest depth the "
+                        "kick-off pressure unloads to")
+        d1 = m
     depths = [d1]
     for _ in range(60):
         dn = depths[-1]
         tv_n = np.interp(dn, md, tvd)
-        f = transfer(dn) + gs * (tvd - tv_n) - (pc_next(len(depths)) - psf)
+        pcn = pc_next(len(depths))
+        f = transfer(dn) + gs * (tvd - tv_n) - (pcn - psf)
         d = _first_crossing(md, f, dn + 1e-6)
-        if d is None or d >= d_op:
+        if mandrels is None:
+            if d is None or d >= d_op:
+                return depths, "injection depth reached"
+            if d - dn < min_spacing:
+                return depths, "spacing below the minimum"
+            depths.append(d)
+            continue
+        if reaches_op(pt_flow(dn), tv_n, pcn):
             return depths, "injection depth reached"
-        if d - dn < min_spacing:
-            return depths, "spacing below the minimum"
-        depths.append(d)
+        m = _snap(mandrels, min(d, d_op) if d is not None else d_op, dn, tol)
+        if m is not None and m >= d_op - 1e-6:
+            m = _snap(mandrels, d_op - 1e-3, dn)
+        if m is None:
+            return depths, (f"BLOCKED: no mandrel between {dn:,.0f} and "
+                            f"{(d if d is not None else d_op):,.0f} ft MD, the deepest depth the valve above unloads to")
+        depths.append(m)
     return depths, "too many valves"
 
 
@@ -709,6 +853,8 @@ class ValveRow:
     unloadable: float = np.nan    # psi/ft
     dp_valve: float = np.nan      # casing - tubing at the valve, psi
     note: str = ""
+    n_valves: int = 1             # valves in the mandrel (PROSPER "Number of valves")
+    trim: str = ""                # proportional valves: Small / Medium / Large
 
 
 @dataclass
@@ -732,15 +878,16 @@ class DesignResult:
     messages: list = field(default_factory=list)
     iterations: int = 0
     trace: list = field(default_factory=list)
+    mandrels: pd.DataFrame | None = None   # existing mandrels: what each one holds (valve / orifice / dummy)
 
     def table(self) -> pd.DataFrame:
         rows = []
         for v in self.valves:
-            rows.append({"Valve": v.n, "Type": v.kind, "Measured depth (ft)": v.md, "True vertical depth (ft)": v.tvd,
+            rows.append({"Valve": v.n, "Number of valves": v.n_valves, "Type": v.kind, "Measured depth (ft)": v.md, "True vertical depth (ft)": v.tvd,
                          "Tubing pressure (psia)": v.pt, "Casing pressure (psia)": v.pc,
                          "Transfer pressure (psia)": v.p_transfer, "Temperature at valve (°F)": v.t_valve,
                          "Gas lift rate (Mscf/d)": v.q_gas, "Required gas (Mscf/d)": v.q_required,
-                         "Port size (64ths in)": v.port_64, "R value": v.r,
+                         "Port size (64ths in)": v.port_64, "Trim": v.trim, "R value": v.r,
                          "Valve opening pressure (psia)": v.pvo, "Valve closing pressure (psia)": v.pvc,
                          "Dome pressure at 60 °F (psig)": v.pd60, "Test rack opening pressure (psig)": v.ptro,
                          "Opening CHP (psia)": v.chp_open, "Closing CHP (psia)": v.chp_close,
@@ -760,10 +907,20 @@ def valve_settings(pvo_d, pt, r, t_valve, chp_open, gas, tvd_top, tvd, t_top, t_
     closing pressure at depth, dome at 60 F and test-rack opening pressure (psig), closing CHP (psia)."""
     pbt = pvo_d * (1 - r) + pt * r                          # force balance: Pbt Ab = Pc (Ab - Ap) + Pt Ap
     pvc_d = pbt
-    pd60 = float(dome_at_60(max(pbt - p_atm, 0.0), t_valve, high_pressure))
+    pd60 = float(dome_at_60(max(pbt - p_atm, 0.0), t_valve, high_pressure, atm=PROSPER_ATM))
     ptro = pd60 / (1 - r)
     chp_close = float(surface_from_depth(gas, pvc_d, tvd_top, tvd, t_top, t_valve_gas))
     return pvc_d, pd60, ptro, chp_close
+
+
+def proportional_settings(pt, pc, k, t_valve, spring=220.0, pct=25.0, high_pressure=True):
+    """Proportional valve settings as PROSPER's design reports them (psia in, PTO and closing pressure at depth in
+    psia, dome at 60 F and shop closing pressure in psig): PTO = Pt + pct % (Pc - Pt); closing at depth
+    = PTO (1 - k) + Pc k; dome at temperature = closing + spring; shop closing = dome at 60 F - spring."""
+    pto = pt + pct / 100.0 * (pc - pt)
+    pvc = pto * (1 - k) + pc * k
+    pd60 = float(dome_at_60(pvc - 14.696 + spring, t_valve, high_pressure, atm=PROSPER_ATM))
+    return pto, pvc, pd60, pd60 - spring
 
 
 def _unloading_gas(path, fluid, ipr, inp: DesignInput, mds, q_design, correlation, p1, p2, u, hc, gas_sg, n=10):
@@ -895,6 +1052,21 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
     max_md = min(inp.max_md, path.md[-1])
     msgs = []
     tc_gas = casing_temperature(path, gas)
+    mand_rows = sorted((tuple(m) + (np.nan, np.nan))[:3] for m in (inp.mandrels or ()))
+    mand = np.array([m[0] for m in mand_rows if m[0] <= min(inp.max_md, path.md[-1]) + 1e-6], float) \
+        if mand_rows else None
+    if mand is not None and not len(mand):
+        raise ValueError("No mandrel above the maximum injection depth.")
+    mand_dp = {round(m[0], 3): m[1] for m in mand_rows if np.isfinite(m[1])}
+    mand_q = {round(m[0], 3): m[2] for m in mand_rows if np.isfinite(m[2])}
+    tubing = inp.valve_type == VALVE_TYPES[1]
+    prop = inp.valve_type == VALVE_TYPES[2]
+    frac = inp.pct_casing_wh / 100.0
+    if tubing or prop:  # tubing-sensitive / proportional valves: the casing pressure stays at the injection pressure
+        inp = dataclasses.replace(inp, dp_close=0.0, dp_close_spread=False, safety_last=0.0)
+        mand_dp = {}
+    if prop:            # PROSPER, proportional: valves spaced with the desired dP as the margin (user's run)
+        inp = dataclasses.replace(inp, margin_top=inp.dp_valve, margin=inp.dp_valve)
 
     def say(m):
         if progress:
@@ -953,11 +1125,14 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
 
     q_first = q_d
     it = 0
+    msgs_blocked = []
     for sp in range(3):
 
-        def spacing_pass(depths, pds, q_d):
+        def spacing_pass(depths, pds, q_d, lim=np.inf):
             """One spacing pass with the casing pressures from the current valve count. Returns
             (depths, drops, d_op, d_next, stop, transfer_f)."""
+            if lim == np.inf:
+                msgs_blocked.clear()              # report only what limits the final pass
             nv = len(depths)
             pso = inp.p_inj - sum(pds[:nv]) - (inp.safety_last if nv else 0.0)
             pc_op = casing_pressure(path, gas, pso, tc_gas)[0]
@@ -967,6 +1142,14 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
                 raise ValueError("The operating casing pressure is below the flowing tubing pressure plus the valve dP "
                                  "at the wellhead - raise the injection pressure or lower the top-node pressure.")
             d_op = float(lt.inj_md[0])
+            if mand is not None:                 # inject in the deepest mandrel at or above the optimum depth
+                m_op = _snap(mand, d_op, tol=inp.mandrel_tol) if lim == np.inf else _snap(mand, min(lim, d_op))
+                if m_op is None:
+                    raise ValueError(f"No mandrel at or above the deepest injection point ({d_op:,.0f} ft MD).")
+                d_op = m_op
+                lt = lifted_traverse(path, fluid, inp.top_p, {"q": [q_d], "wc": inp.wc, "gor": inp.gor}, [qgi_d],
+                                     correlation, p1, p2, u, hc, pc=pc_op, dp_valve=inp.dp_valve, max_md=max_md,
+                                     fixed_md=[d_op], gas_sg=gas.sg)
             pt_f = on_grid(lt.P[0])
             if inp.spacing == SPACING[1]:
                 pi = q_d / max(float(ipr.pr) - float(ipr_pwf(ipr, q_d)), 1.0)
@@ -977,6 +1160,21 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
                 transfer_f = np.maximum(line, pt_f)
             else:
                 transfer_f = pt_f
+            pt_flow_f = pt_f
+            p_top_sp = inp.top_p_unload
+            if tubing:
+                # PROSPER, tubing-sensitive: each valve spaced from the tubing pressure the valve above transfers at,
+                # Pt + %(Pc - Pt) at its depth, and the first from Pwh + %(Pko - Pwh) at surface (Tutorial 23 run
+                # with mandrels: valves at 2600 / 3800 / 5000 / 5600 / 6200 / 6800 ft with 30 %)
+                pc_inj_f = on_grid(casing_pressure(path, gas, inp.p_inj, tc_gas)[0])
+                transfer_f = pt_f + frac * (pc_inj_f - pt_f)
+                p_top_sp = inp.top_p_unload + frac * (inp.p_ko - inp.top_p_unload)
+            elif prop:
+                # PROSPER, proportional: each valve spaced from its PTO, Pt + transfer % (Pc - Pt) (25 %), with the
+                # desired dP as the margin; the first from the unloading wellhead pressure (user's Tutorial 23 run:
+                # valves at 3200 / 4400 / 5000 / 5600 / 6200 / 6800 ft)
+                pc_inj_f = on_grid(casing_pressure(path, gas, inp.p_inj, tc_gas)[0])
+                transfer_f = pt_f + inp.min_transfer_pct / 100.0 * (pc_inj_f - pt_f)
             pc_cache = {}
 
             def pc_surface(n):                   # surface opening pressure of valve n+1 (n valves above it)
@@ -987,9 +1185,21 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
                     pc_cache[n] = on_grid(casing_pressure(path, gas, pc_surface(n), tc_gas)[0])
                 return pc_cache[n]
 
-            new, stop = space_valves(md_f, tvd_f, inp.top_p_unload, lambda m: float(np.interp(m, md_f, transfer_f)),
+            new, stop = space_valves(md_f, tvd_f, p_top_sp, lambda m: float(np.interp(m, md_f, transfer_f)),
                                      on_grid(pc_ko), pc_next, inp.load_grad, inp.margin_top, inp.margin, inp.min_spacing,
-                                     d_op)
+                                     d_op, mand, inp.mandrel_tol, inp.dp_valve,
+                                     lambda m: float(np.interp(m, md_f, pt_flow_f)))
+            if mand is not None and stop.startswith("BLOCKED"):
+                if not new:
+                    raise ValueError("Existing mandrels: " + stop[9:] + " - the well cannot be unloaded.")
+                # the next valve cannot be placed: the deepest reachable mandrel becomes the injection point
+                msgs_blocked.append(stop[9:])
+                # inject in the next mandrel below the last valve if that is still shallower than this pass's
+                # injection mandrel (it may be reachable as the injection point - flowing tubing pressure and the
+                # desired dP - though not as one more unloading valve), else in the last valve's mandrel
+                nxt = [m for m in mand if m > new[-1] + 1e-6]
+                cand = float(nxt[0]) if len(nxt) and nxt[0] < d_op - 1e-6 else new[-1]
+                return spacing_pass(depths, pds, q_d, cand)
             # where the next valve would go: the injection point cannot be deeper than the well can be unloaded to
             d_next = None
             if new:
@@ -998,7 +1208,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
                     - (pc_next(len(new)) - inp.margin)
                 d_next = _first_crossing(md_f, f, dn + 1e-6)
             # last unloading valve too close to the injection point: move it up (API RP 11V6 Example 1)
-            if new and d_op - new[-1] < inp.min_spacing:
+            if mand is None and new and d_op - new[-1] < inp.min_spacing:
                 moved = d_op - inp.min_spacing
                 if len(new) == 1 or moved - new[-2] >= inp.min_spacing:
                     new[-1] = moved
@@ -1006,7 +1216,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
                     new = new[:-1]
             pds_new = []
             for k, dk in enumerate(new):
-                pd_k = inp.dp_close
+                pd_k = mand_dp.get(round(dk, 3), inp.dp_close)
                 if inp.dp_close_spread:                      # PROSPER "Pvo = gas pressure": at least the valve spread
                     piod = float(np.interp(dk, md_f, pc_next(k) if k else on_grid(casing_pressure(path, gas, inp.p_inj, tc_gas)[0])))
                     pd_k = max(pd_k, r_of(k) * (piod - float(np.interp(dk, md_f, transfer_f))))
@@ -1035,6 +1245,10 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
                     else:
                         inj_md = min(cand[3], cand[4]) if cand[4] is not None else cand[3]
                     stop = "injection point limited by the deepest unloading reach"
+                    if mand is not None:
+                        m_ = _snap(mand, inj_md, depths[-1] if depths else -np.inf)
+                        inj_md = m_ if m_ is not None else (depths.pop() if depths else inj_md)
+                        pds = pds[:len(depths)]
                     break
                 depths, pds, inj_md = new, pds_new, d_op
                 if converged:
@@ -1045,7 +1259,9 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
             op = solve_rate(path, fluid, ipr, inp.top_p, inp.wc, inp.gor, [qgi_d], correlation, p1, p2, u, hc, None,
                             0.0, None, gas.sg, fixed_md=np.array([inj_md]), refine=2)[0]
             if op.q is None:
-                raise ValueError("The design does not flow: no VLP/IPR intersection at the design injection point.")
+                raise ValueError("The design does not flow: no VLP/IPR intersection at the design injection point" +
+                                 (f" ({inj_md:,.0f} ft MD, the deepest mandrel the well can be unloaded to - more "
+                                  "mandrels deeper or closer together are needed)." if mand is not None else "."))
             q_new = min(op.q, q_first)          # never above the design rate asked for
             if abs(q_new - q_d) <= 0.002 * q_d:
                 break
@@ -1078,6 +1294,8 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
         else:
             g_unl, pt_unl_all = _unloading_gas(path, fluid, ipr, inp, depths, q_d, correlation, p1, p2, u, hc, gas.sg)
             ptr_v = None
+        if mand_q:                               # mandrel max gas overrides the maximum gas during unloading
+            g_unl = np.array([min(float(g), mand_q.get(round(dk, 3), np.inf)) for g, dk in zip(g_unl, depths)])
         for k, dk in enumerate(depths):
             tv = float(np.interp(dk, path.md, path.tvd))
             pc_d = float(np.interp(dk, path.md, casing_pressure(path, gas, pio[k], tc_gas)[0]))
@@ -1087,23 +1305,52 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
             tg_v = float(np.interp(dk, path.md, tc_gas))
             q_req, pt_unl = float(g_unl[k]) * 1000.0, float(pt_unl_all[k])
             p_down = max(min(pt_unl, pc_d - 1.0), 14.7)
-            port, q_gas, note = None, np.nan, ""
-            for pp in valve_t.ports:
-                qq = float(thornhill_craver(pp / 64, pc_d, p_down, tg_v, gas.sg)) * (1 - inp.tc_derate_valve / 100)
-                if qq >= q_req:
-                    port, q_gas = pp, qq
+            port, q_gas, note, n_v = None, np.nan, "", 1
+            # the smallest port that passes the unloading gas; when the largest cannot, two (up to four) valves in
+            # the mandrel (PROSPER's "Number of valves": Tutorial 23 tubing-sensitive run, 2 x 12/64 at 5000 ft)
+            for n_v in (1, 2, 3, 4):
+                for pp in valve_t.ports:
+                    qq = n_v * float(thornhill_craver(pp / 64, pc_d, p_down, tg_v, gas.sg)) * (1 - inp.tc_derate_valve / 100)
+                    if qq >= q_req:
+                        port, q_gas = pp, qq
+                        break
+                if port is not None:
                     break
             if port is None:
                 port = valve_t.ports[-1]
-                q_gas = float(thornhill_craver(port / 64, pc_d, p_down, tg_v, gas.sg)) * (1 - inp.tc_derate_valve / 100)
-                note = "largest port cannot pass the unloading gas"
+                q_gas = n_v * float(thornhill_craver(port / 64, pc_d, p_down, tg_v, gas.sg)) * (1 - inp.tc_derate_valve / 100)
+                note = "four of the largest port cannot pass the unloading gas"
             r = float(valve_t.r(port))
+            if prop:
+                # proportional (PROSPER): opens at the PTO, Pt + transfer % (Pc - Pt); closes at PTO (1 - k) + Pc k
+                # (k of the trim); dome at temperature = closing + spring; shop closing = dome at 60 F - spring
+                pto, pvc_d, pd60, _ = proportional_settings(pt_d, pc_d, r, t_v, valve_t.spring, inp.min_transfer_pct,
+                                                            inp.dome_high_p)
+                trim = dict(zip(valve_t.ports, valve_t.trims)).get(port, "") if valve_t.trims else ""
+                rows.append(ValveRow(k + 1, "Valve", dk, tv, pt_d, pc_d, pto, t_v, q_req, q_gas, pt_unl, port, r, pto,
+                                     pvc_d, pd60, pd60 - valve_t.spring, np.nan, np.nan, np.nan, pc_d - pt_d,
+                                     note, n_v, trim))
+                continue
+            if tubing:
+                # tubing-sensitive (PROSPER): opens at the transfer pressure - the tubing pressure from which the load
+                # fluid just reaches the next mandrel (or valve) below, within the margin of its casing pressure -
+                # and closes at the bellows pressure Pvo (1 - R) + Pc R (Tutorial 23 run: 1294.14 x 0.958 + 1574.06 x
+                # 0.042 = 1305.9 psig)
+                below = [m for m in (mand if mand is not None else list(depths) + [inj_md]) if m > dk + 1e-6]
+                nxt = float(below[0]) if len(below) else inj_md
+                pc_nx = float(np.interp(nxt, path.md, casing_pressure(path, gas, pio[k], tc_gas)[0]))
+                ptr = pc_nx - inp.margin - inp.load_grad * (float(np.interp(nxt, path.md, path.tvd)) - tv)
+                pbt = ptr * (1 - r) + pc_d * r
+                pd60 = float(dome_at_60(max(pbt - 14.696, 0.0), t_v, inp.dome_high_p, atm=PROSPER_ATM))
+                rows.append(ValveRow(k + 1, "Valve", dk, tv, pt_d, pc_d, ptr, t_v, q_req, q_gas, pt_unl, port, r, ptr,
+                                     pbt, pd60, pd60 / (1 - r), np.nan, np.nan, np.nan, pc_d - pt_d, note, n_v))
+                continue
             # closing pressure Pvo (1 - R) + Pt R with the flowing tubing pressure (PROSPER: 1617.63 (1 - 0.066)
             # + 771.99 x 0.066 = 1561.82 psig in the manual's example)
             pvc, pd60, ptro, chp_c = valve_settings(pc_d, pt_d, r, t_v, pio[k], gas, path.tvd[0], tv, t_top, tg_v,
                                                     inp.dome_high_p)
             rows.append(ValveRow(k + 1, "Valve", dk, tv, pt_d, pc_d, ptr, t_v, q_req, q_gas, pt_unl, port, r, pc_d, pvc,
-                                 pd60, ptro, pio[k], chp_c, np.nan, pc_d - pt_d, note))
+                                 pd60, ptro, pio[k], chp_c, np.nan, pc_d - pt_d, note, n_v))
 
         r_new = [v.r for v in rows]
         if not inp.dp_close_spread or (len(r_new) == len(r_list) and np.allclose(r_new, r_list, atol=1e-4)):
@@ -1113,7 +1360,7 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
     if q_d < q_first * 0.998:
         msgs.append(f"Design rate reduced from {q_first:,.1f} to {q_d:,.1f} STB/d liquid to conform with the IPR "
                     "(rate check against the well inflow at the final injection point).")
-    if inp.check_ipr and inp.operating_at_dp:
+    if inp.check_ipr and inp.operating_at_dp and mand is None:   # existing mandrels: the port is sized to the dP
         # The operating gas is a result (Brown): tubing pressure at the injection point = casing - desired dP. When
         # that needs less than the gas available, the well produces less with less gas - the valves stay spaced for
         # the design gas (PROSPER's manual example: 1486 -> 1377 STB/d of oil with 3.28 of 4 MMscf/d).
@@ -1147,8 +1394,14 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
             p_up = upstream_for_rate(q_req, port / 64, pt_d, tg_v, gas.sg, inp.tc_derate_orifice)
             dp_act = p_up - pt_d
         q_gas = float(thornhill_craver(port / 64, pt_d + dp_act, pt_d, tg_v, gas.sg)) * (1 - inp.tc_derate_orifice / 100)
+        n_or = 1
+        if prop and port > valve_t.max_port_64:
+            # PROSPER, proportional: orifices no larger than the valve's largest port, several in parallel with the
+            # same total area (user's run: 2 x 19/64 for 26.9/64)
+            n_or = int(np.ceil((port / valve_t.max_port_64) ** 2))
+            port = port / np.sqrt(n_or)
         rows.append(ValveRow(nv + 1, "Orifice", inj_md, tv, pt_d, pt_d + dp_act, pt_d, t_v, q_req, q_gas, pt_d,
-                             port, np.nan, chp_open=pso, dp_valve=dp_act))
+                             port, np.nan, chp_open=pso, dp_valve=dp_act, n_valves=n_or))
     else:
         port, q_gas, note = None, np.nan, ""
         for pp in valve_t.ports:
@@ -1170,8 +1423,20 @@ def design(path, fluid, ipr, gas: LiftGas, inp: DesignInput, correlation="hagedo
     for v in rows:
         v.unloadable = (v.pc - prev_p) / max(v.tvd - prev_tv, 1e-6)
         prev_p, prev_tv = v.p_transfer, v.tvd
+    mt = None
+    if mand_rows:
+        used = {round(v.md, 3): v for v in rows}
+        mt = pd.DataFrame([{"Mandrel": i + 1, "Measured depth (ft)": m[0],
+                            "Holds": (used[round(m[0], 3)].kind + f" {used[round(m[0], 3)].n}")
+                            if round(m[0], 3) in used else "Dummy",
+                            "dP casing (psi)": m[1], "Maximum gas (MMscf/d)": m[2]} for i, m in enumerate(mand_rows)])
+        nd = int((mt["Holds"] == "Dummy").sum())
+        msgs.append(f"Existing mandrels: {len(rows)} of {len(mand_rows)} hold valves, {nd} {"dummy" if nd == 1 else "dummies"}; injection in the "
+                    f"mandrel at {inj_md:,.1f} ft MD.")
+        for b in dict.fromkeys(msgs_blocked):
+            msgs.append("Unloading limited: " + b + " - injection moved up to the deepest mandrel reached.")
     res = DesignResult(inp, q_d, qgi_d, pwf, rows, inj_md, pso, path.md, path.tvd, pt_n, tt_n, pc_op, pc_ko,
-                       np.interp(path.md, md_f, transfer_f), perf, stop, msgs, it + 1, trace)
+                       np.interp(path.md, md_f, transfer_f), perf, stop, msgs, it + 1, trace, mt)
     if any(v.note for v in rows):
         msgs.append("Some ports cannot pass the required gas - see the Note column.")
     return res

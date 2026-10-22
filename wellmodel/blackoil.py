@@ -104,6 +104,11 @@ class PVTInputs:
     n2: float = 0.0
     correct_impurities: bool = False  # Glaso non-hydrocarbon correction on Pb (PROSPER does not apply it)
     watson_k: float = 12.1            # Watson characterisation factor (Bergman-Sutton dead-oil viscosity only)
+    water_corr: str = "prosper"       # water properties: "prosper" (fitted to PROSPER) or "mccain"
+    z_corr: str = "prosper"           # gas Z: "prosper" (DPR, Standing pseudo-criticals, see gas_pseudocritical)
+                                      # or "sutton_dak" (Sutton + Wichert-Aziz, Dranchuk-Abou-Kassem)
+    z_sg: float | None = None         # gas gravity for the pseudo-criticals (None: gas_sg) - PROSPER uses the
+                                      # separator gas gravity for a wet gas (Tutorial 02)
 
     @property
     def gamma_o(self) -> float:
@@ -353,7 +358,23 @@ def visc_undersat(fam: str, mu_ob, p, pb):
 
 # ====================================================== gas and water
 def gas_pseudocritical(inp: PVTInputs):
-    """Sutton pseudo-criticals with Wichert-Aziz sour-gas correction (degR, psia)."""
+    """Pseudo-critical temperature and pressure (degR, psia).
+    "prosper" (default): Standing's condensate-gas pseudo-criticals of the hydrocarbon gas (nitrogen taken out of
+    the gravity), Kay's mixing with nitrogen, Wichert-Aziz for CO2 and H2S. With Dranchuk-Purvis-Robinson Z this
+    reproduces PROSPER's Z tables within 0.15 % (Tutorial 02, gravity 0.58, 2 % N2, 0.5 % CO2) and 0.4 %
+    (Tutorial 04, gravity 0.769, 4 % N2) from 60 to 250 F - Sutton + DAK was 0.8 % and 2.5 % off.
+    "sutton_dak": Sutton pseudo-criticals with the Wichert-Aziz correction (nitrogen not treated)."""
+    if getattr(inp, "z_corr", "prosper") == "prosper":
+        g = inp.z_sg if getattr(inp, "z_sg", None) else inp.gas_sg
+        yn = inp.n2 / 100
+        gh = (g - 0.967 * yn) / max(1 - yn, 1e-6)
+        tpc = (1 - yn) * (187.0 + 330.0 * gh - 71.5 * gh * gh) + 227.16 * yn
+        ppc = (1 - yn) * (706.0 - 51.7 * gh - 11.1 * gh * gh) + 493.1 * yn
+        a = (inp.co2 + inp.h2s) / 100
+        b = inp.h2s / 100
+        eps = 120 * (a ** 0.9 - a ** 1.6) + 15 * (b ** 0.5 - b ** 4)
+        tpc_c = tpc - eps
+        return tpc_c, ppc * tpc_c / (tpc + b * (1 - b) * eps)
     g = inp.gas_sg
     tpc = 169.2 + 349.5 * g - 74.0 * g * g
     ppc = 756.8 - 131.07 * g - 3.6 * g * g
@@ -385,12 +406,37 @@ def z_dak(tpr, ppr, iters: int = 12):
     return np.clip(0.27 * ppr / (rho * tpr), 0.2, 2.0)
 
 
+_DPR = (0.31506237, -1.0467099, -0.57832729, 0.53530771, -0.61232032, -0.10488813, 0.68157001, 0.68446549)
+
+
+def z_dpr(tpr, ppr, iters: int = 20):
+    """Dranchuk, Purvis & Robinson (1974) fit of the Standing-Katz chart (PROSPER's Z: its tables are reproduced to
+    1e-5 with fitted pseudo-criticals). Newton on the reduced density."""
+    tpr = np.asarray(tpr, float)
+    ppr = np.asarray(ppr, float)
+    A = _DPR
+    t1 = A[0] + A[1] / tpr + A[2] / tpr ** 3
+    t2 = A[3] + A[4] / tpr
+    t3 = A[4] * A[5] / tpr
+    t4 = A[6] / tpr ** 3
+    rho = 0.27 * ppr / tpr
+    for _ in range(iters):
+        r2 = rho * rho
+        e = np.exp(-A[7] * r2)
+        f = (1 + t1 * rho + t2 * r2 + t3 * r2 * r2 * rho + t4 * r2 * (1 + A[7] * r2) * e) - 0.27 * ppr / (rho * tpr)
+        df = (t1 + 2 * t2 * rho + 5 * t3 * r2 * r2 + t4 * e * (2 * rho + 4 * A[7] * r2 * rho
+                                                                  - 2 * A[7] * rho * r2 * (1 + A[7] * r2))
+              + 0.27 * ppr / (r2 * tpr))
+        rho = np.clip(rho - f / df, 1e-8, 3.0)
+    return np.clip(0.27 * ppr / (rho * tpr), 0.2, 2.0)
+
+
 def gas_props(inp: PVTInputs, p, t):
     """Return (Z, Bg ft3/scf, rho_g lb/ft3, mu_g cp)."""
     p = np.maximum(np.asarray(p, float), P_STD)
     tr = np.asarray(t, float) + RANKINE
     tpc, ppc = gas_pseudocritical(inp)
-    z = z_dak(tr / tpc, p / ppc)
+    z = (z_dpr if getattr(inp, "z_corr", "prosper") == "prosper" else z_dak)(tr / tpc, p / ppc)
     bg = 0.02827 * z * tr / p
     m = 28.967 * inp.gas_sg
     rho = m * p / (z * 10.7316 * tr)
@@ -400,7 +446,73 @@ def gas_props(inp: PVTInputs, p, t):
     return z, bg, rho, mu
 
 
+# PROSPER's water properties (gas-free water, black oil), from its PVT | Calculate tables (Tutorial 03b: 200,000 ppm
+# at 60-210 F and 0-6000 psig; Tutorials 04/06: 100,000 ppm at 30-210 F):
+#   Bw linear in pressure, Bw = Bw0(T) - s(T) p_gauge, independent of salinity;
+#   density = standard density(salinity) / Bw (71.832 lb/ft3 at 200,000 ppm, 66.731 at 100,000);
+#   viscosity a function of temperature and salinity only.
+# Tabulated against temperature and interpolated (monotone cubic); outside 30-210 F, Bw0 follows McCain's thermal
+# expansion from the end value, the pressure slope is held and viscosity keeps its salinity ratio to Van Wingen's
+# fresh-water curve. Salinity: quadratic in ln(viscosity) through fresh water (Van Wingen), 10 and 20 wt %.
+_PW_T = np.array([30, 39.4737, 48.9474, 58.4211, 60, 67.8947, 77.3684, 86.8421, 90, 96.3158, 105.789, 115.263, 120,
+                  124.737, 134.211, 143.684, 150, 153.158, 162.632, 166, 172.105, 180, 181.579, 191.053, 200.526, 210.0])
+_PW_BW0 = np.array([0.99995, 0.99995, 0.99860, 0.99939, 0.99955, 1.00044, 1.00172, 1.00324, 1.00379, 1.00497, 1.00692,
+                    1.00907, 1.01022, 1.01143, 1.01398, 1.01672, 1.01865, 1.01965, 1.02276, 1.02392, 1.02606, 1.02895,
+                    1.02954, 1.03319, 1.03702, 1.04102])
+_PW_SLOPE = np.array([3.18333, 3.14500, 3.09167, 3.04667, 3.04000, 3.00833, 2.97333, 2.94833, 2.94000, 2.92667,
+                      2.91500, 2.91000, 2.91000, 2.91500, 2.92833, 2.94833, 2.96667, 2.97667, 3.00833, 3.02333,
+                      3.05000, 3.08833, 3.09667, 3.14667, 3.20500, 3.27000]) * 1e-6          # 1/psi
+_PW_T10 = np.array([30.0, 60.0, 90.0, 120.0, 150.0, 166.0, 180.0, 210.0])
+_PW_MU10 = np.array([2.15637, 1.45605, 1.01015, 0.73914, 0.56268, 0.49445, 0.44436, 0.35957])
+_PW_T20 = np.array([30, 39.4737, 48.9474, 58.4211, 60, 67.8947, 77.3684, 86.8421, 90, 96.3158, 105.789, 115.263, 120,
+                    124.737, 134.211, 143.684, 153.158, 162.632, 166, 172.105, 181.579, 191.053, 200.526, 210.0])
+_PW_MU20 = np.array([2.50680, 2.26507, 1.96856, 1.72555, 1.68935, 1.52402, 1.35510, 1.21220, 1.16943, 1.09026,
+                     0.98542, 0.89466, 0.85379, 0.81559, 0.74629, 0.68525, 0.63191, 0.58575, 0.57055, 0.54446,
+                     0.50737, 0.47394, 0.44370, 0.41627])
+
+
+def _pchip(x, y, xq):
+    from scipy.interpolate import PchipInterpolator
+    return PchipInterpolator(x, y, extrapolate=False)(np.clip(xq, x[0], x[-1]))
+
+
+def _ln_vw(t):
+    return 1.003 - 1.479e-2 * t + 1.982e-5 * t * t                           # Van Wingen, fresh water
+
+
+def _dvwt(t):
+    return -1.0001e-2 + 1.33391e-4 * t + 5.50654e-7 * t * t                  # McCain thermal expansion
+
+
+def _prosper_water(s_wt, p, t):
+    t = np.asarray(t, float)
+    p = np.asarray(p, float)
+    t_, p_ = np.broadcast_arrays(t, p)
+    tc = np.clip(t_, _PW_T[0], _PW_T[-1])
+    bw0 = _pchip(_PW_T, _PW_BW0, tc) * (1 + _dvwt(t_)) / (1 + _dvwt(tc))
+    slope = _pchip(_PW_T, _PW_SLOPE, tc)
+    bw = bw0 - slope * np.maximum(p_ - 14.696, 0.0)
+    rho_sc = 62.43 + 0.39014 * s_wt + 3.998e-3 * s_wt * s_wt
+    d10 = _pchip(_PW_T10, np.log(_PW_MU10) - _ln_vw(_PW_T10), tc)               # ln(mu / mu_fresh) at 10 wt %
+    d20 = _pchip(_PW_T20, np.log(_PW_MU20) - _ln_vw(_PW_T20), np.clip(tc, _PW_T20[0], _PW_T20[-1]))
+    c2 = (d20 - 2 * d10) / 200.0                                              # quadratic in S through 0, 10, 20
+    c1 = d10 / 10.0 - 10.0 * c2
+    s = np.clip(s_wt, 0.0, 30.0)
+    mu = np.exp(_ln_vw(t_) + c1 * s + c2 * s * s)
+    return bw, rho_sc / bw, mu
+
+
 def water_props(inp: PVTInputs, p, t):
+    """Water (Bw RB/STB, rho_w lb/ft3, mu_w cp). inp.water_corr: "prosper" (default - PROSPER's water properties,
+    see above) or "mccain" (McCain 1990/1991, salinity in weight %)."""
+    p = np.asarray(p, float)
+    t = np.asarray(t, float)
+    if getattr(inp, "water_corr", "prosper") == "prosper":
+        return _prosper_water(inp.salinity_ppm / 1e4, p, t)
+    return _mccain_water(inp, p, t)
+
+
+def _mccain_water(inp: PVTInputs, p, t):
     """McCain (1990): return (Bw RB/STB, rho_w lb/ft3, mu_w cp); salinity in weight %."""
     p = np.asarray(p, float)
     t = np.asarray(t, float)
@@ -409,7 +521,7 @@ def water_props(inp: PVTInputs, p, t):
     dvp = -1.95301e-9 * p * t - 1.72834e-13 * p * p * t - 3.58922e-7 * p - 2.25341e-10 * p * p
     bw = (1 + dvt) * (1 + dvp)
     rho_std = 62.368 + 0.438603 * s + 1.60074e-3 * s * s
-    a = 109.574 - 8.40564 * s + 0.313314 * s * s + 8.72213e-4 * s ** 3
+    a = 109.574 - 8.40564 * s + 0.313314 * s * s + 8.72213e-3 * s ** 3
     b = 1.12166 - 2.63951e-2 * s + 6.79461e-4 * s * s + 5.47119e-5 * s ** 3 - 1.55586e-6 * s ** 4
     mu1 = a * t ** -b
     mu = mu1 * (0.9994 + 4.0295e-5 * p + 3.1062e-9 * p * p)

@@ -65,7 +65,8 @@ class GasPVTInputs:
 
     def bo_inputs(self, sg=None):
         return bo.PVTInputs(rsb=1, api=40, gas_sg=float(self.wellstream_sg() if sg is None else sg),
-                            salinity_ppm=self.salinity_ppm, h2s=self.h2s, co2=self.co2, n2=self.n2)
+                            salinity_ppm=self.salinity_ppm, h2s=self.h2s, co2=self.co2, n2=self.n2,
+                            z_sg=float(self.gas_sg))
 
     def check(self):
         out = []

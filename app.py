@@ -33,12 +33,16 @@ from wellmodel import completion as wcomp
 from wellmodel import mpp as _mpp_mod
 from wellmodel import vlp as wvlp
 from wellmodel import system as wsys
+from wellmodel import injection as winj
+from wellmodel import tif as wtif
 from wellmodel import surface as wsurf
 from wellmodel import project as wproj
 from wellmodel import liftcurves as wlc
 from wellmodel import gradient as wgrad
 from wellmodel import choke as wchoke
 from wellmodel import gaslift as wgl
+from wellmodel import gaslift_system as wgls
+from wellmodel import quicklook as wql
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import gaspvt as wgp
@@ -430,7 +434,8 @@ CAPTIONS = {
     "separator": {"single_stage": "Surface rates at one separator stage"},
     "water_vapour": {"none": "Water produced as liquid only",
                      "calculate": "Dry and wet gas: water vaporised in the gas condenses up the well"},
-    "artificial_lift": {"none": "Natural flow (gas lift is designed in the Design tab)",
+    "artificial_lift": {"none": "Natural flow",
+                        "gas_lift": "Continuous gas lift: Gas lift data in Equipment, Calculation (design in Design)",
                         "esp": "Pump in the well: Equipment, VLP at the pump discharge, Calculation"},
 }
 STATUS_ICON = {wopt.MODELLED_NOW: "✅ Modelled", wopt.LUMPED_IN_PI: "↪️ Absorbed in matched PI",
@@ -843,6 +848,11 @@ def gas_match_tables():
     return [(float(t), g) for t, g in df.groupby("Temperature (deg F)")]
 
 
+def inj_gas_fluid():
+    """Injected gas for the gas-injector calculations (PVT tab inputs; impurities left out when 'as PROSPER')."""
+    return winj.GasFluid(gas_pvt_inputs(), impurities=not bool(val("inj_gas_prosper", False)))
+
+
 def gas_pvt_inputs(opts_now=None, matched=None) -> wgp.GasPVTInputs:
     """Dry and wet gas PVT inputs from the PVT tab (pressures psia internally), with the PVT match applied when
     'Apply match parameters' is on (matched=False: the correlations as published)."""
@@ -871,6 +881,315 @@ def gas_vapour_on(o_=None):
     o_ = o_ or ss.get("options")
     return bool(o_ is not None and getattr(o_, "water_vapour", "none") == "calculate"
                 and o_.fluid_type == "dry_wet_gas" and o_.method == "black_oil")
+
+
+def injector_calc(o, mode, eqd):
+    """Calculation tab for a water injector: system (tubing + injectivity) and gradient traverse."""
+    try:
+        path = winj.from_flow_path(vlp_path(eqd, "tubing", ()))
+    except ValueError as e:
+        st.error(str(e))
+        return
+    gas_inj = o.well_type == "gas_injector"
+    fl_ = inj_gas_fluid() if gas_inj else winj.WaterFluid(float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"])))
+    ru = fl_.rate_unit.replace("/d", "/d")
+    u = float(val("eq_u", eqd.get("u_geo", 8.0)))
+    t_inj = float(val("eq_tinj", 60.0))
+    hc = eqd.get("heat_capacities")
+    what = "Gas" if gas_inj else "Water"
+    st.caption(f"{what} injector: {what.lower()} at {t_inj:g} °F enters the wellhead and flows down the tubing "
+               f"(gravity raises the pressure, friction lowers it), exchanging heat with the formation (U = {u:g} "
+               "BTU/h/ft2/F). PVT from the PVT tab, injection temperature and U from the Equipment tab.")
+    if gas_inj and ss.get("inj_ipr") is not None and getattr(ss["inj_ipr"], "fluid", "") != "gas_injection":
+        ss.pop("inj_ipr", None)
+    if not gas_inj and ss.get("inj_ipr") is not None and getattr(ss["inj_ipr"], "fluid", "") != "water_injection":
+        ss.pop("inj_ipr", None)
+    if mode == CALC_MODES[0]:
+        ipr_inj = ss.get("inj_ipr")
+        if ipr_inj is None:
+            st.info("Set up the injectivity in the IPR Data tab first.")
+            return
+        c = st.columns(4)
+        whps = num_list(c[0], "Wellhead pressures (psia)", "sys_inj_whp", "1264.7")
+        if not whps:
+            return
+        rows, sols = [], {}
+        with st.spinner("Solving..."):
+            for w_ in whps:
+                res, rates, vp, ip = winj.solve(path, fl_, float(w_), ipr_inj, u, t_inj, hc)
+                sols[w_] = (res, rates, vp, ip)
+                rows.append({"Wellhead pressure (psia)": w_,
+                             f"Injection rate ({ru})": res.q if res else np.nan,
+                             "Solution node pressure (psia)": res.pwf if res else np.nan,
+                             "dP skin (psi)": (float(np.ravel(ipr_inj.dp_skin(np.array([res.q]), np.array([res.T[-1]])))[0])
+                                               if getattr(ipr_inj, "sandface_temperature", False)
+                                               else float(ipr_inj.dp_skin(res.q))) if res else np.nan,
+                             "Bottom node temperature (°F)": float(res.T[-1]) if res else np.nan,
+                             "Note": "" if res else "cannot inject: the static column does not reach the reservoir "
+                                                    "pressure"})
+        st.dataframe(pd.DataFrame(rows).style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+        pick = (st.selectbox("Case", whps, format_func=lambda x: f"WHP {x:,.1f} psia", key="sys_inj_pick")
+                if len(whps) > 1 else whps[0])
+        res, rates, vp, ip = sols[pick]
+        cc = st.columns([1, 1.6])
+        if res is not None:
+            with cc[0]:
+                det = winj.details(path, fl_, res, ipr_inj, comp_current(), p_unit_gauge=False)
+                det["Value"] = [f"{v_:,.4g}" if isinstance(v_, (int, float, np.floating)) else str(v_)
+                                for v_ in det["Value"]]
+                st.dataframe(det, hide_index=True, width="stretch", height=35 * (len(det) + 1) + 3)
+        with cc[1]:
+            fig, ax = plt.subplots(figsize=(8, 4.6))
+            ax.plot(rates, vp, color=wplt.SERIES[0], lw=1.8, label="VLP (tubing)")
+            ax.plot(rates, ip, color=wplt.SERIES[1], lw=1.8, label="IPR (injectivity)")
+            if res is not None:
+                ax.scatter([res.q], [res.pwf], s=50, facecolor="white", edgecolor=wplt.INK, lw=1.8, zorder=5,
+                           label="solution")
+            ax.set_xlabel(f"Injection rate ({ru})")
+            ax.set_ylabel("Bottom-hole pressure (psia)")
+            ax.grid(alpha=0.3, ls="--")
+            ax.legend(fontsize=8)
+            ax.set_title(f"System - WHP {pick:,.1f} psia", fontsize=10)
+            fig.tight_layout()
+            st.pyplot(fig, clear_figure=True)
+        if getattr(ipr_inj, "sandface_temperature", False):
+            _, tb_ = winj.vlp_curve(path, fl_, float(pick), rates, u, t_inj, hc, with_t=True)
+            dps_ = ipr_inj.dp_skin(rates, tb_)
+        else:
+            tb_, dps_ = np.full(len(rates), np.nan), ipr_inj.dp_skin(rates)
+        pts_ = pd.DataFrame({f"Injection rate ({ru})": rates, "VLP pressure (psia)": vp, "IPR pressure (psia)": ip,
+                             "dP skin (psi)": dps_, "Sandface temperature (°F)": tb_})
+        with st.expander("Rate table (VLP and IPR)"):
+            st.dataframe(pts_.style.format(precision=2), hide_index=True, width="stretch")
+        if res is not None:
+            gt_ = winj.gradient_table(path, fl_, res.q, res.P, res.T, p_unit_gauge=False)
+            with st.expander("Gradient at the solution rate"):
+                st.dataframe(gt_.style.format(precision=4), hide_index=True, width="stretch")
+                st.download_button("Download gradient (CSV)", gt_.to_csv(index=False).encode(), "injector_gradient.csv")
+    elif mode == CALC_MODES[1]:
+        c = st.columns(4)
+        whp = num(c[0], "Wellhead pressure (psia)", "grad_inj_whp", 1264.7, 14.7, 30000.0, 10.0)
+        q = (num(c[1], "Gas injection rate (MMscf/d)", "grad_ginj_q", 7.5, 0.0, 1e4, 0.5) if gas_inj
+             else num(c[1], "Injection rate (STB/d)", "grad_inj_q", 10000.0, 0.0, 1e6, 100.0))
+        P, T = winj.traverse(path, fl_, whp, [q], u, t_inj, hc)
+        gt_ = winj.gradient_table(path, fl_, q, P[0], T[0], p_unit_gauge=False)
+        cc = st.columns(2)
+        for ax_i, (col_, lab_) in enumerate((("Pressure (psia)", "Pressure (psia)"), ("Temperature (°F)", "Temperature (°F)"))):
+            fig, ax = plt.subplots(figsize=(6, 5))
+            ax.plot(gt_[col_], gt_["Measured depth (ft)"], color=wplt.SERIES[ax_i], lw=1.8)
+            if col_.startswith("Temperature"):
+                ax.plot(gt_["Formation temperature (°F)"], gt_["Measured depth (ft)"], color=wplt.INK2, lw=1,
+                        ls="--", label="formation")
+                ax.legend(fontsize=8)
+            ax.invert_yaxis()
+            ax.set_xlabel(lab_)
+            ax.set_ylabel("Measured depth (ft)")
+            ax.grid(alpha=0.3, ls="--")
+            fig.tight_layout()
+            cc[ax_i].pyplot(fig, clear_figure=True)
+        st.dataframe(gt_.style.format(precision=4), hide_index=True, width="stretch")
+        st.download_button("Download gradient (CSV)", gt_.to_csv(index=False).encode(), "injector_gradient.csv")
+    else:
+        st.info("For water injectors this tab covers system analysis and the gradient traverse.")
+
+
+INJ_MODELS = ["Darcy", "Thermally Induced Fracture", "P.I. Entry"]
+INJ_GAS_MODELS = ["Petroleum Experts"]
+
+
+def injector_ipr_panel(o):
+    """Injectivity for a water injector (PROSPER IPR with Well Type = Water Injector)."""
+    st.caption("Water injector: the reservoir takes water at a bottom-hole pressure above the reservoir pressure, "
+               f"q = J (Pwf - Pr). Pressures in {ss['_units']['pressure']}.")
+    gas_inj = o.well_type == "gas_injector"
+    model = sel(st, "Reservoir model", INJ_GAS_MODELS if gas_inj else INJ_MODELS,
+                "ipr_model_ginj" if gas_inj else "ipr_model_inj")
+    c = st.columns(4)
+    pr = num(c[0], "Reservoir pressure (psia)", "ipr_pr", 4114.7, 15.0, 30000.0, 10.0)
+    t_res = num(c[1], "Reservoir temperature (°F)", "ipr_t_inj_res", 210.0, 32.0, 700.0, 1.0)
+    if gas_inj:
+        flg = inj_gas_fluid()
+        c = st.columns(4)
+        k = num(c[0], "Reservoir permeability (md)", "ipr_k", 25.0, 1e-4, 1e5, None, "%.5g")
+        h = num(c[1], "Reservoir thickness (ft)", "ipr_h", 55.0, 0.1, 1e4, None, "%.5g")
+        area = num(c[2], "Drainage area (acres)", "ipr_area", 500.0, 0.1, 1e5, None, "%.5g")
+        ca = num(c[3], "Dietz shape factor", "ipr_ca", 31.6, 0.01, 100.0, None, "%.4g")
+        c = st.columns(4)
+        rw = num(c[0], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.01, 5.0, None, "%.4g")
+        hp = num(c[1], "Perforation interval (ft)", "ipr_hp", 45.0, 0.1, 1e4, None, "%.5g")
+        tdays = num(c[2], "Time since production started (days)", "ipr_tdays", 100.0, 0.5, 1e6, 1.0)
+        phi = num(c[3], "Reservoir porosity (fraction)", "ipr_phi", 0.15, 0.01, 0.5, 0.01)
+        c = st.columns(4)
+        swc = num(c[0], "Connate water saturation (fraction)", "ipr_swc", 0.25, 0.0, 0.9, 0.01)
+        perm = sel(c[1], "Permeability entered", ["Total permeability", "Gas permeability"], "ipr_perm_kind")
+        dm = sel(c[2], "Non-Darcy flow factor (D)", ["Calculated", "Entered"], "ipr_d_method")
+        d_ent = num(c[3], "D (1/(Mscf/d))", "ipr_d", 1e-4, 0.0, 1.0, None, "%.4e") if dm == "Entered" else None
+        skin = num(st.columns(4)[0], "Skin", "ipr_skin_inj", 2.0, -8.0, 500.0, None, "%.5g")
+        cur = winj.petex_gas_injection(pr, t_res, k, h, area, ca, rw, hp, tdays, phi, swc, skin, flg, d_ent,
+                                       "gas" if perm == "Gas permeability" else "total")
+        ss["inj_ipr"] = cur
+        c = st.columns(4)
+        c[0].metric("D", f"{cur.params['Non-Darcy flow factor D (1/(Mscf/d))']:.4e} 1/(Mscf/d)")
+        c[1].metric("Drainage term X", f"{cur.params['Drainage term X']:.4g}")
+        c[2].metric("Gas permeability", f"{cur.params['Gas permeability (md)']:.4g} md")
+        qq = np.linspace(0, max(cur.rate(2 * cur.pr), 1.0), 41)
+        tab = cur.table(qq)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(qq, tab["Pwf (psia)"], color=wplt.SERIES[0], lw=1.8, label="Injectivity")
+        ax.axhline(cur.pr, color=wplt.INK2, lw=0.8, ls="--", label="Reservoir pressure")
+        ax.set_xlabel("Injection rate (MMscf/d)")
+        ax.set_ylabel("Bottom-hole pressure (psia)")
+        ax.grid(alpha=0.3, ls="--")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+        st.caption("Petroleum Experts gas IPR run in reverse: M(Pwf) - M(Pr) = a q + b q², M at reservoir "
+                   "temperature. The table runs to twice the reservoir pressure; an injector's 'AOF' has no "
+                   "physical meaning.")
+        with st.expander("IPR table"):
+            st.dataframe(tab.style.format(precision=4), hide_index=True, width="stretch")
+        return
+    fl_ = winj.WaterFluid(float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"])))
+    if model == "Thermally Induced Fracture":
+        tif_panel(pr, t_res, fl_)
+        return
+    if model == "Darcy":
+        c = st.columns(4)
+        k = num(c[0], "Reservoir permeability (md)", "ipr_k", 50.0, 1e-4, 1e5, None, "%.5g")
+        h = num(c[1], "Reservoir thickness (ft)", "ipr_h", 100.0, 0.1, 1e4, None, "%.5g")
+        area = num(c[2], "Drainage area (acres)", "ipr_area", 250.0, 0.1, 1e5, None, "%.5g")
+        rw = num(c[3], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.01, 5.0, None, "%.4g")
+        c = st.columns(4)
+        skin = num(c[0], "Skin", "ipr_skin_inj", 0.0, -8.0, 500.0, None, "%.5g")
+        cur = ipr_inj = winj.darcy_injection(pr, t_res, k, h, area, rw, skin, fl_)
+    else:
+        j = num(st.columns(4)[0], "Injectivity index (STB/d/psi)", "ipr_j_inj", 5.0, 1e-6, 1e6, None, "%.5g")
+        cur = ipr_inj = winj.pi_injection(pr, j)
+    ss["inj_ipr"] = ipr_inj
+    c = st.columns(4)
+    c[0].metric("Injectivity index", f"{cur.j:.4g} STB/d/psi")
+    if "Water viscosity (cp)" in cur.params:
+        c[1].metric("Water viscosity at Pr, Tres", f"{cur.params['Water viscosity (cp)']:.4f} cp")
+        c[2].metric("Water FVF", f"{cur.params['Water FVF (RB/STB)']:.4f} RB/STB")
+    q_hi = cur.j * max(cur.pr, 1000.0)
+    qq = np.linspace(0, q_hi, 41)
+    tab = cur.table(qq)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(qq, tab["Pwf (psia)"], color=wplt.SERIES[0], lw=1.8, label="Injectivity")
+    ax.axhline(cur.pr, color=wplt.INK2, lw=0.8, ls="--", label="Reservoir pressure")
+    ax.set_xlabel("Injection rate (STB/d)")
+    ax.set_ylabel("Bottom-hole pressure (psia)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    st.caption("For an injector the 'AOF' has no physical meaning (no upper limit on the bottom-hole pressure); the "
+               "table runs to J x Pr.")
+    with st.expander("IPR table"):
+        st.dataframe(tab.style.format(precision=2), hide_index=True, width="stretch")
+
+
+def tif_panel(pr, t_res, fl_):
+    """PROSPER Thermally Induced Fracture injectivity (water injector)."""
+    st.caption("Thermally Induced Fracture: cold water cools the rock near the well and lowers the stress; above the "
+               "fracturing pressure the rock fractures. Three regimes - radial, fracture opening, fracture developed "
+               "- with the forms and coefficients found from PROSPER's Tutorial 03a (see wellmodel/tif.py). In this "
+               "tab the injected temperature below is used; the system calculation uses the sandface temperature "
+               "of the tubing at each rate.")
+    st.markdown("**Injectivity index parameters**")
+    c = st.columns(4)
+    t_inj = num(c[2], "Injected fluid temperature (°F)", "ipr_tif_tinj", 120.0, 32.0, 400.0, 1.0)
+    skin = num(c[3], "Skin", "ipr_skin_inj", 0.0, -8.0, 500.0, None, "%.5g")
+    c = st.columns(4)
+    k = num(c[0], "Reservoir permeability (md)", "ipr_k", 50.0, 1e-4, 1e5, None, "%.5g")
+    h = num(c[1], "Reservoir thickness (ft)", "ipr_h", 100.0, 0.1, 1e4, None, "%.5g")
+    area = num(c[2], "Drainage area (acres)", "ipr_area", 250.0, 0.1, 1e5, None, "%.5g")
+    ca = num(c[3], "Dietz shape factor", "ipr_ca", 31.6, 0.01, 100.0, None, "%.4g")
+    c = st.columns(4)
+    rw = num(c[0], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.01, 5.0, None, "%.4g")
+    tdays = num(c[1], "Time (days)", "ipr_tdays", 20.0, 0.5, 1e6, 1.0)
+    phi = num(c[2], "Reservoir porosity (fraction)", "ipr_phi", 0.18, 0.01, 0.5, 0.01)
+    qh = num(c[3], "Mean historical injection rate (STB/d)", "ipr_tif_qh", 12000.0, 1.0, 1e7, 100.0)
+    c = st.columns(4)
+    mu_r = num(c[0], "Reservoir fluid viscosity (cp)", "ipr_tif_mur", 0.357, 0.01, 1e4, None, "%.4g",
+               help="Fluid in the virgin reservoir at Pr and reservoir temperature (oil from the PVT, PROSPER's "
+                    "Tutorial 03a: 0.357 cp).")
+    b_r = num(c[1], "Reservoir fluid FVF (RB/STB)", "ipr_tif_bres", 1.41, 0.5, 5.0, None, "%.4g")
+    st.markdown("**Thermo-mechanical parameters**")
+    c = st.columns(4)
+    sig = num(c[0], "Initial reservoir stress (psia)", "ipr_tif_sig", 5314.7, 15.0, 50000.0, 10.0)
+    sweep = num(c[1], "Sweep efficiency (fraction)", "ipr_tif_sweep", 0.75, 0.01, 1.0, 0.01)
+    cpw = num(c[2], "Injected fluid specific heat capacity (BTU/lb/F)", "ipr_tif_cpw", 1.0, 0.1, 5.0, None, "%.4g")
+    lam_r = num(c[3], "Overall reservoir conductivity (BTU/hr/ft/F)", "ipr_tif_lamr", 2.5, 0.01, 50.0, None, "%.4g")
+    c = st.columns(4)
+    cp_r = num(c[0], "Overall reservoir specific heat capacity (BTU/lb/F)", "ipr_tif_cpr", 0.25, 0.01, 5.0, None, "%.4g")
+    rho_r = num(c[1], "Overall reservoir density (lb/ft3)", "ipr_tif_rhor", 140.0, 10.0, 400.0, None, "%.4g")
+    lam_s = num(c[2], "Top and bottom surroundings conductivity (BTU/hr/ft/F)", "ipr_tif_lams", 0.9, 0.01, 50.0, None, "%.4g")
+    cp_s = num(c[3], "Top and bottom surroundings specific heat capacity (BTU/lb/F)", "ipr_tif_cps", 0.2, 0.01, 5.0,
+               None, "%.4g")
+    c = st.columns(4)
+    rho_s = num(c[0], "Top and bottom surroundings density (lb/ft3)", "ipr_tif_rhos", 200.0, 10.0, 400.0, None, "%.4g")
+    alpha = num(c[1], "Reservoir thermal expansion (1/F)", "ipr_tif_alpha", 5e-6, 0.0, 1e-3, None, "%.4e")
+    biot = num(c[2], "Biot's constant", "ipr_tif_biot", 0.7, 0.0, 1.0, None, "%.4g")
+    nu = num(c[3], "Poisson's ratio", "ipr_tif_nu", 0.2, 0.0, 0.49, None, "%.4g")
+    e_mod = num(st.columns(4)[0], "Reservoir Young's modulus (psi)", "ipr_tif_e", 3e6, 1e3, 1e9, None, "%.4g")
+    inp = wtif.TIFInputs(pr=pr, t_res=t_res, t_inj=t_inj, k=k, h=h, area=area, ca=ca, rw=rw, phi=phi, t_days=tdays,
+                         q_hist=qh, skin=skin, sigma_ini=sig, sweep=sweep, cp_w=cpw, lam_r=lam_r, cp_r=cp_r,
+                         rho_r=rho_r, lam_s=lam_s, cp_s=cp_s, rho_s=rho_s, alpha=alpha, biot=biot, nu=nu, e_mod=e_mod,
+                         mu_res=mu_r, b_res=b_r)
+    cur = wtif.tif_ipr(inp, fl_)
+    ss["inj_ipr"] = cur
+    c = st.columns(4)
+    c[0].metric("Cooled radius", f"{cur.params['Cooled radius (ft)']:.1f} ft")
+    c[1].metric("Flooded radius", f"{cur.params['Flooded radius (ft)']:.1f} ft")
+    c[2].metric("Thermo-elastic coefficient Fh", f"{cur.params['Thermo-elastic coefficient Fh']:.3f}")
+    qq = np.linspace(0.0, 2.5 * max(qh, 1000.0), 51)
+    tab = cur.table(qq)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(qq, tab["Pwf (psia)"], color=wplt.SERIES[0], lw=1.8, label=f"Injectivity at {t_inj:g} °F")
+    ax.axhline(cur.pr, color=wplt.INK2, lw=0.8, ls="--", label="Reservoir pressure")
+    ax.axhline(sig, color=wplt.SERIES[2], lw=0.8, ls=":", label="Initial stress")
+    ax.set_xlabel("Injection rate (STB/d)")
+    ax.set_ylabel("Bottom-hole pressure (psia)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    with st.expander("IPR table"):
+        st.dataframe(tab.style.format({"Injection rate (STB/d)": "{:,.0f}", "Pwf (psia)": "{:,.1f}",
+                                       "dP skin (psi)": "{:,.1f}"}), hide_index=True, width="stretch")
+
+
+def water_injector_pvt_panel():
+    """PROSPER PVT input for a water injector: the injected water's salinity."""
+    st.subheader("Injected water")
+    st.caption("Water injector: the tubing and the injectivity use water properties only - PROSPER's water "
+               "properties (FVF linear in pressure, density from the salinity and FVF, viscosity from temperature "
+               "and salinity).")
+    c = st.columns(4)
+    num(c[0], "Water Salinity (ppm)", "pvt_sal", INPUT_DEFAULTS["pvt_sal"], 0.0, 300000.0, 1000.0, "%.0f")
+    fl_ = winj.WaterFluid(float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"])))
+    c[1].metric("Specific gravity (60 °F)", f"{fl_.sg:.4f}")
+    st.subheader("Calculate")
+    c = st.columns(4)
+    temps = num_list(c[0], "Temperatures (°F)", "pvt_w_temps", "60, 120, 210", "comma separated")
+    p_lo = num(c[1], "First pressure (psia)", "pvt_w_p0", 14.7, 14.7, 30000.0, 10.0)
+    p_hi = num(c[2], "Last pressure (psia)", "pvt_w_p1", 6000.0, 14.7, 30000.0, 10.0)
+    npts = int(num(c[3], "Number of pressures", "pvt_w_n", 13.0, 2.0, 100.0, 1.0, "%.0f"))
+    if temps and p_hi > p_lo:
+        recs = []
+        for t_ in temps:
+            pp = np.linspace(p_lo, p_hi, npts)
+            bw, rho, mu = fl_.props(pp, np.full(npts, float(t_)))
+            bw2, _, _ = fl_.props(pp + 1.0, np.full(npts, float(t_)))
+            for i_ in range(npts):
+                recs.append({"Temperature (°F)": t_, "Pressure (psia)": pp[i_], "Water FVF (RB/STB)": bw[i_],
+                             "Water density (lb/ft3)": rho[i_], "Water viscosity (cp)": mu[i_],
+                             "Water compressibility (1/psi)": -(bw2[i_] - bw[i_]) / bw[i_]})
+        tab = pd.DataFrame(recs)
+        st.dataframe(tab.style.format({"Water compressibility (1/psi)": "{:.4e}"}, precision=5), hide_index=True,
+                     width="stretch", height=320)
+        st.download_button("Download water PVT table (CSV)", tab.to_csv(index=False).encode(), "water_pvt.csv")
 
 
 def gas_pvt_panel(opts_now):
@@ -937,6 +1256,12 @@ def gas_pvt_panel(opts_now):
     mt = gas_match_tables()
     flag(st.toggle, "Apply match parameters", "pvt_gas_use_match", True,
          help="On: every calculation (PVT table, IPR, VLP, system) uses the matched correlations.")
+    if opts_now is not None and opts_now.well_type == "gas_injector":
+        flag(st.toggle, "Injector calculations as PROSPER (impurities left out)", "inj_gas_prosper", False,
+             help="PROSPER's gas injector (traverse and injectivity) works out the gas properties from the gravity "
+                  "alone, without the N2 / CO2 / H2S correction its PVT tab applies. On: the same, to compare with "
+                  "PROSPER. Off: the impurities are applied everywhere (physical; with 4 % N2 the gas is about 3 % "
+                  "denser in the tubing and the injectivity changes).")
     if mt:
         raw = gas_pvt_inputs(opts_now, matched=False)
         mres = wgp.match_gas(raw, mt)
@@ -1007,7 +1332,9 @@ def gas_pvt_panel(opts_now):
 with tabs[1]:
     st.header("PVT Input Data")
     opts_now = ss.get("options")
-    if opts_now is not None and opts_now.method == "eos":
+    if opts_now is not None and opts_now.well_type == "water_injector":
+        water_injector_pvt_panel()
+    elif opts_now is not None and opts_now.method == "eos":
         render_eos(opts_now)
     elif opts_now is not None and opts_now.fluid_type != "oil":
         gas_pvt_panel(opts_now)
@@ -1890,7 +2217,7 @@ with tabs[2]:
     if o is None or o.errors:
         st.info("Fix the configuration in the Options summary first.")
     elif o.is_injector:
-        st.info("Injection IPRs are not built yet - this tab currently covers producers.")
+        injector_ipr_panel(o)
     else:
         gas = o.is_gas
         fluid = "gas" if gas else "oil"
@@ -2594,6 +2921,228 @@ def esp_equipment_panel(top_md, secs):
     return out
 
 
+GL_VALVE_COLS = ["Measured depth (ft)", "Type", "Number of valves", "Port size (64ths in)", "R value",
+                 "Dome pressure at 60 °F (psig)"]
+
+
+def _gl_valves_blank(n=10):
+    df = pd.DataFrame({c: pd.Series([np.nan] * n, dtype=float) for c in GL_VALVE_COLS})
+    df["Type"] = pd.Series([None] * n, dtype=object)
+    df.index = pd.RangeIndex(1, n + 1, name="Point")
+    return df
+
+
+def gl_valve_db_panel():
+    """Gas lift valve database: built-in valves plus the user's (saved with the project, CSV import / export)."""
+    if "gl_valve_db" not in ss:
+        ss["gl_valve_db"] = pd.DataFrame({c_: pd.Series(dtype=float if c_ in ("Port (64ths in)", "R value") else object)
+                                          for c_ in wgl.VALVE_DB_COLS})
+    ver = ss.get("_ver_gl_valve_db", 0)
+    cur = ss.get("_tables", {}).get("gl_valve_db", ss["gl_valve_db"]) if ss.get("_gl_vdb_ver") == ver \
+        else ss["gl_valve_db"]               # a new table (project, import) replaces the editor's last state
+    ss["_gl_vdb_ver"] = ver
+    wgl.register_valves(cur)
+    n_user = len(wgl.valves_from_table(cur))
+    with st.expander(f"Gas lift valve database ({len(wgl.VALVES)} valves, {n_user} of yours)"):
+        st.caption("Valves for the design: manufacturer, model, specification, valve type and, for every port size, "
+                   "the R value (port area / bellows area) from the manufacturer's data - one row per port. Your "
+                   "valves are saved with the project; a valve with the same manufacturer, model and specification "
+                   "as a built-in one replaces it. PROSPER's database lists Altec, Baker, Camco, Mcmurry-Macco, "
+                   "Otis-Merla, PTC and Weatherford valves under Design | Gaslift | Current Valve Type.")
+        bt = wgl.builtin_valve_table()
+        st.markdown("**Built-in**")
+        st.dataframe(bt, hide_index=True, width="stretch", height=min(35 * (len(bt) + 1) + 3, 260))
+        st.markdown("**Your valves**")
+        up = st.file_uploader("Import valves (CSV with the columns below)", type=["csv"], key="gl_vdb_up")
+        if up is not None and ss.get("_gl_vdb_last") != (up.name, up.size):
+            try:
+                imp = pd.read_csv(up)
+                miss = [c_ for c_ in ("Manufacturer", "Model", "Port (64ths in)", "R value") if c_ not in imp.columns]
+                if miss:
+                    st.error("Missing columns: " + ", ".join(miss))
+                else:
+                    for c_ in wgl.VALVE_DB_COLS:
+                        if c_ not in imp.columns:
+                            imp[c_] = "" if c_ not in ("Port (64ths in)", "R value") else np.nan
+                    ss["gl_valve_db"] = pd.concat([cur, imp[wgl.VALVE_DB_COLS]], ignore_index=True)
+                    ss["_ver_gl_valve_db"] = ss.get("_ver_gl_valve_db", 0) + 1
+                    ss["_gl_vdb_last"] = (up.name, up.size)
+                    st.rerun()
+            except (ValueError, UnicodeDecodeError) as e:
+                st.error(f"Could not read the file: {e}")
+        ed = track("gl_valve_db", st.data_editor(
+            ss["gl_valve_db"], key=f"gl_valve_db_ed_{ss.get('_ver_gl_valve_db', 0)}", num_rows="dynamic",
+            width="stretch", column_config={
+                "Manufacturer": st.column_config.SelectboxColumn(options=list(wgl.VALVE_MANUFACTURERS) + ["Other"]),
+                "Valve type": st.column_config.SelectboxColumn(options=list(wgl.VALVE_KINDS)),
+                "Port (64ths in)": st.column_config.NumberColumn(format="%g", min_value=1, max_value=128),
+                "R value": st.column_config.NumberColumn(format="%.4f", min_value=0.0, max_value=0.99)}))
+        wgl.register_valves(ed)
+        st.download_button("Export your valves (CSV)", ed.to_csv(index=False).encode(), "gaslift_valves.csv",
+                           disabled=not len(ed.dropna(how="all")))
+
+
+GL_MANDREL_COLS = ["Measured depth (ft)", "dP casing (psi)", "Maximum gas (MMscf/d)", "Enabled"]
+
+
+def _gl_mandrels_blank(n=12):
+    df = pd.DataFrame({c: pd.Series([np.nan] * n, dtype=float) for c in GL_MANDREL_COLS[:3]})
+    df["Enabled"] = pd.Series([True] * n, dtype=bool)
+    df.index = pd.RangeIndex(1, n + 1, name="Mandrel")
+    return df
+
+
+def _gl_mandrels_from_valves():
+    """Design | Existing mandrels - Transfer: the depths of the Equipment tab's gas lift valves."""
+    src = ss.get("_tables", {}).get("gl_valves", ss.get("gl_valves"))
+    mds = []
+    if src is not None:
+        mds = sorted(float(x) for x in pd.to_numeric(src["Measured depth (ft)"], errors="coerce").dropna() if x > 0)
+    if not mds:
+        ss["_gl_mand_msg"] = "No gas lift valves in the Equipment tab (Gas lift data) to transfer."
+        return
+    ss.pop("_gl_mand_msg", None)
+    df = _gl_mandrels_blank(max(12, len(mds)))
+    for i, m in enumerate(mds, 1):
+        df.loc[i, "Measured depth (ft)"] = m
+    ss["gl_mandrels"] = df
+    ss["_ver_gl_mandrels"] = ss.get("_ver_gl_mandrels", 0) + 1
+
+
+def _gl_transfer_design():
+    out = ss.get("gl_res")
+    if not out or out.get("res") is None:
+        ss["_gl_tr_msg"] = "No gas lift design yet - run Design | Gas lift (continuous) in the Design tab first."
+        return
+    ss.pop("_gl_tr_msg", None)
+    vtype_ = getattr(out["res"].inp, "valve_type", "")
+    tub = vtype_ in wgl.VALVE_TYPES[1:]
+    rows = [{"Measured depth (ft)": float(v.md),
+             "Type": "Orifice" if v.kind == "Orifice" else ("Tubing" if tub else "Valve"),
+             "Number of valves": int(getattr(v, "n_valves", 1)),
+             "Port size (64ths in)": round(float(v.port_64), 2), "R value": float(v.r) if np.isfinite(v.r) else np.nan,
+             "Dome pressure at 60 °F (psig)": round(wgls.system_dome(v, vtype_), 2) if v.kind != "Orifice" else np.nan}
+            for v in out["res"].valves]
+    df = _gl_valves_blank(max(10, len(rows)))
+    for i, r in enumerate(rows, 1):
+        for k, v in r.items():
+            df.loc[i, k] = v
+    ss["gl_valves"] = df
+    ss["_ver_gl_valves"] = ss.get("_ver_gl_valves", 0) + 1
+    put("glq_pc", float(out["res"].inp.p_inj))
+    put("glq_dpv", float(out["res"].inp.dp_valve))
+    put("glq_sg", float(val("gl_sg", 0.7)))
+
+
+def gaslift_data_panel(o, top_md, secs):
+    """System | Gas Lift Data: the installed continuous gas lift used by the Calculation tab."""
+    st.subheader("Gas lift data (continuous)")
+    st.caption("The gas lift used by the Calculation tab (PROSPER System | Gas Lift Data). Design a new installation "
+               "in the Design tab and transfer its valves here, or enter the valve depths of an existing well.")
+    c = st.columns(3)
+    ann = sel(c[0], "Gas lift type", list(wgls.ANNULUS), "glq_ann",
+              help="No friction: static gas column in the annulus (most installations). Friction loss: the lift gas "
+                   "flowing down the tubing-casing annulus loses pressure by friction (needs tubing OD and casing "
+                   "ID). In both the annulus gas is at the flowing tubing temperature (PROSPER).")
+    method = sel(c[1], "Gas lift method", list(wgls.METHODS), "glq_method", wgls.METHODS[2],
+                 help="Fixed depth: all the gas enters at one depth (casing pressure assumed sufficient). Optimum "
+                      "depth: the deepest point where casing pressure >= tubing pressure + valve dP. Valve depths "
+                      "specified: that point moved up to the deepest valve above it. Multipoint: from the casing "
+                      "head pressure every valve passes the gas its port allows - the lift gas rate is a result.")
+    mp = method == wgls.METHODS[3]
+    rate_mode = sel(c[2], "Input method", list(wgls.RATE_MODES), "glq_rate_mode", disabled=mp,
+                    help="Injected gas rate (MMscf/d) or GLR injected (scf per STB of liquid). Either can also be a "
+                         "sensitivity variable in the system calculation.")
+    c = st.columns(5)
+    gas = wgl.LiftGas(num(c[0], "Gas lift gas gravity", "glq_sg", float(val("gl_sg", 0.7)), 0.55, 2.0, None, "%.3f"),
+                      num(c[2], "CO2 (%)", "glq_co2", 0.0, 0.0, 100.0), num(c[3], "N2 (%)", "glq_n2", 0.0, 0.0, 100.0),
+                      num(c[1], "H2S (%)", "glq_h2s", 0.0, 0.0, 100.0))
+    if rate_mode == wgls.RATE_MODES[0] or mp:
+        qgi = num(c[4], "Injected gas rate (MMscf/d)", "glq_qgi", 1.0, 0.0, 200.0, None, "%.4g", disabled=mp)
+        glr = float(val("glq_glr", 500.0))
+    else:
+        glr = num(c[4], "GLR injected (scf/STB)", "glq_glr", 500.0, 0.0, 1e6)
+        qgi = float(val("glq_qgi", 1.0))
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
+    c = st.columns(4)
+    pc = dp = max_md = fixed = np.nan
+    if method != wgls.METHODS[0]:
+        pc = num(c[0], "Casing head pressure (psia)", "glq_pc", float(val("gl_pinj", 1214.7)), 14.7, 2e4,
+                 help="Injection pressure at the casing head (PROSPER: Casing Pressure). For a casing-operated "
+                      "design, subtract the closing drop of the unloading valves above the operating valve.")
+    if method in wgls.METHODS[1:3]:
+        dp = num(c[1], "dP across valve (psi)", "glq_dpv", float(val("gl_dpv", 100.0)), 0.0, 2000.0)
+    if method == wgls.METHODS[1]:
+        max_md = num(c[2], "Maximum depth of injection (ft MD)", "glq_maxmd", float(round(bottom - 30.0)),
+                     float(top_md) + 10, 60000.0)
+    if method == wgls.METHODS[0]:
+        fixed = num(c[0], "Depth of injection (ft MD)", "glq_fixmd", float(round(bottom - 30.0)), float(top_md) + 10,
+                    60000.0)
+    if mp:
+        c2 = st.columns(4)
+        hp = flag(c2[0].checkbox, "Dome correction > 1200 psig (Winkler-Eads)", "glq_dome_hp", True)
+        derate = num(c2[1], "Thornhill-Craver de-rating (%)", "glq_derate", 0.0, 0.0, 90.0)
+    else:
+        hp, derate = True, 0.0
+    valves = ()
+    if method in wgls.METHODS[2:]:
+        st.button("Transfer from the gas lift design", on_click=_gl_transfer_design, key="glq_transfer",
+                  help="Valve depths, ports, R values and dome pressures of the last design (Design tab), with its "
+                       "operating injection pressure and valve dP.")
+        if ss.get("_gl_tr_msg"):
+            st.warning(ss["_gl_tr_msg"])
+        if "gl_valves" not in ss:
+            ss["gl_valves"] = _gl_valves_blank()
+        if "Number of valves" not in ss["gl_valves"].columns:      # projects saved before the column existed
+            ss["gl_valves"] = ss["gl_valves"].copy()
+            ss["gl_valves"].insert(2, "Number of valves", 1.0)
+        cfg = {"Type": st.column_config.SelectboxColumn(
+            "Type", options=list(wgls.VALVE_KINDS),
+            help="Valve: casing-sensitive (IPO). Tubing: tubing-sensitive (opened by the tubing pressure). Orifice.")}
+        for c_ in GL_VALVE_COLS:
+            if c_ != "Type":
+                cfg[c_] = st.column_config.NumberColumn(c_, format="%g")
+        ed = track("gl_valves", st.data_editor(ss["gl_valves"], key=f"gl_valves_ed_{ss.get('_ver_gl_valves', 0)}",
+                                               num_rows="dynamic", width="stretch", column_config=cfg))
+        rows = ed.dropna(subset=["Measured depth (ft)"])
+        out = []
+        for _, r in rows.iterrows():
+            kind = r["Type"] if r["Type"] in wgls.VALVE_KINDS else "Valve"
+            port = float(r["Port size (64ths in)"]) if pd.notna(r["Port size (64ths in)"]) else np.nan
+            if mp and not np.isfinite(port):
+                st.error(f"Valve at {r['Measured depth (ft)']:g} ft: enter the port size (multipoint).")
+            if mp and kind in ("Valve", "Tubing") and not pd.notna(r["Dome pressure at 60 °F (psig)"]):
+                st.error(f"Valve at {r['Measured depth (ft)']:g} ft: enter the dome pressure (multipoint).")
+            out.append(wgls.GLValve(float(r["Measured depth (ft)"]), kind, port if np.isfinite(port) else 16.0,
+                                    float(r["R value"]) if pd.notna(r["R value"]) else 0.0,
+                                    float(r["Dome pressure at 60 °F (psig)"]) if pd.notna(
+                                        r["Dome pressure at 60 °F (psig)"]) else np.nan,
+                                    int(r["Number of valves"]) if pd.notna(r.get("Number of valves", np.nan))
+                                    and r.get("Number of valves", 0) >= 1 else 1))
+        valves = tuple(sorted(out, key=lambda v: v.md))
+        if not valves:
+            st.warning("Enter the gas lift valve depths (or transfer them from the design).")
+        if mp:
+            st.caption("Multipoint valve model: orifice - Thornhill-Craver through the port. Casing-sensitive valve "
+                       "- closed at or below Pd (dome at valve temperature), no gas up to Pvo = (Pd - R Pt)/(1 - R), "
+                       "then throttling with gas in proportion to Pc - Pvo (0.247 MMscf/d per psi per in2 of port) up "
+                       "to the full-port Thornhill-Craver rate. Fitted to PROSPER's multipoint VLP (Tutorial 23, "
+                       "Camco R-20); PROSPER's Petex throttling model itself is not published.")
+    fric = ann == wgls.ANNULUS[1]
+    if fric and secs is not None and len(secs):
+        t_ = secs[secs["Type"] == "Tubing"]
+        if not len(t_) or t_["Tubing OD (in)"].isna().any() or t_["Casing ID (in)"].isna().any():
+            st.error("Friction loss in annulus needs the tubing OD and casing ID of every tubing section "
+                     "(Downhole equipment).")
+    setup = wgls.GasLiftSetup(method=method, gas=gas, rate_mode=rate_mode, qgi=qgi, glr_inj=glr,
+                              p_casing=pc if np.isfinite(pc) else 1214.7, dp_valve=dp if np.isfinite(dp) else 100.0,
+                              max_md=max_md if np.isfinite(max_md) else 1e9, fixed_md=fixed, valves=valves,
+                              annulus_friction=fric, dome_high_p=hp, tc_derate=derate)
+    ss["gl_setup"] = setup
+    return setup
+
+
 with tabs[3]:
     st.header("Equipment Data")
     o = ss.get("options")
@@ -2756,8 +3305,14 @@ with tabs[3]:
         st.caption("Formation temperature against measured depth, from the wellhead to the deepest equipment. "
                    "TVD is calculated from the deviation survey. The overall heat transfer coefficient sets the "
                    "heat loss between the flowing fluid and the formation.")
-        u_geo = num(st.columns(4)[0], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_u", 8.0, 0.0, 1000.0,
+        c_u = st.columns(4)
+        u_geo = num(c_u[0], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_u", 8.0, 0.0, 1000.0,
                     None, "%.5g")
+        o_eq = ss.get("options")
+        if o_eq is not None and o_eq.is_injector:
+            num(c_u[1], "Injected fluid temperature at the wellhead (°F)", "eq_tinj", 60.0, -40.0, 400.0, None,
+                "%.4g", help="Temperature of the injected fluid entering the wellhead; it exchanges heat with the "
+                             "formation on the way down.")
         cc = st.columns([1, 1.3])
         with cc[0]:
             ed_g = grid("geo", {c_: st.column_config.NumberColumn(c_, format="%g") for c_ in weq.GEO_COLUMNS},
@@ -2831,6 +3386,11 @@ with tabs[3]:
         esp_equipment_panel(top_md, secs)
     else:
         ss.pop("esp_equipment", None)
+    if o is not None and getattr(o, "artificial_lift", "none") == "gas_lift":
+        st.divider()
+        gaslift_data_panel(o, top_md, secs)
+    else:
+        ss.pop("gl_setup", None)
     ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": ed_s, "t_surround": t_sur,
                        "u_surface": u_sur, "downhole": (top_md, secs, pts), "geothermal": (gmd, gtemp),
                        "u_geo": u_geo, "heat_capacities": hc,
@@ -3933,6 +4493,7 @@ def comp_panel():
 
 
 CALC_MODES = ["System analysis (IPR + VLP)", "Gradient traverse", "Lift curves (VFP tables)", "Choke performance"]
+QL_MODE = "Gas lift QuickLook"
 
 
 def _qunit(kind):
@@ -4126,7 +4687,13 @@ def esp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, surface, esp):
     return det, reg, prof
 
 
-def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
+def gl_lift_for(eqd, o, gl, extra=()):
+    """Flow path with the gas lift depths as nodes, and the lift setup with its annulus."""
+    path = vlp_path(eqd, o.flow_type, tuple(gl.extra_md()) + tuple(extra))
+    return path, dataclasses.replace(gl, annulus=wgls.annulus_geometry(path, eqd["downhole"][1]))
+
+
+def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl=None):
     """Gradient traverse: pressure, temperature, holdup and velocities along the well at chosen rates."""
     hc = eqd["heat_capacities"]
     with col:
@@ -4137,6 +4704,13 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
         st.caption("The traverse starts at the top node " + ("(the manifold) and works back through the surface "
                    "equipment, then " if surface is not None else "(the wellhead) and runs ") +
                    "down the tubing to the bottom node, with the inputs on the left.")
+        if gl is not None:
+            st.caption(f"With gas lift from the Equipment tab ({gl.method.lower()}" + (
+                f", casing head {gl.p_casing:,.1f} psia" if gl.method != wgls.METHODS[0] else "") + (
+                f", {gl.qgi:g} MMscf/d" if gl.rate_mode == wgls.RATE_MODES[0] and not gl.multipoint else
+                (f", GLR injected {gl.glr_inj:g} scf/STB" if not gl.multipoint else "")) + ").")
+            if surface is not None:
+                st.caption("Surface equipment is not used with gas lift: the traverse starts at the wellhead.")
         if esp:
             st.caption(f"With the ESP from the Equipment tab: {esp['pump'].name}, {esp['stages']} stages at "
                        f"{esp['freq']:g} Hz, set at {esp['pump_md']:,.0f} ft MD. Above the pump the flow is in the "
@@ -4144,14 +4718,21 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
         go = st.button("Calculate traverse", type="primary", disabled=not rates)
     sig = (kind, tuple(sorted(base.items())), corr, p1, p2, tuple(rates), repr(surface), o.flow_type,
            None if not esp else (esp["pump_md"], esp["freq"], esp["stages"], esp["pump"].name, esp["sep"],
-                                 esp["wear"], esp.get("chp")))
+                                 esp["wear"], esp.get("chp")), repr(gl))
     if go:
         try:
             path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ())
+            if gl is not None:
+                path, gl_ = gl_lift_for(eqd, o, gl)
             out = []
             with st.spinner("Calculating traverses..."):
                 for q in rates:
-                    if esp:
+                    if gl is not None:
+                        det, prof = wgls.details(path, fluid, base, q, gl_, corr, p1, p2, float(base["u"]), hc)
+                        det["Max. velocity / erosional velocity"] = np.nan
+                        prof["Erosional velocity (ft/s)"] = np.nan
+                        reg = {}
+                    elif esp:
                         det, reg, prof = esp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, surface, esp)
                     else:
                         det, reg, prof = wsys.solution_details(path, fluid, kind, base, q, corr, p1, p2, hc, surface,
@@ -4179,7 +4760,9 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
                   "Max. velocity / erosional": det["Max. velocity / erosional velocity"]})
         if "dP choke (psi)" in det:
             r["dP choke (psi)"] = det["dP choke (psi)"]
-        for k_ in ("Pump discharge pressure (psia)", "Pump intake pressure (psia)", "Pump dP (psi)",
+        for k_ in ("Gas lift gas injection rate (MMscf/d)", "Injection depth (ft MD)",
+                   "Tubing pressure at injection (psia)", "Casing pressure at injection (psia)", "Multipoint flag",
+                   "Pump discharge pressure (psia)", "Pump intake pressure (psia)", "Pump dP (psi)",
                    "Pump intake temperature (°F)", "Pump discharge temperature (°F)",
                    "Liquid level in annulus (ft TVD)"):
             if k_ in det:
@@ -4198,12 +4781,21 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
         ax[3].plot(prof["Mixture velocity (ft/s)"], prof["TVD (ft)"], color=c, lw=1.6, label=lab)
         ax[3].plot(prof["Erosional velocity (ft/s)"], prof["TVD (ft)"], color=c, lw=1.0, ls="--")
     ax[1].plot(path.t_form, path.tvd, color=wplt.INK2, ls="--", lw=1.1, label="formation")
+    for i, (q, det, reg, prof) in enumerate(res):
+        if "Casing pressure (psia)" in prof and prof["Casing pressure (psia)"].notna().any():
+            ax[0].plot(prof["Casing pressure (psia)"], prof["TVD (ft)"], color=wplt.SERIES[i % len(wplt.SERIES)],
+                       lw=1.0, ls="--")
+        z_i = det.get("Injection depth (ft TVD)")
+        if z_i is not None and np.isfinite(z_i):
+            ax[0].plot([det["Tubing pressure at injection (psia)"]], [z_i], "o", ms=5,
+                       color=wplt.SERIES[i % len(wplt.SERIES)])
     if res and "Pump intake pressure (psia)" in res[0][1]:
         z_p = float(res[0][3].loc[res[0][3]["Section"] == "Pump intake", "TVD (ft)"].iloc[0])
         for a_ in ax:
             a_.axhline(z_p, color=wplt.INK2, lw=0.8, ls="-.")
         ax[0].text(ax[0].get_xlim()[0], z_p, " ESP", va="bottom", fontsize=8, color=wplt.INK2)
-    for a_, t_ in zip(ax, ("Pressure (psia)", "Temperature (°F)", "Liquid holdup (dotted: no-slip)",
+    for a_, t_ in zip(ax, ("Pressure (psia)" + (" (dashed: casing)" if gl is not None else ""), "Temperature (°F)",
+                           "Liquid holdup (dotted: no-slip)",
                            "Mixture velocity (dashed: erosional), ft/s")):
         a_.set_xlabel(t_, fontsize=9)
         a_.grid(alpha=0.3)
@@ -4217,6 +4809,11 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
     pick = st.selectbox("Profile for rate", list(range(len(res))), key=f"trav_pick_{len(res)}",
                         format_func=lambda i: f"{res[i][0]:g} {_qunit(kind)}")
     q, det, reg, prof = res[pick]
+    if det.get("_note"):
+        st.warning(det["_note"])
+    if det.get("_valves") is not None:
+        st.markdown("**Gas lift valves** (multipoint)")
+        st.dataframe(det["_valves"].style.format(precision=3), hide_index=True, width="stretch")
     surf_tab = det.get("_surface")
     if surf_tab is not None:
         st.markdown("**Surface equipment** (wellhead to manifold)")
@@ -4231,11 +4828,157 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
     st.download_button("Download all profiles (CSV)", allp.to_csv(index=False).encode(), "gradient_traverse.csv")
 
 
+def ql_plot(res, path, valves_tab, gauges, inj_md):
+    """PROSPER-style QuickLook plot: tubing and casing gradients top down and bottom up against TVD."""
+    fig, ax = plt.subplots(figsize=(8.6, 7.2))
+    pr = res.profile
+    z = pr["TVD (ft)"]
+    ax.plot(pr["Casing pressure, top down (psia)"], z, color="#c62828", lw=1.8, label="Casing pressure (top down)")
+    ax.plot(pr["Casing pressure, bottom up (psia)"], z, color="#1565c0", lw=1.4, ls="--",
+            label="Casing pressure (bottom up)")
+    ax.plot(pr["Tubing pressure, top down (psia)"], z, color="#00838f", lw=1.8, label="Tubing pressure (top down)")
+    ax.plot(pr["Tubing pressure, bottom up (psia)"], z, color="#2e7d32", lw=1.4, ls="--",
+            label="Tubing pressure (bottom up)")
+    z_inj = float(np.interp(inj_md, path.md, path.tvd))
+    ok = res.injection_possible
+    ax.axhline(z_inj, color="#ef6c00" if ok else "#b71c1c", lw=1.0)
+    ax.text(ax.get_xlim()[1], z_inj, ("Injection depth " if ok else "INJECTION NOT POSSIBLE - injection depth ")
+            + f"{inj_md:,.0f} ft MD", ha="right", va="bottom", fontsize=8, color="#ef6c00" if ok else "#b71c1c")
+    if valves_tab is not None:
+        for _, v in valves_tab.iterrows():
+            ax.axhline(v["TVD (ft)"], color=wplt.INK2, lw=0.6, ls=":")
+            ax.text(ax.get_xlim()[0], v["TVD (ft)"], f" {v['Status']} {v['Type']} {int(v['Valve'])}", va="bottom",
+                    fontsize=7.5, color=wplt.INK2)
+            if np.isfinite(v.get("Opening pressure (psia)", np.nan)):
+                ax.plot(v["Opening pressure (psia)"], v["TVD (ft)"], "o", color="#43a047", ms=5)
+                ax.plot(v["Closing pressure (psia)"], v["TVD (ft)"], "x", color="#e53935", ms=6)
+    if gauges:
+        ax.plot([p for _, p in gauges], [float(np.interp(m, path.md, path.tvd)) for m, _ in gauges], "s",
+                color="#6a1b9a", ms=6, label="Flowing measurements")
+    ax.set_xlabel("Pressure (psia)")
+    ax.set_ylabel("True vertical depth (ft)")
+    ax.invert_yaxis()
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="lower left")
+    ax.set_title("Gas lift QuickLook (valves: o opening, x closing pressure)", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def quicklook_mode(col, fluid, eqd, o, corr, p1, p2, gl, ipr_curve):
+    """Matching | QuickLook for a gas-lifted well (PROSPER User Guide 2.11.5; Tutorial 33a)."""
+    G = 14.696
+    hc = eqd["heat_capacities"]
+    valves = tuple(sorted(gl.valves, key=lambda v: v.md))
+    with col:
+        st.markdown("**Surface measurements (well test)**")
+        c = st.columns(3)
+        thp = num(c[0], "Tubing head pressure (psia)", "ql_thp", 404.7, 14.7, 2e4)
+        tht = num(c[1], "Tubing head temperature (°F)", "ql_tht", 146.0, 0.0, 400.0)
+        qliq = num(c[2], "Liquid rate (STB/d)", "ql_q", 7488.0, 1.0, 1e6)
+        c = st.columns(4)
+        wc = num(c[0], "Water cut (%)", "ql_wc", 35.0, 0.0, 99.0)
+        qgt = num(c[1], "Total gas rate (MMscf/d)", "ql_qgt", 5.3935, 0.0, 500.0, None, "%.5g",
+                  help="Produced plus injected gas.")
+        qgi = num(c[2], "Gas injection rate (MMscf/d)", "ql_qgi", 1.5, 0.0, 500.0, None, "%.5g")
+        chp = num(c[3], "Casing head pressure (psia)", "ql_chp", 1409.7, 14.7, 2e4)
+        st.markdown("**Injection point**")
+        c = st.columns(4)
+        labels = [f"Valve {i + 1} - {v.kind.lower()} at {v.md:,.1f} ft ({v.port_64:g}/64)" for i, v in enumerate(valves)]
+        pick = c[0].selectbox("Copy from valve", ["—"] + labels, key="ql_pick",
+                              help="Fills the injection depth and port size from a valve of the Gas lift data.")
+        if pick != "—" and ss.get("_ql_last_pick") != pick:
+            v_ = valves[labels.index(pick)]
+            put("ql_md", float(v_.md))
+            put("ql_port", float(v_.port_64))
+            ss["_ql_last_pick"] = pick
+            st.rerun()
+        ss["_ql_last_pick"] = pick
+        md0 = float(valves[-1].md) if valves else float(eqd["downhole"][1]["MD bottom (ft)"].max()) - 100
+        inj = num(c[1], "Injection depth (ft MD)", "ql_md", md0, 10.0, 60000.0,
+                  help="QuickLook uses this depth even if the casing pressure cannot reach it - check the plot.")
+        port = num(c[2], "Orifice / port diameter (64ths in)", "ql_port",
+                   float(valves[-1].port_64) if valves else 16.0, 1.0, 128.0, None, "%.4g")
+        derate = num(c[3], "Thornhill-Craver de-rating (%)", "ql_derate", 0.0, 0.0, 90.0)
+        st.markdown("**Static and flowing measurements** (optional)")
+        c = st.columns(3)
+        use_static = c[0].checkbox("Static pressure at the bottom node", key="ql_use_static",
+                                   help="Taken as the reservoir pressure of the test: the IPR is rebuilt at it.")
+        static = num(c[1], "Static pressure (psia)", "ql_static", float(ipr_curve.pr), 14.7, 2e4,
+                     disabled=not use_static)
+        fit_u = flag(c[2].checkbox, "Use the U that matches the measured THT", "ql_fitu", True)
+        gauge_txt = st.text_input("Gauges: MD ft = pressure psia, separated by ';' (e.g. 6250 = 1454.7)", key="ql_gauges",
+                                  **dflt("ql_gauges", value=""))
+        gauges = []
+        for part in [x for x in gauge_txt.split(";") if x.strip()]:
+            try:
+                a, b = part.split("=")
+                gauges.append((float(a), float(b)))
+            except ValueError:
+                st.error(f"Could not read gauge entry '{part.strip()}'.")
+        multi = st.toggle("Multipoint QuickLook", key="ql_multi", disabled=not valves,
+                          help="Top down, each valve passes the gas the valve model gives at the measured pressures; "
+                               "the lift gas left below it is reduced.")
+        st.caption("Uses the gas lift data of the Equipment tab (lift gas, annulus friction, valves) and the "
+                   "correlation and parameters on the left; the other inputs on the left are not used.")
+        go = st.button("Calculate QuickLook", type="primary")
+    sig = (thp, tht, qliq, wc, qgt, qgi, chp, inj, port, derate, use_static, static, fit_u, tuple(gauges), multi,
+           corr, p1, p2, repr(gl), float(ipr_curve.pr))
+    if go:
+        try:
+            if qgi >= qgt:
+                raise ValueError("The gas injection rate must be below the total gas rate.")
+            mds = [v.md for v in valves] + [inj] + [m for m, _ in gauges]
+            path, gl_ = gl_lift_for(eqd, o, gl, tuple(mds))
+            curve = ipr_curve
+            ch = {"wc": wc / 100.0}
+            if use_static:
+                ch["pr"] = static
+            try:
+                curve = rebuild_ipr(ch)
+            except ValueError:
+                if use_static:
+                    st.warning("The IPR model cannot be rebuilt at the static pressure - the IPR tab curve is used.")
+            inp = wql.QuickLookInput(thp, tht, qliq, wc / 100.0, qgt, qgi, chp, inj, port, derate, tuple(gauges),
+                                     static if use_static else float(curve.pr), valves, fit_u)
+            with st.spinner("Calculating..."):
+                res = wql.quicklook(path, fluid, lambda q: float(wgl.ipr_pwf(curve, q)), gl_, inp, corr, p1, p2,
+                                    float(val("eq_u", eqd.get("u_geo", 8.0))), hc, multipoint=multi)
+            ss["ql_res"] = {"sig": sig, "res": res, "path": path, "inj": inj, "gauges": gauges}
+        except (ValueError, RuntimeError) as e:
+            st.error(f"QuickLook failed: {e}")
+    out = ss.get("ql_res")
+    if not out:
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate QuickLook to update.")
+    res = out["res"]
+    for n_ in res.notes:
+        st.warning(n_)
+    cc = st.columns([1.3, 1])
+    with cc[0]:
+        st.pyplot(ql_plot(res, out["path"], res.valves, out["gauges"], out["inj"]), clear_figure=True)
+    with cc[1]:
+        st.markdown("**QuickLook results**")
+        st.dataframe(pd.DataFrame([(k_, _fmt_result(v_) if isinstance(v_, (int, float, np.floating)) else str(v_))
+                                   for k_, v_ in res.summary.items()], columns=["Result", "Value"]),
+                     hide_index=True, width="stretch", height=560)
+    if res.valves is not None:
+        st.markdown("**Valves** (pressures from the top-down gradients; OPEN: casing above the closing pressure)")
+        st.dataframe(res.valves.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    with st.expander("Gradients (top down and bottom up)"):
+        st.dataframe(res.profile.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.caption("Top down: tubing from the measured THP with the total GOR to the injection point and the produced "
+               "GOR below; casing from the measured CHP. Bottom up: from the IPR pressure at the test rate, tubing up "
+               "to the wellhead; casing from the measured tubing pressure at the valve plus the port dP "
+               "(Thornhill-Craver) back to surface. Overlying gradients mean the model represents the test.")
+
+
 def _default_list(vals):
     return ", ".join(f"{v:.4g}" for v in vals)
 
 
-def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
+def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl=None):
     """Lift-curve tables for reservoir simulation: BHP over rate x THP x WFR x GFR."""
     hc = eqd["heat_capacities"]
     ax_ = wlc.AXES[kind]
@@ -4280,6 +5023,18 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
                            _default_list(sorted({max(f0 - 10, 30.0), f0 - 5, f0, f0 + 5, min(f0 + 10, 90.0)})),
                            "comma separated; one value = a single frequency (no ALQ axis)")
             alq = sorted({v for v in alq if 10.0 <= v <= 120.0})
+        if gl is not None:
+            if gl.multipoint:
+                p0 = float(gl.p_casing)
+                alq = num_list(st, "Casing head pressures (psia) - the ALQ axis", "vfp_alq_gl",
+                               _default_list([p0 - 200, p0 - 100, p0]),
+                               "comma separated; multipoint: the lift gas rate is a result of the casing pressure")
+            else:
+                g0 = float(gl.qgi)
+                alq = num_list(st, "Lift gas rates (MMscf/d) - the ALQ axis", "vfp_alq_gl",
+                               _default_list(sorted({0.0, g0 * 0.5, g0, g0 * 2})),
+                               "comma separated; exported as GRAT (Mscf/d)")
+            alq = sorted({v for v in alq if v >= 0})
         c2 = st.columns([1, 2])
         tno = int(num(c2[0], "Table number", "vfp_tno", 1.0, 1.0, 9999.0, 1.0, "%.0f"))
         wfr = [v for v in wfr if v >= 0]
@@ -4288,7 +5043,8 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
         n_alq = max(len(alq), 1)
         npts = len(flo) * len(set(thp)) * len(set(wfr)) * len(set(gfr)) * n_alq
         c2[1].caption(f"{npts:,} points ({len(flo)} rates x {len(set(thp))} pressures x {len(set(wfr))} x "
-                      f"{len(set(gfr))}" + (f" x {n_alq} frequencies" if len(alq) > 1 else "") + ").")
+                      f"{len(set(gfr))}" + (f" x {n_alq} " + ("ALQ values" if gl is not None else "frequencies")
+                                            if len(alq) > 1 else "") + ").")
         if kind == "oil" and any(v >= 100 for v in wfr):
             st.error("Water cut must be below 100 %.")
             wfr = [v for v in wfr if v < 100]
@@ -4300,15 +5056,23 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
         go = st.button("Generate lift curves", type="primary", disabled=not (flo and thp and wfr and gfr))
     sig = (kind, corr, p1, p2, tuple(flo), tuple(thp), tuple(wfr), tuple(gfr), repr(surface), o.flow_type, base["u"],
            tno, None if not esp else (esp["pump_md"], esp["freq"], esp["stages"], esp["pump"].name, esp["sep"],
-                                      esp["wear"], esp["motor"].name, tuple(alq)))
+                                      esp["wear"], esp["motor"].name, tuple(alq)), repr(gl), tuple(alq))
     if go:
         try:
             path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ())
+            gl_ = None
+            if gl is not None:
+                path, gl_ = gl_lift_for(eqd, o, gl)
+                if len(alq) == 1:
+                    gl_ = dataclasses.replace(gl_, **({"p_casing": alq[0]} if gl_.multipoint else
+                                                      {"qgi": alq[0], "rate_mode": wgls.RATE_MODES[0]}))
             with st.spinner(f"Calculating {npts:,} traverses..."):
                 esp_ = {**esp, "freq": alq[0]} if esp and len(alq) == 1 else esp
                 axes, bhp, wh = wlc.vfp_table(path, fluid, kind, corr, p1, p2, float(base["u"]), flo, thp, wfr, gfr,
-                                              hc, surface, esp_, alq if esp and len(alq) > 1 else None)
+                                              hc, surface, esp_, alq if (esp or gl) and len(alq) > 1 else None,
+                                              lift=gl_)
             ss["vfp_res"] = {"sig": sig, "axes": axes, "bhp": bhp, "wh": wh if surface is not None else None,
+                             "alq_kind": "esp" if gl is None else ("multipoint" if gl.multipoint else "gas_lift"),
                              "datum": float(path.tvd[-1]), "md": float(path.md[-1]), "tno": tno,
                              "label": f"{VLP_LABELS[corr]} P1 {p1:.4f} P2 {p2:.4f}"}
         except (ValueError, KeyError, TypeError) as e:
@@ -4322,6 +5086,9 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
     (thp_a, wfr_a, gfr_a, alq_a, flo_a), bhp5 = wlc._split(axes, bhp)
     st.markdown(f"**Lift curves** - bottom node at {vr['datum']:,.1f} ft TVD ({vr['md']:,.0f} ft MD), "
                 f"{vr['label']}")
+    alq_kind = vr.get("alq_kind", "esp")
+    alq_lab = {"esp": "ESP frequency (Hz)", "gas_lift": "Lift gas rate (MMscf/d)",
+               "multipoint": "Casing head pressure (psia)"}[alq_kind]
     for w_ in wlc.vfp_checks(axes, bhp, esp=bool(esp)):
         st.warning(w_)
     c = st.columns(3 if alq_a is not None else 2)
@@ -4331,7 +5098,7 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
                         key=f"vfp_pg_{len(gfr_a)}")
     la = 0
     if alq_a is not None:
-        la = c[2].selectbox("ESP frequency (Hz)", range(len(alq_a)), format_func=lambda i: f"{alq_a[i]:g}",
+        la = c[2].selectbox(alq_lab, range(len(alq_a)), format_func=lambda i: f"{alq_a[i]:g}",
                             key=f"vfp_pa_{len(alq_a)}")
     fig, ax = plt.subplots(figsize=(9, 5))
     cmap = plt.get_cmap("viridis")
@@ -4342,14 +5109,14 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
     ax.set_ylabel("Bottom node pressure (psia)")
     ax.set_title(f"Lift curves at {ax_['wfr'][0].lower()} {wfr_a[jw]:g} {ax_['wfr'][1]}, "
                  f"{ax_['gfr'][0].lower()} {gfr_a[kg]:g} {ax_['gfr'][1]}"
-                 + (f", {alq_a[la]:g} Hz" if alq_a is not None else ""), fontsize=10)
+                 + (f", {alq_lab.split(' (')[0].lower()} {alq_a[la]:g}" if alq_a is not None else ""), fontsize=10)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
     pc = st.columns([1.4, 1])
     pc[0].pyplot(fig, clear_figure=True)
-    ecl = wlc.eclipse_vfpprod(kind, axes, bhp, vr["tno"], vr["datum"], ss.get("proj_name", ""))
-    csv = wlc.vfp_csv(kind, axes, bhp, vr["wh"])
+    ecl = wlc.eclipse_vfpprod(kind, axes, bhp, vr["tno"], vr["datum"], ss.get("proj_name", ""), alq_kind=alq_kind)
+    csv = wlc.vfp_csv(kind, axes, bhp, vr["wh"], alq_label=alq_lab)
     with pc[1]:
         st.markdown("**Export**")
         st.download_button("Download Eclipse VFPPROD (.inc)", ecl.encode(), f"vfpprod_{vr['tno']}.inc",
@@ -4359,7 +5126,9 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None):
         st.caption("Eclipse FIELD units: " + ("FLO = liquid rate (STB/d), WFR = water cut (fraction), GFR = GOR "
                    "(Mscf/STB)" if kind == "oil" else "FLO = gas rate (Mscf/d), WFR = WGR (STB/Mscf), GFR = OGR "
                    "(STB/Mscf)") + "; THP and BHP in psia; datum = bottom node TVD; " +
-                   ("ALQ = ESP frequency (Hz)." if alq_a is not None else "no artificial lift (ALQ 0).") +
+                   ({"esp": "ALQ = ESP frequency (Hz).", "gas_lift": "ALQ = GRAT, lift gas rate (Mscf/d).",
+                     "multipoint": "ALQ = casing head pressure (psia); set the ALQ type in the simulator."}[alq_kind]
+                    if alq_a is not None else "no artificial lift ALQ axis (ALQ 0).") +
                    (" THP is the manifold pressure (surface equipment included)." if vr["wh"] is not None else ""))
         with st.expander("Preview VFPPROD"):
             st.code("\n".join(ecl.splitlines()[:40]) + ("\n..." if len(ecl.splitlines()) > 40 else ""),
@@ -4753,11 +5522,17 @@ def esp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
 
 with tabs[5]:
     st.header("Calculation")
-    mode = radio(st, "Calculation", CALC_MODES, "calc_mode", horizontal=True, label_visibility="collapsed")
-    SYS = mode == CALC_MODES[0]
-    CHOKE = mode == CALC_MODES[3]
     _o = ss.get("options")
     ESP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "esp")
+    GL_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "gas_lift")
+    _modes = CALC_MODES + ([QL_MODE] if GL_ON else [])
+    if val("calc_mode") not in _modes:
+        put("calc_mode", CALC_MODES[0])
+    mode = radio(st, "Calculation", _modes, "calc_mode", horizontal=True, label_visibility="collapsed")
+    SYS = mode == CALC_MODES[0]
+    CHOKE = mode == CALC_MODES[3]
+    QLK = mode == QL_MODE
+    gl_setup = ss.get("gl_setup") if GL_ON else None
     st.subheader(mode)
     o = ss.get("options")
     eqd = ss.get("equipment", {})
@@ -4768,15 +5543,23 @@ with tabs[5]:
     elif CHOKE:
         blocker = None
     elif o.is_injector:
-        blocker = "System analysis for injectors is not built yet."
+        blocker = (None if eqd.get("valid") and eqd.get("survey") is not None and len(eqd["downhole"][1])
+                   else "Complete the Equipment Data tab first.")
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
         blocker = "Complete the Equipment Data tab first."
-    elif SYS and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
+    elif (SYS or QLK) and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
         blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
+    elif GL_ON and gl_setup is None:
+        blocker = "Enter the gas lift data in the Equipment Data tab first."
+    elif GL_ON and not QLK and gl_setup.method in wgls.METHODS[2:] and not gl_setup.valves:
+        blocker = "Enter the gas lift valve depths in the Equipment Data tab (Gas lift data) first."
     if blocker:
         st.info(blocker)
     elif CHOKE:
         choke_mode(o)
+    elif o.is_injector:
+        comp_panel()
+        injector_calc(o, mode, eqd)
     else:
         comp_panel()
         kind = "gas" if o.is_gas else "oil"
@@ -4814,7 +5597,10 @@ with tabs[5]:
                                   args=(tt_all[tt_all["label"] == tsel_].iloc[0],), width="stretch",
                                   help="Wellhead pressure and water/gas ratios from the selected VLP test.")
                 s_items = surface_items(eqd)
-                if s_items is not None:
+                if s_items is not None and GL_ON:
+                    top_node = "Wellhead"
+                    st.caption("Gas lift: the top node is the wellhead (surface equipment not used).")
+                elif s_items is not None:
                     top_node = sel(st, "Top node", TOP_NODES, "sys_top",
                                    help="Manifold: the calculation starts at the manifold pressure and works back "
                                         "through the flowline, fittings and choke to the wellhead. Wellhead: the "
@@ -4912,13 +5698,15 @@ with tabs[5]:
                     if m_fit is None:
                         st.caption("Not matched - run Match VLP in the VLP tab to calibrate this correlation.")
                 if SYS:
-                    node_lab = sel(st, "Solution node", ["Bottom node", "Top node"], "sys_node",
+                    node_lab = sel(st, "Solution node", ["Bottom node", "Top node"], "sys_node", disabled=GL_ON,
                                    help="Bottom node: IPR against VLP at the bottom of the downhole equipment - the "
                                         "solution pressure is the flowing bottom-hole pressure. Top node: inflow (IPR, "
                                         "tubing" + (", surface equipment" if use_surface else "") + ") against the "
                                         "top-node pressure at the " + ("manifold" if use_surface else "wellhead") +
                                         ". The solution rate is the same at either node; only the curves change.")
-                    node = "top" if node_lab == "Top node" else "bottom"
+                    node = "top" if node_lab == "Top node" and not GL_ON else "bottom"
+                    if GL_ON:
+                        st.caption(f"Gas lift ({gl_setup.method.lower()}): solved at the bottom node.")
                     method = sel(st, "Rate method", RATE_METHODS, "sys_rate_method")
                     user_rates = None
                     if method == "User selected":
@@ -4954,6 +5742,8 @@ with tabs[5]:
                         var_defs.pop("choke", None)
                         var_defs["esp_freq"] = "Operating frequency (Hz)"
                         var_defs["esp_stages"] = "Number of stages"
+                    if GL_ON:
+                        var_defs.update(wgls.variables_for(gl_setup))
                     sens = {}
                     if sens_on:
                         chosen = st.multiselect("Variables (up to 3)", list(var_defs), format_func=var_defs.get,
@@ -4961,6 +5751,11 @@ with tabs[5]:
                         tub_id = float(eqd["downhole"][1].query("Type == 'Tubing'")["Flow ID (in)"].iloc[-1])
                         cur = {**base, "pr": ipr_arg("pr"), "j": ipr_arg("j"), "skin": ipr_arg("skin"),
                                "tubing_id": tub_id}
+                        if GL_ON:
+                            cur.update({"qgi": gl_setup.qgi, "glr_inj": gl_setup.glr_inj, "pcs": gl_setup.p_casing,
+                                        "dp_valve": gl_setup.dp_valve, "inj_md": gl_setup.fixed_md})
+                        if GL_ON and "qgi" in chosen and "glr_inj" in chosen:
+                            st.error("Choose either the gas lift gas injection rate or the GLR injected, not both.")
                         if ESP_ON and ss.get("esp_equipment"):
                             cur["esp_freq"] = ss["esp_equipment"]["freq"]
                             cur["esp_stages"] = ss["esp_equipment"]["stages"]
@@ -5014,11 +5809,15 @@ with tabs[5]:
                 else:
                     sig = (kind, tuple(sorted(base.items())), corr, p1, p2, method, tuple(user_rates or []), lhi,
                            tuple((k_, tuple(v_)) for k_, v_ in sens.items()), fluid_note, ipr_curve.pr,
-                           float(ipr_curve.aof), repr(surface), node)
+                           float(ipr_curve.aof), repr(surface), node, repr(gl_setup))
                     if go:
                         try:
                             combos = wsys.combinations(sens)
                             path_cache = {}
+
+                            gl_extra = gl_setup.extra_md() if GL_ON else []
+                            if GL_ON and "inj_md" in sens:
+                                gl_extra = list(gl_extra) + list(sens["inj_md"])
 
                             def path_for(tid):
                                 if tid not in path_cache:
@@ -5027,8 +5826,13 @@ with tabs[5]:
                                     if tid is not None:
                                         s2.loc[s2["Type"] == "Tubing", "Flow ID (in)"] = float(tid)
                                     smd_, stvd_ = eqd["survey"]
-                                    path_cache[tid] = wvlp.build_flow_path(top_, s2, pts_, smd_, stvd_, gmd, gt, o.flow_type)
+                                    path_cache[tid] = wvlp.build_flow_path(top_, s2, pts_, smd_, stvd_, gmd, gt, o.flow_type,
+                                                                           gl_extra)
                                 return path_cache[tid]
+                            lift_ = None
+                            if GL_ON:
+                                lift_ = dataclasses.replace(gl_setup, annulus=wgls.annulus_geometry(
+                                    path_for(None), eqd["downhole"][1]))
 
                             def ipr_for(ch):
                                 if not ch:
@@ -5042,11 +5846,13 @@ with tabs[5]:
                             with st.spinner(f"Calculating {len(combos)} case(s)..."):
                                 res, paths_ = wsys.solve_cases(path_for, fluid, kind, base, combos, ipr_for, corr, p1, p2,
                                                                eqd["heat_capacities"], method, 25, user_rates,
-                                                               allow_left=(lhi == "Allow"), surface=surface, node=node)
+                                                               allow_left=(lhi == "Allow"), surface=surface, node=node,
+                                                               lift=lift_)
                             for r_, c_ in zip(res, combos):
                                 r_.case_label = c_
                             ss["sys_res"] = {"sig": sig, "res": res, "paths": paths_, "vars": list(sens), "kind": kind,
-                                             "corr": corr, "p1": p1, "p2": p2, "labels": var_defs, "surface": surface}
+                                             "corr": corr, "p1": p1, "p2": p2, "labels": var_defs, "surface": surface,
+                                             "lift": lift_}
                         except (ValueError, TypeError, KeyError) as e:
                             st.error(f"Calculation failed: {e}")
                     out = ss.get("sys_res")
@@ -5065,7 +5871,13 @@ with tabs[5]:
                                     if r_.pwh_q is not None:
                                         d_["Wellhead pressure (psia)"] = r_.pwh_q
                                     d_.update({"Wellhead temperature (°F)": r_.wht_q, "Stable": "Yes" if r_.stable else "No"})
-                                d_["Note"] = r_.note
+                                    gl_ = r_.details.get("gas_lift")
+                                    if gl_:
+                                        d_.update({k_: v_ for k_, v_ in gl_.items() if not k_.startswith("_")
+                                                   and k_ not in ("Gas lift method", "Injection depth (ft TVD)",
+                                                                  "Temperature at injection (°F)")})
+                                d_["Note"] = r_.note + ((" " + r_.details["gas_lift"]["_note"]) if r_.details.get(
+                                    "gas_lift", {}).get("_note") else "")
                                 rows_.append(d_)
                             tab_ = pd.DataFrame(rows_)
                             for c_ in ("Stable", "Note"):
@@ -5085,6 +5897,9 @@ with tabs[5]:
                                 names_ = [out["labels"][k_] for k_ in out["vars"]]
                                 if qcol in tab_:
                                     st.pyplot(sens_plot(tab_, names_, {n_: n_ for n_ in names_}, qcol), clear_figure=True)
+                                    if out.get("lift") is not None and "Oil rate (STB/d)" in tab_ and len(names_) == 1:
+                                        st.pyplot(sens_plot(tab_, names_, {n_: n_ for n_ in names_}, "Oil rate (STB/d)"),
+                                                  clear_figure=True)
                             pick = st.selectbox("Case details", range(len(res)), key=f"sys_case_{len(res)}",
                                                 format_func=lambda i: f"Case {i + 1}: " + ", ".join(
                                                     f"{out['labels'][k_].split(' (')[0]} = {v_:g}"
@@ -5121,7 +5936,25 @@ with tabs[5]:
                                 st.caption("Inflow pressure at top node: — where the well cannot lift the rate to the top "
                                            "node or, with a critical choke, where the bean cannot pass it.")
                         with cc[1]:
-                            if r.q is not None:
+                            if r.q is not None and out.get("lift") is not None:
+                                pth_ = out["paths"][r.params.get("tubing_id")]
+                                det_, prof_ = wgls.details(pth_, fluid, r.params, r.q, out["lift"], out["corr"],
+                                                           out["p1"], out["p2"], float(r.params["u"]),
+                                                           eqd["heat_capacities"])
+                                vt_ = det_.pop("_valves", None)
+                                note_ = det_.pop("_note", "")
+                                if note_:
+                                    st.warning(note_)
+                                st.markdown("**Solution**")
+                                st.dataframe(solution_panel(kind, r, det_, {}), hide_index=True, width="stretch",
+                                             height=560)
+                                if vt_ is not None:
+                                    st.markdown("**Gas lift valves at the solution** (multipoint)")
+                                    st.dataframe(vt_.style.format(precision=3), hide_index=True, width="stretch")
+                                with st.expander("Pressure and temperature profile at the solution (tubing and casing)"):
+                                    st.dataframe(prof_.style.format(precision=3, na_rep="—"), hide_index=True,
+                                                 width="stretch")
+                            elif r.q is not None:
                                 det_, reg_, prof_ = wsys.solution_details(out["paths"][r.params.get("tubing_id")], fluid, kind,
                                                                           r.params, r.q, out["corr"], out["p1"], out["p2"],
                                                                           eqd["heat_capacities"], surface=out.get("surface"),
@@ -5141,12 +5974,14 @@ with tabs[5]:
                                     st.dataframe(prof_.style.format(precision=3), hide_index=True, width="stretch")
                             st.download_button("Download IPR/VLP table (CSV)", rt_.to_csv(index=False).encode(),
                                                "system_analysis.csv")
+            elif QLK:
+                quicklook_mode(right, fluid, eqd, o, corr, p1, p2, gl_setup, ipr_curve)
             elif mode == CALC_MODES[1]:
                 traverse_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
-                              ss.get("esp_equipment") if ESP_ON else None)
+                              ss.get("esp_equipment") if ESP_ON else None, gl_setup)
             else:
                 vfp_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
-                         ss.get("esp_equipment") if ESP_ON else None)
+                         ss.get("esp_equipment") if ESP_ON else None, gl_setup)
 
 
 # ================================================================ tab 7: design (continuous gas lift)
@@ -5210,7 +6045,7 @@ def gl_perf_plot(perf, res):
     return fig
 
 
-GL_SHOW_COLS = ["Valve", "Type", "Measured depth (ft)", "True vertical depth (ft)", "Tubing pressure (psia)",
+GL_SHOW_COLS = ["Valve", "Number of valves", "Type", "Trim", "Measured depth (ft)", "True vertical depth (ft)", "Tubing pressure (psia)",
                 "Casing pressure (psia)", "Transfer pressure (psia)", "Temperature at valve (°F)",
                 "Gas lift rate (Mscf/d)", "Port size (64ths in)", "R value", "Valve opening pressure (psia)",
                 "Valve closing pressure (psia)", "Dome pressure at 60 °F (psig)", "Test rack opening pressure (psig)",
@@ -5219,8 +6054,9 @@ GL_SHOW_COLS = ["Valve", "Type", "Measured depth (ft)", "True vertical depth (ft
 
 
 def gaslift_tab(o, eqd, ipr_curve):
-    """Design | Gas lift (continuous), new well - after PROSPER."""
-    st.caption("Continuous gas lift design for a new well, after PROSPER Design | Gaslift | New Well and API RP 11V6: "
+    """Design | Gas lift (continuous), new well or existing mandrels - after PROSPER."""
+    st.caption("Continuous gas lift design for a new well or existing mandrels, after PROSPER Design | Gaslift and "
+               "API RP 11V6: "
                "the design rate (entered, or the maximum of the performance curve), the operating injection point, "
                "unloading valve spacing with casing-sensitive (IPO) valves, port sizes (Thornhill-Craver) and valve "
                "settings (dome and test rack pressures), with the Asheim (1988) stability check.")
@@ -5233,6 +6069,7 @@ def gaslift_tab(o, eqd, ipr_curve):
     top_, secs_, pts_ = eqd["downhole"]
     tub = secs_[secs_["Type"] == "Tubing"]
     bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+    gl_valve_db_panel()
     left, right = st.columns([1, 1.55], gap="large")
     with left:
         st.markdown("**Design options**")
@@ -5241,9 +6078,22 @@ def gaslift_tab(o, eqd, ipr_curve):
                           help="Entered by user: the rate and lift gas are known. Max production: the maximum oil rate "
                                "of the performance curve within the gas available. Max revenue: the maximum of the "
                                "revenue function (oil and gas sales less water handling and lift-gas cost).")
-        valve_name = sel(c[1], "Valve type", list(wgl.VALVES), "gl_valve",
-                         help="Casing-sensitive, nitrogen-charged IPO bellows valve. R = port area / bellows area; "
-                              "ports up to the maximum for the valve size.")
+        vkind = sel(c[1], "Valve type", list(wgl.VALVE_TYPES), "gl_vkind",
+                    help="Casing sensitive (IPO): opened by the casing pressure; the surface casing pressure drops "
+                         "for each valve. Tubing sensitive (fluid operated): opened by the tubing pressure; the "
+                         "casing pressure stays at the injection pressure and each valve is spaced from the tubing "
+                         "pressure it transfers at, Pt + % (Pc - Pt) (PROSPER 'Percentage Pcasing - Pwh').")
+        kind_vs = {k: v for k, v in wgl.VALVES.items() if v.kind == vkind or (vkind == wgl.VALVE_TYPES[0] and
+                                                                            not v.manufacturer)}
+        mans = sorted({v.manufacturer for v in kind_vs.values() if v.manufacturer})
+        c_v = st.columns([1, 1.6])
+        man = sel(c_v[0], "Manufacturer", ["All"] + mans, "gl_valve_man", "All")
+        names = [k for k, v in kind_vs.items() if man == "All" or v.manufacturer == man] or list(kind_vs)
+        valve_name = sel(c_v[1], "Valve", names, "gl_valve",
+                         help="Valves of the selected type from the valve database (above): R = port area / bellows "
+                              "area for each port size.")
+        vt_ = wgl.VALVES[valve_name]
+        st.caption("Ports / R: " + ", ".join(f"{p_:g}: {float(vt_.r(p_)):.3f}" for p_ in vt_.ports))
         c = st.columns(2)
         inj_point = sel(c[0], "Injection point", list(wgl.INJECTION_POINT), "gl_injpt",
                         help="The final injection point is an orifice (no setting pressures) or an IPO valve.")
@@ -5277,6 +6127,37 @@ def gaslift_tab(o, eqd, ipr_curve):
                       help="PROSPER 'All valves Pvo = gas pressure' (recommended for new wells): the casing pressure "
                            "drop to close each valve is the larger of the entered drop and the calculated spread. "
                            "Off: the entered drop only (API RP 11V6 examples).")
+        well_kind = sel(st, "Well", ["New well", "Existing mandrels"], "gl_well",
+                        help="Existing mandrels (PROSPER Design | Existing Mandrels): the valves go in the mandrels "
+                             "listed - each unloading valve in the deepest mandrel the well can be unloaded to, the "
+                             "injection point in the deepest mandrel at or above the optimum depth, dummies in the "
+                             "rest. Enter every mandrel, including those with dummy valves.")
+        mand_tuple = ()
+        if well_kind == "Existing mandrels":
+            if "gl_mandrels" not in ss:
+                ss["gl_mandrels"] = _gl_mandrels_blank()
+            st.button("Transfer from the Equipment tab's gas lift valves", key="gl_mand_tr",
+                      on_click=_gl_mandrels_from_valves)
+            if ss.get("_gl_mand_msg"):
+                st.warning(ss["_gl_mand_msg"])
+            med = track("gl_mandrels", st.data_editor(
+                ss["gl_mandrels"], key=f"gl_mandrels_ed_{ss.get('_ver_gl_mandrels', 0)}", num_rows="dynamic",
+                width="stretch", column_config={
+                    "Measured depth (ft)": st.column_config.NumberColumn(format="%.2f"),
+                    "dP casing (psi)": st.column_config.NumberColumn(
+                        format="%g", help="Overrides the min CHP decrease per valve for a valve in this mandrel."),
+                    "Maximum gas (MMscf/d)": st.column_config.NumberColumn(
+                        format="%g", help="Overrides the maximum gas during unloading for a valve in this mandrel."),
+                    "Enabled": st.column_config.CheckboxColumn()}))
+            rows_m = []
+            for _, r_ in med.iterrows():
+                md_ = pd.to_numeric(r_.get("Measured depth (ft)"), errors="coerce")
+                if pd.notna(md_) and md_ > 0 and (r_.get("Enabled") is not False):
+                    rows_m.append((float(md_), float(pd.to_numeric(r_.get("dP casing (psi)"), errors="coerce")),
+                                   float(pd.to_numeric(r_.get("Maximum gas (MMscf/d)"), errors="coerce"))))
+            mand_tuple = tuple(sorted(rows_m))
+            if not mand_tuple:
+                st.info("Enter the mandrel depths (all mandrels, including those with dummy valves).")
         st.markdown("**Input parameters**")
         c = st.columns(2)
         q_design = None
@@ -5307,7 +6188,15 @@ def gaslift_tab(o, eqd, ipr_curve):
         c = st.columns(2)
         gs = num(c[0], "Static gradient of load fluid (psi/ft)", "gl_gs", 0.465, 0.1, 1.0, None, "%.3f",
                  help="The heavier of the kill fluid and the packer fluid (0.465 psi/ft = 8.94 ppg).")
-        dpc = num(c[1], "Min CHP decrease per valve (psi)", "gl_dpc", 20.0, 0.0, 500.0)
+        if vkind == wgl.VALVE_TYPES[1]:
+            pct_cw = num(c[1], "Percentage Pcasing - Pwh (%)", "gl_pct_cw", 30.0, 0.0, 100.0,
+                         help="Tubing-sensitive valves: each valve transfers when the tubing pressure at it is this "
+                              "% of the way from the flowing tubing pressure to the casing pressure (at surface for "
+                              "the first valve, from the unloading wellhead pressure to the kick-off pressure).")
+            dpc = float(val("gl_dpc", 20.0))
+        else:
+            dpc = num(c[1], "Min CHP decrease per valve (psi)", "gl_dpc", 20.0, 0.0, 500.0)
+            pct_cw = float(val("gl_pct_cw", 30.0))
         c = st.columns(2)
         margin_top = num(c[0], "Safety margin, first valve (psi)", "gl_m1", 50.0, 0.0, 500.0,
                          help="The first valve balances the load fluid against the kick-off casing pressure less this.")
@@ -5364,7 +6253,8 @@ def gaslift_tab(o, eqd, ipr_curve):
                           max_md=max_md, gor=gor, wc=wc / 100.0, load_grad=gs, min_transfer_pct=min_tr,
                           safety_last=safety_last, dp_close=dpc, dp_close_spread=spread, tc_derate_valve=tc_v,
                           tc_derate_orifice=tc_o, min_spacing=min_sp, margin_top=margin_top, margin=margin,
-                          valve=valve_name, economics=econ, unloading_gas=unl_method, annulus_t_flowing=ann_t)
+                          valve=valve_name, economics=econ, unloading_gas=unl_method, annulus_t_flowing=ann_t,
+                          mandrels=mand_tuple, valve_type=vkind, pct_casing_wh=pct_cw)
     if ipr_curve.fluid == "oil":            # the IPR at the design water cut (composite below the bubble point)
         try:
             ipr_curve = rebuild_ipr({"wc": wc / 100.0})
@@ -5411,8 +6301,20 @@ def gaslift_tab(o, eqd, ipr_curve):
         st.dataframe(summ, hide_index=True, width="stretch")
         for m_ in res.messages:
             st.caption(m_)
+        if res.mandrels is not None:
+            st.markdown("**Mandrels**")
+            st.dataframe(res.mandrels.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
         tab_ = res.table()[GL_SHOW_COLS]
         st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+        if getattr(res.inp, "valve_type", "") == wgl.VALVE_TYPES[2]:
+            st.caption("Proportional valves (PROSPER's columns): valve opening pressure = PTO, the tubing pressure "
+                       "to open (Pt + transfer % of Pc - Pt); closing pressure at depth = PTO (1 - k) + Pc k with the "
+                       "trim's k (R value column); dome at 60 °F from the closing pressure + the 220 psi spring; the "
+                       "test rack column is the shop closing pressure (dome - spring). Port size = the trim's "
+                       "equivalent port (Small 12, Medium 16, Large 20/64 - assumed).")
+        elif getattr(res.inp, "valve_type", "") == wgl.VALVE_TYPES[1]:
+            st.caption("Tubing-sensitive valves: the opening pressure is a tubing pressure (the transfer pressure); "
+                       "the closing pressure is Pvo (1 - R) + Pc R.")
         st.download_button("Download valve table (CSV)", tab_.to_csv(index=False).encode(), "gaslift_design.csv")
         t1, t2, t3, t4 = st.tabs(["Design plot", "Performance curve", "Stability", "Design gradient"])
         with t1:
@@ -5671,6 +6573,7 @@ def igl_prosper_tab(o, eqd, ipr_curve):
             a_hi = num(c[1], "Above static: max line (%)", "iglp_ahi", 90.0, 1.0, 100.0)
             b_lo = num(c[2], "Below static: min line (%)", "iglp_blo", 55.0, 1.0, 100.0)
             b_hi = num(c[3], "Below static: max line (%)", "iglp_bhi", 85.0, 1.0, 100.0)
+            wgl.register_valves(ss.get("_tables", {}).get("gl_valve_db", ss.get("gl_valve_db")))
             ovalve = sel(st, "Valve", list(wigl.IGL_VALVES) + list(wgl.VALVES), "iglp_ovalve",
                          help="R = port / bellows area for the settings; the port is the valve port size above.")
         go_v = st.button("Valves", key="iglp_valves")
@@ -5822,6 +6725,7 @@ def igl_tab(o, eqd, ipr_curve):
                            "column. Analytical: Brown eq. 3.451-3.455, gas column neglected, the pressure of the valve "
                            "above used for the next one.")
         c = st.columns(2)
+        wgl.register_valves(ss.get("_tables", {}).get("gl_valve_db", ss.get("gl_valve_db")))
         valve = sel(c[0], "Valve", list(wigl.IGL_VALVES) + list(wgl.VALVES), "igl_valve",
                     help="Unbalanced pressure (casing) valves; Brown Table 3.488 R values.")
         vt = wigl.IGL_VALVES.get(valve) or wgl.VALVES[valve]

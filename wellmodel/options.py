@@ -50,6 +50,7 @@ WATER_VAPOUR = {
 
 ARTIFICIAL_LIFT = {
     "none": "None",
+    "gas_lift": "Gas lift (continuous)",
     "esp": "Electrical submersible pump",
 }
 
@@ -71,8 +72,8 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "fluid_type": {"oil", "dry_wet_gas", "retrograde_condensate"},
     "method": {"black_oil", "eos"},
     "flow_type": {"tubing", "annular", "tubing_annular"},
-    "well_type": {"producer"},
-    "artificial_lift": {"none", "esp"},
+    "well_type": {"producer", "water_injector", "gas_injector"},
+    "artificial_lift": {"none", "gas_lift", "esp"},
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
 }
@@ -179,6 +180,13 @@ class WellOptions:
                 add("error", ["artificial_lift", "flow_type"],
                     "An ESP produces up the tubing: choose Tubing flow (gas from the separator goes up the "
                     "annulus).")
+        if self.artificial_lift == "gas_lift":
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "Continuous gas lift is modelled for oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "Gas lift injects down the annulus and produces up the tubing: choose Tubing flow.")
         if self.water_vapour == "calculate" and not (self.fluid_type == "dry_wet_gas" and self.method == "black_oil"):
             add("warning", ["water_vapour", "fluid_type", "method"],
                 "Condensed water vapour is calculated for dry and wet gas with the black-oil method only; it is "
@@ -271,6 +279,10 @@ class WellOptions:
             "wire_wrapped_screen": ["Wire-wrapped screen: screen OD/ID and slot (gauge) width"],
             "slotted_liner": ["Slotted liner: OD/ID, slot width and length, slots per foot"],
         }[self.sand_control]
+        if self.artificial_lift == "gas_lift":
+            eq += ["Gas lift data: lift gas gravity and impurities, method (fixed depth, optimum depth, valve depths "
+                   "or multipoint), casing head pressure, dP across the valve, valve depths (or transfer them from "
+                   "the gas lift design); tubing OD and casing ID for annulus friction"]
         if self.artificial_lift == "esp":
             eq += ["ESP: pump depth (the tubing ends at the pump; casing ID below it), pump, motor and cable "
                    "(or run the ESP design), number of stages, operating frequency, cable length, gas separator "
