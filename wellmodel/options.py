@@ -51,7 +51,13 @@ WATER_VAPOUR = {
 ARTIFICIAL_LIFT = {
     "none": "None",
     "gas_lift": "Gas lift (continuous)",
+    "ct_gas_lift": "Coiled tubing gas lift (gas down the coiled tubing, production up the annulus)",
     "esp": "Electrical submersible pump",
+    "srp": "Sucker rod pump",
+    "jet": "Jet pump (annular injection, tubing production)",
+    "pcp_motor": "Progressive cavity pump (downhole motor drive)",
+    "pcp_rod": "Progressive cavity pump (sucker rod drive)",
+    "hsp": "Hydraulic submersible pump (turbine driven, power fluid down the annulus)",
 }
 
 FIELDS = {  # field -> (display name, choices)
@@ -73,7 +79,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "method": {"black_oil", "eos"},
     "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer", "water_injector", "gas_injector"},
-    "artificial_lift": {"none", "gas_lift", "esp"},
+    "artificial_lift": {"none", "gas_lift", "ct_gas_lift", "esp", "srp", "jet", "pcp_motor", "pcp_rod", "hsp"},
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
 }
@@ -180,6 +186,37 @@ class WellOptions:
                 add("error", ["artificial_lift", "flow_type"],
                     "An ESP produces up the tubing: choose Tubing flow (gas from the separator goes up the "
                     "annulus).")
+        if self.artificial_lift == "srp":
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "A sucker rod pump applies to oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "A rod pump produces up the tubing: choose Tubing flow (separated gas goes up the annulus).")
+        if self.artificial_lift == "jet":
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "A jet pump applies to oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "The jet pump takes its power fluid down the annulus and produces up the tubing: choose Tubing "
+                    "flow.")
+        if self.artificial_lift == "hsp":
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "A hydraulic submersible pump applies to oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "The HSP's turbine takes its power fluid down the annulus and exhausts into the tubing: choose "
+                    "Tubing flow.")
+        if self.artificial_lift in ("pcp_motor", "pcp_rod"):
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "A progressive cavity pump applies to oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "A PCP produces up the tubing (with a sucker rod drive, the rod-tubing annulus): choose Tubing "
+                    "flow (separated gas goes up the casing annulus).")
         if self.artificial_lift == "gas_lift":
             if self.well_type != "producer" or self.fluid_type != "oil":
                 add("error", ["artificial_lift", "fluid_type", "well_type"],
@@ -187,6 +224,14 @@ class WellOptions:
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
                     "Gas lift injects down the annulus and produces up the tubing: choose Tubing flow.")
+        if self.artificial_lift == "ct_gas_lift":
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "Coiled tubing gas lift is modelled for oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "Coiled tubing gas lift injects down a coiled tubing inside the tubing and produces up the coiled "
+                    "tubing - tubing annulus: choose Tubing flow (the annulus is applied above the coiled tubing end).")
         if self.water_vapour == "calculate" and not (self.fluid_type == "dry_wet_gas" and self.method == "black_oil"):
             add("warning", ["water_vapour", "fluid_type", "method"],
                 "Condensed water vapour is calculated for dry and wet gas with the black-oil method only; it is "
@@ -283,6 +328,10 @@ class WellOptions:
             eq += ["Gas lift data: lift gas gravity and impurities, method (fixed depth, optimum depth, valve depths "
                    "or multipoint), casing head pressure, dP across the valve, valve depths (or transfer them from "
                    "the gas lift design); tubing OD and casing ID for annulus friction"]
+        if self.artificial_lift == "ct_gas_lift":
+            eq += ["Coiled tubing data: lift gas gravity and impurities, coiled tubing ID, wall thickness and "
+                   "roughness, method (specified or optimum injection depth), coiled tubing depth, injection pressure "
+                   "and dP across the valve (or transfer them from the coiled tubing gas lift design)"]
         if self.artificial_lift == "esp":
             eq += ["ESP: pump depth (the tubing ends at the pump; casing ID below it), pump, motor and cable "
                    "(or run the ESP design), number of stages, operating frequency, cable length, gas separator "

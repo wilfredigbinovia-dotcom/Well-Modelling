@@ -12,14 +12,15 @@ Multipoint                  the casing head pressure is the boundary condition; 
                             allows at the prevailing casing and tubing pressures, so the lift-gas rate is a result.
                             Valve model (valve_rates): orifice = Thornhill-Craver through the port; casing-sensitive
                             IPO valve closed at or below Pvc = Pd (dome at valve temperature), no gas up to its opening
-                            pressure Pvo = (Pd - R Pt) / (1 - R), then throttling with gas in proportion to Pc - Pvo
-                            up to the full-port Thornhill-Craver rate (fitted to PROSPER's multipoint VLP, T23).
+                            pressure Pvo = (Pd - R Pt) / (1 - R), then throttling: the fraction 0.001 (Pc - Pvo) / R of the full-port
+                            Thornhill-Craver gas, up to fully open (fitted to PROSPER's multipoint VLP, T23).
 
 Lift-gas rate: an injected gas rate (MMscf/d) or a GLR injected (scf per STB of liquid).
 
-Annulus: the casing pressure is a gas column from the casing head pressure, with the gas a little cooler than the
-flowing tubing: T_tubing - 0.18 (T_tubing - T_formation) - this reproduces PROSPER's casing pressures at the valves
-(Tutorial 23) within 1.5 psi; the gas exactly at tubing temperature gives them 5-11 psi low. "Friction loss in annulus" adds the friction of the lift gas flowing down the
+Annulus: the casing pressure is a gas column from the casing head pressure, with the gas 10 F cooler than the flowing
+tubing and its Z from Standing's natural-gas pseudo-criticals (DPR) - PROSPER's casing pressures at the valves (Tutorial 23
+multipoint, 220 valves) mean 0.1 / rms 1.0 psi, T33a QuickLook within 0.7 psi; with the produced gas's Z and the gas
+0.18 (T_tubing - T_formation) cooler (the earlier fit) rms 3.2 psi with a trend with the rate. "Friction loss in annulus" adds the friction of the lift gas flowing down the
 tubing-casing annulus (Moody/Chen on the annulus hydraulic diameter Dc - Dto); below the injection point the gas
 is static.
 """
@@ -96,9 +97,28 @@ class GasLiftSetup:
     annulus_friction: bool = False
     annulus: Annulus | None = None
     dome_high_p: bool = True     # Winkler-Eads dome correction above 1200 psig
-    annulus_t_frac: float = 0.18  # annulus gas temperature = tubing T - frac x (tubing T - formation T): PROSPER's casing
-    #                               pressures at the valves (Tutorial 23 multipoint VLP, no injection) within 1.5 psi
+    annulus_t_offset: float = 10.0  # annulus gas temperature = flowing tubing T - this (degF), with the lift gas on
+    #                                 Standing's natural-gas pseudo-criticals (gaslift.LIFT_GAS_Z): PROSPER's casing
+    #                                 pressures at the valves of its Tutorial 23 multipoint runs (220 valves, 1000-3500
+    #                                 STB/d, 1360-1510 psig) mean 0.1, rms 1.0 psi, with no trend with the rate, and its
+    #                                 T33a QuickLook casing pressures within 0.7 psi
+    annulus_t_frac: float = 0.0  # optional extra cooling: - frac x (tubing T - formation T)
     tc_derate: float = 0.0       # Thornhill-Craver de-rating, %
+    coiled: object = None        # coiled.CoiledTubing: coiled tubing gas lift (gas down the coiled tubing, production
+    #                              up the coiled tubing - tubing annulus); methods Fixed depth (= PROSPER "Specified
+    #                              injection depth") and Optimum depth only
+
+    @property
+    def ct_bottom(self):
+        """Coiled tubing end (ft MD): the specified depth, or the maximum depth of injection."""
+        return float(self.fixed_md if self.method == METHODS[0] else self.max_md)
+
+    def flow_path(self, path: V.FlowPath) -> V.FlowPath:
+        """The production flow path: with coiled tubing, the annulus above its end."""
+        if self.coiled is None:
+            return path
+        from . import coiled as CT
+        return CT.annular_path(path, self.coiled, min(self.ct_bottom, float(path.md[-1])))
 
     @property
     def multipoint(self):
@@ -107,6 +127,8 @@ class GasLiftSetup:
     def extra_md(self):
         """Depths the flow path needs as nodes."""
         out = [v.md for v in self.valves] if self.method in METHODS[2:] else []
+        if self.coiled is not None and self.method in METHODS[2:]:
+            raise ValueError("Coiled tubing gas lift: use the specified (fixed) or optimum injection depth.")
         if self.method == METHODS[0] and np.isfinite(self.fixed_md):
             out.append(self.fixed_md)
         if self.method == METHODS[1] and np.isfinite(self.max_md):
@@ -142,6 +164,9 @@ def variables_for(setup: GasLiftSetup) -> dict:
     if m == METHODS[3]:
         return {"pcs": GL_VARIABLES["pcs"]}
     out = {"qgi": GL_VARIABLES["qgi"], "glr_inj": GL_VARIABLES["glr_inj"]}
+    if setup.coiled is not None:      # the coiled tubing end fixes the annulus: no injection-depth sensitivity
+        out.update({"pcs": "Coiled tubing head (injection) pressure (psia)", "dp_valve": GL_VARIABLES["dp_valve"]})
+        return out
     if m == METHODS[0]:
         out["inj_md"] = GL_VARIABLES["inj_md"]
     else:
@@ -156,7 +181,7 @@ def casing_profile(path: V.FlowPath, setup: GasLiftSetup, p_surf, T, flow):
     gas = setup.gas
     p = np.atleast_1d(np.asarray(p_surf, float)).copy()
     T = np.asarray(T, float)
-    T = T - setup.annulus_t_frac * (T - path.t_form[None, :])
+    T = T - setup.annulus_t_frac * (T - path.t_form[None, :]) - setup.annulus_t_offset
     nc, n = T.shape
     p = np.broadcast_to(p, (nc,)).copy()
     out = np.empty((nc, n))
@@ -199,16 +224,41 @@ def dome_at_t(pd60_psig, t_f, high_pressure=True):
     return np.where(api > 1200.0, GL.dome_at_t_winkler(pd60, t_f, atm=GL.PROSPER_ATM), api)
 
 
-THROTTLE_K = 0.2467   # MMscf/d per psi of (Pc - Pvo) per in2 of port: PROSPER multipoint VLP, Tutorial 23 (Camco R-20,
-#                       24/64 port at 1410 psig casing: 0.502 MMscf/d at 18.4 psi above Pvo, 0.710 at 26.1 - linear)
+THROTTLE_K = (0.00117, 0.00136)   # a throttling valve's opening a = (K0 - K1 R) (Pc - Pvo) / R - an open flow area
+#                       growing with the pressure above the opening pressure in proportion to the bellows area
+#                       (Ab = Ap / R); with critical flow it passes the fraction min(a, 1) of its full-port
+#                       Thornhill-Craver gas. Fitted to the user's PROSPER multipoint VLP runs on the Tutorial 23 well
+#                       (Camco R-20 at 12-24/64, McMurry R-1 / Otis NM16R 16/64, casing 1360-1560 psig): K = 0.00108 at
+#                       R 0.066, 0.00103 at 0.103, 0.00097 at 0.147, 0.00095 at 0.165.
+THROTTLE_SUB = (1.0, 0.10, 2.5)   # subcritical flow (Pt / Pc above the critical ratio rc, d = Pt/Pc - rc): PROSPER
+#                       keeps the valve throttling past a = 1 - at a = 1 it passes x1 = 1 - 1.0 d of the full-port gas,
+#                       fully open only from a = 1 + 2.5 d; below a = x1 - 0.10 the fraction is a; straight lines
+#                       between (fitted to the user's A2 casing-pressure sweep 1400-1560 psig at 2000 STB/d and the
+#                       multipoint runs: valve rates rms 0.038 MMscf/d over 270 valve results, the sweep within 0.026,
+#                       against 0.065 / 0.24 with min(a, 1)).
+
+
+def throttle_fraction(a, ratio):
+    """PROSPER-style fraction of the full-port gas a throttling valve passes at opening a and Pt / Pc ratio."""
+    a = np.maximum(np.asarray(a, float), 0.0)
+    ratio = np.asarray(ratio, float)
+    c1, w, c_open = THROTTLE_SUB
+    dd = np.maximum(ratio - GL.TC_RCRIT, 0.0)
+    x1 = 1.0 - c1 * dd
+    a0 = x1 - w
+    ao = 1.0 + c_open * dd
+    x = np.where(a <= a0, a, np.where(a <= 1.0, a0 + (x1 - a0) * (a - a0) / np.maximum(1.0 - a0, 1e-9),
+                 np.where(a < ao, x1 + (1.0 - x1) * (a - 1.0) / np.maximum(ao - 1.0, 1e-9), 1.0)))
+    return np.where(dd > 0, x, np.minimum(a, 1.0))
 
 
 def valve_rates(valves, pc, pt, t, sg, high_pressure=True, derate=0.0):
     """Gas rate (MMscf/d), opening fraction (rate / fully open rate) and status for every valve (cases x valves).
     Orifice: Thornhill-Craver through the port. Casing-sensitive IPO valve (dome Pd at valve temperature, PROSPER's
     gauge-pressure Winkler & Eads): closed while Pc <= Pvc = Pd; no gas until the casing reaches the opening pressure
-    Pvo = (Pd - R Pt) / (1 - R); above it the valve throttles, passing THROTTLE_K x port area x (Pc - Pvo), until that
-    reaches the Thornhill-Craver rate of the full port (open). Fitted to PROSPER's multipoint VLP (Tutorial 23), where
+    Pvo = (Pd - R Pt) / (1 - R); above it the valve throttles, passing the fraction throttle_fraction((K0 - K1 R) (Pc - Pvo) / R) of
+    the full-port Thornhill-Craver gas (an open area proportional to the bellows area and the pressure above Pvo)
+    until it is fully open. Fitted to PROSPER's multipoint VLP (Tutorial 23), where
     valves between Pvc and Pvo are reported as throttling with no gas."""
     q = np.zeros(pc.shape)
     x = np.zeros(pc.shape)
@@ -227,15 +277,15 @@ def valve_rates(valves, pc, pt, t, sg, high_pressure=True, derate=0.0):
             pbt = dome_at_t(v.pd60, tk, high_pressure) + 14.696
             r = min(max(v.r, 0.0), 0.95)
             pvo_t = (pbt - r * pck) / (1 - r)
-            area = max(int(v.n), 1) * np.pi / 4 * (v.port_64 / 64.0) ** 2
-            qk = np.minimum(full, THROTTLE_K * area * np.maximum(ptk - pvo_t, 0.0))
+            qk = full * throttle_fraction((THROTTLE_K[0] - THROTTLE_K[1] * r) * np.maximum(ptk - pvo_t, 0.0)
+                                          / max(r, 0.005), np.minimum(ptk, pck) / np.maximum(pck, 1e-9))
             closed = ptk <= pvo_t
         else:
             pvc = dome_at_t(v.pd60, tk, high_pressure) + 14.696
             r = min(max(v.r, 0.0), 0.95)
             pvo = (pvc - r * ptk) / (1 - r)
-            area = max(int(v.n), 1) * np.pi / 4 * (v.port_64 / 64.0) ** 2
-            qk = np.minimum(full, THROTTLE_K * area * np.maximum(pck - pvo, 0.0))
+            qk = full * throttle_fraction((THROTTLE_K[0] - THROTTLE_K[1] * r) * np.maximum(pck - pvo, 0.0)
+                                          / max(r, 0.005), np.minimum(ptk, pck) / np.maximum(pck, 1e-9))
             closed = pck <= pvc
         qk = np.where(neg | closed, 0.0, qk)
         xk = np.where(full > 0, qk / np.maximum(full, 1e-12), 0.0)
@@ -333,6 +383,9 @@ def lift_traverse(path: V.FlowPath, fluid, top_p, case: dict, setup: GasLiftSetu
     sg = setup.gas.sg
     m = setup.method
     note = np.full(nc, "", dtype=object)
+    if setup.coiled is not None:
+        return _coiled(setup.flow_path(path), fluid, top, c, setup, qgi, pcs, dpv, injmd, correlation, p1, p2, u, hc,
+                       passes)
     if m == METHODS[3]:
         return _multipoint(path, fluid, top, c, setup, pcs, correlation, p1, p2, u, hc, n_iter)
 
@@ -379,6 +432,46 @@ def lift_traverse(path: V.FlowPath, fluid, top_p, case: dict, setup: GasLiftSetu
                                                                 np.nan_to_num(inj, nan=0.0)))
         qgi = np.where(none, 0.0, qgi)
         inj_p = np.where(none, np.nan, inj_p)
+    return LiftState(r.P, r.T, pc, qgi, inj, note, inj_p=inj_p)
+
+
+def _coiled(path, fluid, top, c, setup, qgi, pcs, dpv, injmd, correlation, p1, p2, u, hc, passes):
+    """Coiled tubing gas lift on the annular path: the lift gas from the coiled tubing head pressure down the coiled
+    tubing (coiled.gas_pressure). Specified depth: injection at the coiled tubing end when the gas pressure there is at
+    least the tubing pressure + dP, else none (PROSPER). Optimum: the deepest such point down to the end."""
+    from . import coiled as CT
+    ct = setup.coiled
+    nc = top.size
+    sg = setup.gas.sg
+    note = np.full(nc, "", dtype=object)
+
+    def pc_fn(T, inj_guess):
+        return CT.gas_pressure(path, setup.gas, ct, pcs, T, qgi, inj_guess)
+
+    if setup.method == METHODS[0]:
+        if not np.all(np.isfinite(injmd)):
+            raise ValueError("Enter the coiled tubing specified depth.")
+        r = GL.lifted_traverse(path, fluid, top, c, qgi, correlation, p1, p2, u, hc, fixed_md=injmd, gas_sg=sg,
+                               passes=passes)
+        pc = pc_fn(r.T, injmd)
+        pc_inj = np.array([np.interp(injmd[k], path.md, pc[k]) for k in range(nc)])
+        none = pc_inj < r.inj_p + dpv
+        inj, inj_p = injmd.astype(float).copy(), r.inj_p.copy()
+    else:
+        r = GL.lifted_traverse(path, fluid, top, c, qgi, correlation, p1, p2, u, hc, pc=pc_fn, dp_valve=dpv,
+                               max_md=setup.max_md, gas_sg=sg, passes=passes)
+        none = r.no_injection.copy()
+        inj, inj_p = r.inj_md.copy(), r.inj_p.copy()
+    if np.any(none):
+        sub = {kk: v[none] for kk, v in c.items()}
+        P0, T0 = V.traverse(path, fluid, top[none], sub, correlation, p1, p2, u, hc)
+        r.P[none], r.T[none] = P0, T0
+        note = np.where(none, "no injection - coiled tubing gas pressure below tubing pressure + dP"
+                        + (" at the injection depth" if setup.method == METHODS[0] else " at the top"), note)
+    qgi = np.where(none, 0.0, qgi)
+    inj = np.where(none, np.nan, inj)
+    inj_p = np.where(none, np.nan, inj_p)
+    pc = pc_fn(r.T, np.nan_to_num(inj, nan=0.0))
     return LiftState(r.P, r.T, pc, qgi, inj, note, inj_p=inj_p)
 
 
@@ -516,6 +609,7 @@ def details(path, fluid, params, q, setup: GasLiftSetup, correlation, p1=1.0, p2
     case = {"q": np.array([float(q)]), "wc": np.array([params["wc"] / 100.0]), "gor": np.array([float(params["gor"])])}
     st = lift_traverse(path, fluid, float(params["whp"]), {**case, **setup.row_inputs(params, [q])}, setup,
                        correlation, p1, p2, u, hc)
+    path = setup.flow_path(path)
     P, T = st.P[0], st.T[0]
     gseg = _gas_per_segment(path, setup, st, 0)
     corr = CORRELATIONS[correlation]
@@ -537,6 +631,8 @@ def details(path, fluid, params, q, setup: GasLiftSetup, correlation, p1=1.0, p2
             e, f, hl = corr(*args, glr=V._glr(c, "oil"))
         else:
             e, f, hl = corr(*args)
+        if path.fric_mult is not None:
+            f = f * path.fric_mult[i]
         dpg += p1 * float(e[0]) * L
         dpf += p2 * float(f[0]) * L
         hl0 = float(hl[0])

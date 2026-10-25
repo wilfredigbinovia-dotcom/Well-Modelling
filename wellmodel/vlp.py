@@ -58,6 +58,7 @@ class FlowPath:
     rough: np.ndarray              # ft
     d_ht: np.ndarray               # heat-transfer diameter, ft
     restrictions: dict = field(default_factory=dict)   # node index -> restriction ID (in)
+    fric_mult: np.ndarray | None = None   # per segment: multiplier on the correlation's friction (None = 1)
 
     def node(self, md):
         i = int(np.argmin(np.abs(self.md - md)))
@@ -203,7 +204,7 @@ class BlackOilFluid:
     def _props(self, p, t, gor):
         m, inp, fam, vf = self.m, self.inp, self.m.family, self.m.visc_family
         rs_sat = m._m("rs").apply(bo._rs_corr(fam, inp, p, t))
-        rs = np.clip(rs_sat, 0.0, gor)
+        rs = np.clip(rs_sat, np.minimum(bo.RS_FLOOR, gor), gor)
         pb_g = self.pb_at(t, gor)
         above = rs_sat >= gor
         bo_s = bo.bo_sat(fam, inp, rs, t)
@@ -433,6 +434,8 @@ def _gradient(path, fluid, i, p, t, case, corr, p1, p2):
     if np.any(single):
         e0, f0, _ = no_slip(*args)
         e, f = np.where(single, e0, e), np.where(single, f0, f)
+    if path.fric_mult is not None:
+        f = f * path.fric_mult[i]
     g = p1 * e + p2 * f
     return np.nan_to_num(g, nan=0.433, posinf=1.0, neginf=0.0), s
 

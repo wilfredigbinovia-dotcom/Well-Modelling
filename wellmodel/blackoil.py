@@ -49,6 +49,7 @@ import pandas as pd
 
 RANKINE = 459.67
 P_STD = 14.696
+RS_FLOOR = 1.0          # scf/STB: lowest solution GOR below the bubble point (PROSPER)
 
 PB_FAMILIES = {
     "glaso": "Glaso",
@@ -364,12 +365,17 @@ def gas_pseudocritical(inp: PVTInputs):
     reproduces PROSPER's Z tables within 0.15 % (Tutorial 02, gravity 0.58, 2 % N2, 0.5 % CO2) and 0.4 %
     (Tutorial 04, gravity 0.769, 4 % N2) from 60 to 250 F - Sutton + DAK was 0.8 % and 2.5 % off.
     "sutton_dak": Sutton pseudo-criticals with the Wichert-Aziz correction (nitrogen not treated)."""
-    if getattr(inp, "z_corr", "prosper") == "prosper":
+    zc = getattr(inp, "z_corr", "prosper")
+    if zc in ("prosper", "prosper_lift"):
         g = inp.z_sg if getattr(inp, "z_sg", None) else inp.gas_sg
         yn = inp.n2 / 100
         gh = (g - 0.967 * yn) / max(1 - yn, 1e-6)
-        tpc = (1 - yn) * (187.0 + 330.0 * gh - 71.5 * gh * gh) + 227.16 * yn
-        ppc = (1 - yn) * (706.0 - 51.7 * gh - 11.1 * gh * gh) + 493.1 * yn
+        if zc == "prosper":
+            tpc = (1 - yn) * (187.0 + 330.0 * gh - 71.5 * gh * gh) + 227.16 * yn
+            ppc = (1 - yn) * (706.0 - 51.7 * gh - 11.1 * gh * gh) + 493.1 * yn
+        else:   # lift gas: Standing's natural-gas pseudo-criticals (PROSPER's lift-gas densities, Tutorial 25: 0.03 %)
+            tpc = (1 - yn) * (168.0 + 325.0 * gh - 12.5 * gh * gh) + 227.16 * yn
+            ppc = (1 - yn) * (677.0 + 15.0 * gh - 37.5 * gh * gh) + 493.1 * yn
         a = (inp.co2 + inp.h2s) / 100
         b = inp.h2s / 100
         eps = 120 * (a ** 0.9 - a ** 1.6) + 15 * (b ** 0.5 - b ** 4)
@@ -427,7 +433,10 @@ def z_dpr(tpr, ppr, iters: int = 20):
         df = (t1 + 2 * t2 * rho + 5 * t3 * r2 * r2 + t4 * e * (2 * rho + 4 * A[7] * r2 * rho
                                                                   - 2 * A[7] * rho * r2 * (1 + A[7] * r2))
               + 0.27 * ppr / (r2 * tpr))
-        rho = np.clip(rho - f / df, 1e-8, 3.0)
+        step = f / df
+        rho = np.clip(rho - step, 1e-8, 3.0)
+        if np.all(np.abs(step) <= 1e-12 * np.maximum(rho, 1e-3)):
+            break
     return np.clip(0.27 * ppr / (rho * tpr), 0.2, 2.0)
 
 
@@ -436,7 +445,7 @@ def gas_props(inp: PVTInputs, p, t):
     p = np.maximum(np.asarray(p, float), P_STD)
     tr = np.asarray(t, float) + RANKINE
     tpc, ppc = gas_pseudocritical(inp)
-    z = (z_dpr if getattr(inp, "z_corr", "prosper") == "prosper" else z_dak)(tr / tpc, p / ppc)
+    z = (z_dpr if getattr(inp, "z_corr", "prosper") in ("prosper", "prosper_lift") else z_dak)(tr / tpc, p / ppc)
     bg = 0.02827 * z * tr / p
     m = 28.967 * inp.gas_sg
     rho = m * p / (z * 10.7316 * tr)
@@ -471,9 +480,18 @@ _PW_MU20 = np.array([2.50680, 2.26507, 1.96856, 1.72555, 1.68935, 1.52402, 1.355
                      0.50737, 0.47394, 0.44370, 0.41627])
 
 
-def _pchip(x, y, xq):
-    from scipy.interpolate import PchipInterpolator
-    return PchipInterpolator(x, y, extrapolate=False)(np.clip(xq, x[0], x[-1]))
+_PCHIP_CACHE = {}
+
+
+def _pchip(x, y, xq, key=None):
+    """Monotone cubic through (x, y) at xq (clipped to the table); the interpolator is built once per key."""
+    f = _PCHIP_CACHE.get(key) if key is not None else None
+    if f is None:
+        from scipy.interpolate import PchipInterpolator
+        f = PchipInterpolator(x, y, extrapolate=False)
+        if key is not None:
+            _PCHIP_CACHE[key] = f
+    return f(np.clip(xq, x[0], x[-1]))
 
 
 def _ln_vw(t):
@@ -489,12 +507,12 @@ def _prosper_water(s_wt, p, t):
     p = np.asarray(p, float)
     t_, p_ = np.broadcast_arrays(t, p)
     tc = np.clip(t_, _PW_T[0], _PW_T[-1])
-    bw0 = _pchip(_PW_T, _PW_BW0, tc) * (1 + _dvwt(t_)) / (1 + _dvwt(tc))
-    slope = _pchip(_PW_T, _PW_SLOPE, tc)
+    bw0 = _pchip(_PW_T, _PW_BW0, tc, 'bw0') * (1 + _dvwt(t_)) / (1 + _dvwt(tc))
+    slope = _pchip(_PW_T, _PW_SLOPE, tc, 'slope')
     bw = bw0 - slope * np.maximum(p_ - 14.696, 0.0)
     rho_sc = 62.43 + 0.39014 * s_wt + 3.998e-3 * s_wt * s_wt
-    d10 = _pchip(_PW_T10, np.log(_PW_MU10) - _ln_vw(_PW_T10), tc)               # ln(mu / mu_fresh) at 10 wt %
-    d20 = _pchip(_PW_T20, np.log(_PW_MU20) - _ln_vw(_PW_T20), np.clip(tc, _PW_T20[0], _PW_T20[-1]))
+    d10 = _pchip(_PW_T10, np.log(_PW_MU10) - _ln_vw(_PW_T10), tc, 'mu10')               # ln(mu / mu_fresh) at 10 wt %
+    d20 = _pchip(_PW_T20, np.log(_PW_MU20) - _ln_vw(_PW_T20), np.clip(tc, _PW_T20[0], _PW_T20[-1]), 'mu20')
     c2 = (d20 - 2 * d10) / 200.0                                              # quadratic in S through 0, 10, 20
     c1 = d10 / 10.0 - 10.0 * c2
     s = np.clip(s_wt, 0.0, 30.0)
@@ -854,7 +872,8 @@ class BlackOilModel:
         pb = self.bubble_point(t)
         above = p >= pb * (1 - 1e-9)
         rs = np.minimum(self._m("rs").apply(_rs_corr(fam, inp, p, t)), inp.rsb)
-        rs = np.where(above, inp.rsb, np.maximum(rs, 0.0))
+        # PROSPER floors the (matched) solution GOR at 1 scf/STB below the bubble point (T29 PVT table export)
+        rs = np.where(above, inp.rsb, np.maximum(rs, min(RS_FLOOR, inp.rsb)))
         bo = bo_sat(fam, inp, rs, t)
         bob = bo_sat(fam, inp, inp.rsb, t)
         bo = np.where(above, bob * bo_undersat_factor(fam, inp, p, pb, inp.rsb, t), bo)

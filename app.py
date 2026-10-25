@@ -42,9 +42,14 @@ from wellmodel import gradient as wgrad
 from wellmodel import choke as wchoke
 from wellmodel import gaslift as wgl
 from wellmodel import gaslift_system as wgls
+from wellmodel import coiled as wct
 from wellmodel import quicklook as wql
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
+from wellmodel import srp as wsrp
+from wellmodel import jetpump as wjet
+from wellmodel import hsp as whsp
+from wellmodel import pcp as wpcp
 from wellmodel import gaspvt as wgp
 from wellmodel import complementary as wcx
 from wellmodel import units as wu
@@ -436,7 +441,19 @@ CAPTIONS = {
                      "calculate": "Dry and wet gas: water vaporised in the gas condenses up the well"},
     "artificial_lift": {"none": "Natural flow",
                         "gas_lift": "Continuous gas lift: Gas lift data in Equipment, Calculation (design in Design)",
-                        "esp": "Pump in the well: Equipment, VLP at the pump discharge, Calculation"},
+                        "ct_gas_lift": "Lift gas down a coiled tubing, production up the annulus: Coiled tubing data in "
+                                       "Equipment, Calculation (design in Design)",
+                        "esp": "Pump in the well: Equipment, VLP at the pump discharge, Calculation",
+                        "srp": "Rod pump in the well: Equipment, system analysis at the pump intake, Calculation "
+                               "(design in Design)",
+                        "jet": "Power fluid down the annulus, production + power fluid up the tubing: Equipment, "
+                               "Calculation (design in Design)",
+                        "pcp_motor": "Positive-displacement pump driven by a downhole motor: Equipment, Calculation "
+                                     "(design in Design)",
+                        "pcp_rod": "Positive-displacement pump turned by a rod string from surface (production up "
+                                   "the rod-tubing annulus): Equipment, Calculation (design in Design)",
+                        "hsp": "Centrifugal pump driven by a turbine on power fluid down the annulus, exhausting into "
+                               "the tubing: Equipment, Calculation (design in Design)"},
 }
 STATUS_ICON = {wopt.MODELLED_NOW: "✅ Modelled", wopt.LUMPED_IN_PI: "↪️ Absorbed in matched PI",
                wopt.PVT_ONLY: "🧪 PVT only - flow calculations not built yet",
@@ -550,11 +567,15 @@ def signature(inp, data):
             tuple(np.nan_to_num(data.table[bo.TABLE_COLUMNS].to_numpy(float), nan=-1).ravel()))
 
 
-def run_match():
+def run_match(suggest=True):
+    """Match all correlations to the lab data; suggest=True selects the best-ranked families (the Match button),
+    False keeps the selection (re-matching a saved project, whose saved correlations win)."""
     inp, data = current_inputs()
     res = bo.match_all(inp, data)
     ss["pvt_match"] = res
     ss["pvt_match_sig"] = signature(inp, data)
+    if not suggest and val("pvt_sel_pb") and val("pvt_sel_visc"):
+        return
     if res.suggestion.get("pb_family"):
         put("pvt_sel_pb", res.suggestion["pb_family"])
     if res.suggestion.get("visc_family"):
@@ -827,7 +848,7 @@ def render_eos(opts_now):
 
 if ss.pop("_proj_rematch", False):
     try:
-        run_match()
+        run_match(suggest=False)
     except (ValueError, KeyError, TypeError) as e:
         ss["_proj_msg"] = ("warning", f"PVT match could not be repeated: {e}")
 
@@ -1493,8 +1514,10 @@ def default_temperature(opts_now) -> float:
     return float(val("pvt_t", 200.0))
 
 
-def oil_pvt_at(opts_now, pr, t_f):
-    """Oil properties at reservoir pressure from the PVT tab. Returns (dict, source text) or (None, reason)."""
+def oil_pvt_at(opts_now, pr, t_f, gor=None):
+    """Oil properties at reservoir pressure from the PVT tab. Returns (dict, source text) or (None, reason).
+    gor: evaluate the black oil at this producing GOR instead of the PVT's (PROSPER re-evaluates a Darcy-type IPR at
+    the system calculation's GOR: Tutorial 29, PI 0.60335 at GOR 150 becomes 0.29004 at GOR 10)."""
     if opts_now.method == "eos":
         if not ss.get("prp_text"):
             return None, "No PRP file loaded in the PVT tab."
@@ -1519,6 +1542,9 @@ def oil_pvt_at(opts_now, pr, t_f):
     else:
         label += (f" ({bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}, "
                   f"{'matched' if model.params else 'not matched'})")
+    if gor is not None and abs(float(gor) - model.inp.rsb) > 1e-6 and gor > 0:
+        model = dataclasses.replace(model, inp=dataclasses.replace(model.inp, rsb=float(gor)))
+        label += f", at GOR {float(gor):g} scf/STB"
     tab = model.table(t_f, [pr, pr - 10])
     bo1, bo2 = tab["Oil FVF (RB/STB)"].to_numpy()
     rs1, rs2 = tab["Solution GOR (scf/STB)"].to_numpy()
@@ -2285,16 +2311,23 @@ with tabs[2]:
                     kh_for_skin = r["k"] * r["h"]
                 if not gas and model in ipr.OIL_MODELS:
                     pb = pvt["pb"]
+                    vogel_ = True
+                    if model in ("P.I. Entry", "Darcy"):
+                        vogel_ = flag(st.toggle, "Vogel below bubble point", "ipr_vogel", True,
+                                      help="PROSPER's switch for P.I. Entry and Darcy: on, the inflow follows Vogel "
+                                           "(composite with water) below the bubble point; off, a straight line at "
+                                           "every pressure.")
                     if model == "P.I. Entry":
                         j = num(st.columns(4)[0], "Productivity index (STB/d/psi)", "ipr_j", 2.0, 0.001, 1e4, 0.1)
-                        curve = ipr.pi_entry(pr, pb, j, wc)
+                        curve = ipr.pi_entry(pr, pb, j, wc, vogel_)
                     elif model in ("Vogel", "Composite"):
                         c = st.columns(4)
                         qt = num(c[0], "Test rate (STB/d, liquid)", "ipr_qt", 1500.0, 0.1, 1e6, 10.0)
                         pt = num(c[1], "Test FBHP (psia)", "ipr_pt", 1500.0, 0.0, 3e4, 10.0)
                         curve = ipr.vogel(pr, pb, qt, pt) if model == "Vogel" else ipr.composite(pr, pb, qt, pt, wc)
                     elif model == "Darcy":
-                        curve = ipr.darcy(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"], pvt["bo"], wc)
+                        curve = ipr.darcy(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin, pvt["mu"], pvt["bo"], wc,
+                                          vogel_)
                     elif model == "Fetkovich":
                         kro = num(st.columns(4)[0], "Relative permeability of oil", "ipr_kro", 1.0, 0.001, 1.0, 0.05)
                         curve = ipr.fetkovich(pr, pb, r["k"], r["h"], r["area"], r["ca"], r["rw"], skin,
@@ -2921,6 +2954,906 @@ def esp_equipment_panel(top_md, secs):
     return out
 
 
+SRP_VARS = {"n_spm": "Pumping speed (strokes/min)", "stroke": "Surface stroke length (in)",
+            "ev": "Pump volumetric efficiency (%)", "plunger": "Pump diameter (in)"}
+
+
+def _srp_copy_design():
+    out = ss.get("srp_result")
+    if not out:
+        return
+    r = out[0]
+    put("srpq_md", float(r.inp.pump_md))
+    put("srpq_plunger", float(r.inp.plunger))
+    put("srpq_rod", int(r.inp.rod_no))
+    put("srpq_s", float(r.inp.stroke))
+    put("srpq_n", float(round(r.n_spm, 4)))
+    put("srpq_ev", float(100 * r.inp.ev))
+
+
+def srp_equipment_panel(top_md, secs):
+    """System | Sucker Rod Pumps: the installed rod pump used by the Calculation tab."""
+    st.subheader("Sucker rod pump")
+    st.caption("The rod pump used in the Calculation tab (PROSPER System | Sucker Rod Pumps; anchored tubing). Run "
+               "the sucker rod pump design (Design tab) and copy it here, or enter the installation directly.")
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
+    st.button("Copy from the sucker rod design", on_click=_srp_copy_design, disabled=not ss.get("srp_result"),
+              key="srpq_copy")
+    c = st.columns(4)
+    md = num(c[0], "Pump depth (ft MD)", "srpq_md", float(round(bottom)), float(top_md) + 50, 60000.0)
+    ev = num(c[1], "Pump volumetric efficiency (%)", "srpq_ev", 80.0, 1.0, 100.0)
+    s_ = num(c[2], "Surface stroke length (in)", "srpq_s", 48.0, 10.0, 400.0, None, "%.5g")
+    n_ = num(c[3], "Pumping speed (strokes/min)", "srpq_n", 20.0, 1.0, 40.0, None, "%.6g")
+    c = st.columns(4)
+    plunger = sel(c[0], "Pump diameter (in)", list(wsrp.PLUNGERS), "srpq_plunger", 2.0,
+                  format_func=lambda x: f"{x:.2f}")
+    rods = wsrp.rod_numbers(plunger)
+    rod_no = sel(c[1], "Rod number", rods, "srpq_rod", 99 if 99 in rods else rods[-1],
+                 format_func=lambda n: wsrp.rod_string(n, plunger).name)
+    tub_model = sel(c[2], "Tubing model above the pump", ["No slip (as PROSPER)", "Calculation tab correlation"],
+                    "srpq_tub", help="No slip reproduces PROSPER's rod pump discharge pressures (six runs, 0.3 %).")
+    c = st.columns(4)
+    a_meth = sel(c[0], "Gas anchor method", ["Calculated", "Entered"], "srpq_am", "Calculated")
+    a_type = sel(c[1], "Gas anchor type", list(wsrp.GAS_ANCHOR_TYPES), "srpq_at", "Cup type")
+    a_area = num(c[2], "Annulus area (in2)", "srpq_aa", 1.5, 1.0, 1e6, None, "%.4g", disabled=a_meth != "Calculated")
+    a_eff = num(c[3], "Efficiency (fraction)", "srpq_ae", 0.5, 0.0, 1.0, None, "%.4g", disabled=a_meth != "Entered")
+    if a_meth == "Calculated" and a_type == "Poor boy":
+        st.caption("PROSPER's calculated efficiency for a poor-boy anchor is zero (no gas separated).")
+    if abs(bottom - md) > 1.0:
+        st.warning(f"The tubing ends at {bottom:,.0f} ft MD but the pump is at {md:,.0f} ft MD.")
+    out = {"pump_md": md, "ev": ev, "stroke": s_, "n_spm": n_, "plunger": float(plunger), "rod_no": int(rod_no),
+           "no_slip": tub_model.startswith("No slip"), "anchor_method": a_meth, "anchor_type": a_type,
+           "anchor_area": a_area, "anchor_eff": a_eff}
+    ss["srp_equipment"] = out
+    return out
+
+
+JET_VARS = {"p_surf": "Power fluid injection pressure (psia)", "q_pf": "Power fluid injection rate (STB/d)"}
+
+
+def _jet_section_at(secs, md):
+    """Tubing OD and casing ID at a depth (the tubing section reaching it)."""
+    tub = secs[(secs["Type"] == "Tubing")]
+    hit = tub[(tub["MD top (ft)"] <= md + 0.5) & (tub["MD bottom (ft)"] >= md - 0.5)]
+    row = hit.iloc[-1] if len(hit) else (tub.iloc[-1] if len(tub) else None)
+    if row is None or not np.isfinite(row.get("Tubing OD (in)", np.nan)) or not np.isfinite(row.get("Casing ID (in)",
+                                                                                                    np.nan)):
+        return None, None
+    return float(row["Tubing OD (in)"]), float(row["Casing ID (in)"])
+
+
+def _jet_pump_inputs(prefix, col_md, bottom, top_md, defaults=None):
+    """Pump, power fluid and loss inputs shared by the design and the Equipment section."""
+    dfl = defaults or {}
+    pumps = wjet.PUMPS
+    names = ["Custom (enter nozzle and throat areas)"] + list(pumps["Name"])
+    c = st.columns(3)
+    md = num(c[0], "Pump depth (ft MD)", f"{prefix}_md", float(round(bottom)), float(top_md) + 50, 60000.0)
+    q_pf = num(c[1], "Power fluid injection rate (STB/d)", f"{prefix}_qpf", 10000.0, 1.0, 1e6)
+    p_surf = num(c[2], "Surface injection pressure (psia)", f"{prefix}_pinj", 2014.7, 14.7, 2e4)
+    c = st.columns(4)
+    kn = num(c[0], "Nozzle loss coefficient", f"{prefix}_kn", 0.15, 0.0, 2.0, None, "%.3g")
+    ks = num(c[1], "Suction loss coefficient", f"{prefix}_ks", 0.0, 0.0, 2.0, None, "%.3g")
+    kt = num(c[2], "Throat loss coefficient", f"{prefix}_kt", 0.28, 0.0, 2.0, None, "%.3g")
+    kd = num(c[3], "Diffuser loss coefficient", f"{prefix}_kd", 0.10, 0.0, 2.0, None, "%.3g")
+    sal = num(st, "Power fluid (water) salinity (ppm)", f"{prefix}_sal", 75000.0, 0.0, 400000.0,
+              help="PVT | Power Fluid in PROSPER: water. Its density follows the production tubing's temperature down "
+                   "the annulus.")
+    return md, q_pf, p_surf, wjet.Losses(kn, ks, kt, kd), sal, names
+
+
+def _jet_copy_design():
+    jd = ss.get("jet_design")
+    if not jd:
+        return
+    for k_ in ("md", "qpf", "pinj", "kn", "ks", "kt", "kd", "sal"):
+        if f"jpd_{k_}" in ss or val(f"jpd_{k_}") is not None:
+            put(f"jpq_{k_}", val(f"jpd_{k_}"))
+    if jd.get("pump"):
+        put("jpq_pump", jd["pump"])
+
+
+def jet_equipment_panel(top_md, secs):
+    """System | Jet Pumps: the installed jet pump used by the Calculation tab."""
+    st.subheader("Jet pump")
+    st.caption("The jet pump used in the Calculation tab (PROSPER System | Jet Pumps; annular injection, tubing "
+               "production). The tubing should end at the pump. Run the jet pump design (Design tab) and copy it "
+               "here, or enter the pump directly.")
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
+    st.button("Copy from the jet pump design", on_click=_jet_copy_design, disabled=not ss.get("jet_design"),
+              key="jpq_copy")
+    md, q_pf, p_surf, losses, sal, names = _jet_pump_inputs("jpq", None, bottom, top_md)
+    pick = sel(st, "Jet pump", names, "jpq_pump", names[1] if len(names) > 1 else names[0])
+    if pick.startswith("Custom"):
+        c = st.columns(2)
+        an = num(c[0], "Nozzle area (in2)", "jpq_an", 0.16476, 0.001, 10.0, None, "%.5g")
+        at = num(c[1], "Throat area (in2)", "jpq_at", 0.40185, 0.001, 20.0, None, "%.5g")
+    else:
+        r_ = wjet.PUMPS[wjet.PUMPS["Name"] == pick].iloc[0]
+        an, at = float(r_["Nozzle area (in2)"]), float(r_["Throat area (in2)"])
+        st.caption(f"Nozzle area {an:.5f} in2, throat area {at:.5f} in2, area ratio {an / at:.3f}; rate range "
+                   f"{r_['Minimum rate (RB/d)']:,.0f} - {r_['Maximum rate (RB/d)']:,.0f} RB/d.")
+    tod, cid = _jet_section_at(secs, md) if secs is not None else (None, None)
+    if tod is None:
+        st.warning("Enter the tubing outside diameter and casing inside diameter of the tubing at the pump (the "
+                   "power fluid annulus).")
+        ss.pop("jet_equipment", None)
+        return None
+    if abs(bottom - md) > 1.0:
+        st.warning(f"The tubing ends at {bottom:,.0f} ft MD but the pump is at {md:,.0f} ft MD.")
+    out = {"pump_md": md, "q_pf": q_pf, "p_surf": p_surf, "losses": losses, "sal": sal, "an": an, "at": at,
+           "name": pick, "tubing_od": tod, "casing_id": cid}
+    ss["jet_equipment"] = out
+    return out
+
+
+# ================================================================ hydraulic submersible pump
+HSP_VARS = {"hsp_speed": "HSP pump speed (rpm)", "hsp_wear": "HSP pump wear factor (fraction)"}
+
+
+def _hsp_copy_design():
+    d = ss.get("hsp_design")
+    if not d:
+        return
+    for k_, v_ in d.items():
+        put(f"hspq_{k_}", v_)
+
+
+def _hsp_salinity_input(prefix):
+    own = flag(st.toggle, "Power fluid salinity: the produced water's", f"{prefix}_sal_own", True,
+               help="PROSPER's Tutorial 27 power fluid is the produced water (its traverse reproduces PROSPER's "
+                    "within 4 psi only with that salinity).")
+    if own:
+        return None
+    return num(st, "Power fluid (water) salinity (ppm)", f"{prefix}_sal", 23000.0, 0.0, 400000.0)
+
+
+def hsp_equipment_panel(top_md, secs):
+    """System | Hydraulic Submersible Pumps: the installed HSP used by the Calculation tab."""
+    st.subheader("Hydraulic submersible pump")
+    st.caption("The HSP used in the Calculation tab: a centrifugal pump driven by a turbine on the same shaft; the "
+               "power fluid (water) goes down the tubing-casing annulus and exhausts into the tubing above the pump. "
+               "The tubing should end at the pump. Run the HSP design (Design tab) and copy it here, or enter the "
+               "equipment directly.")
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
+    st.button("Copy from the HSP design", on_click=_hsp_copy_design, disabled=not ss.get("hsp_design"),
+              key="hspq_copy")
+    if not whsp.PUMPS or not whsp.TURBINES:
+        st.error("The HSP pump and turbine databases are missing (wellmodel/data/hsp_pumps.csv, hsp_turbines.csv).")
+        return None
+    c = st.columns(3)
+    md = num(c[0], "Pump depth (ft MD)", "hspq_md", float(round(bottom)), float(top_md) + 50, 60000.0)
+    speed = num(c[1], "Pump speed (rpm)", "hspq_speed", 7500.0, 100.0, 30000.0)
+    wear = num(c[2], "Pump wear factor (fraction)", "hspq_wear", 0.0, -0.5, 0.9, None, "%.3g")
+    c = st.columns(2)
+    pump = sel(c[0], "Pump", list(whsp.PUMPS), "hspq_pump")
+    n = int(num(c[1], "Number of pump stages", "hspq_n", 28.0, 1.0, 2000.0, 1.0, "%.0f"))
+    c = st.columns(2)
+    tur = sel(c[0], "Turbine (blade setting)", list(whsp.TURBINES), "hspq_turbine")
+    nt = int(num(c[1], "Number of turbine stages", "hspq_nt", 22.0, 1.0, 2000.0, 1.0, "%.0f"))
+    sal = _hsp_salinity_input("hspq")
+    p_, t_ = whsp.PUMPS[pump], whsp.TURBINES[tur]
+    lo, hi = p_.range_at(speed)
+    tlo, thi = t_.range_at(speed)
+    st.caption(f"Pump {p_.od:g} in OD, {p_.min_speed:g}-{p_.max_speed:g} rpm, range {lo:,.0f}-{hi:,.0f} RB/d at "
+               f"{speed:g} rpm. Turbine {t_.casing_od:g} in casing OD, net flow {tlo:,.0f}-{thi:,.0f} bbl/d at "
+               f"{speed:g} rpm, best efficiency {t_.best_eff:g} %.")
+    if not p_.min_speed <= speed <= p_.max_speed:
+        st.warning("The speed is outside the pump's speed range.")
+    tod, cid = _jet_section_at(secs, md) if secs is not None else (None, None)
+    if tod is None:
+        st.warning("Enter the tubing outside diameter and casing inside diameter of the tubing at the pump (the "
+                   "power fluid annulus).")
+        ss.pop("hsp_equipment", None)
+        return None
+    if abs(bottom - md) > 1.0:
+        st.warning(f"The tubing ends at {bottom:,.0f} ft MD but the pump is at {md:,.0f} ft MD.")
+    out = {"pump_md": md, "pump": pump, "stages": n, "turbine": tur, "turbine_stages": nt, "speed": speed,
+           "wear": wear, "sal": sal, "casing_id": cid, "tubing_od": tod}
+    ss["hsp_equipment"] = out
+    return out
+
+
+def _hsp_installed(eq, **over):
+    d = {**eq, **over}
+    return whsp.HSPInstalled(d["pump_md"], d["pump"], int(d["stages"]), d["turbine"], int(d["turbine_stages"]),
+                             float(d["speed"]), float(d["wear"]), d["sal"], d["casing_id"], d["tubing_od"])
+
+
+def hsp_pump_plot(pump, n, speed, q_op=None, h_op=None, wear=0.0):
+    fig, ax = plt.subplots(figsize=(7.2, 4.4))
+    sp = sorted({pump.min_speed, 0.5 * (pump.min_speed + pump.max_speed), pump.max_speed, float(speed)})
+    for i, s_ in enumerate(sp):
+        lo, hi = pump.range_at(s_)
+        q = np.linspace(0, max(pump.curve.q) * s_ / pump.ref_speed, 120)
+        h = n * pump.head_stage(q, s_, wear)
+        cur = abs(s_ - speed) < 1e-9
+        ax.plot(q, h, color="#d62728" if cur else wplt.SERIES[i % len(wplt.SERIES)], lw=2.0 if cur else 1.1,
+                label=f"{s_:,.0f} rpm")
+        qq = np.array([lo, hi])
+        ax.plot(qq, n * pump.head_stage(qq, s_, wear), "o", color=wplt.INK2, ms=3)
+    if q_op is not None and h_op is not None:
+        ax.plot([q_op], [h_op], "s", color="#9467bd", ms=8, label="Operating point", zorder=5)
+    ax.set_xlabel("Rate through the pump (RB/d)")
+    ax.set_ylabel(f"Head, {n} stages (ft)")
+    ax.set_title(f"{pump.name} - {n} stages", fontsize=10)
+    ax.set_ylim(bottom=0)
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=7)
+    fig.tight_layout()
+    return fig
+
+
+def hsp_turbine_plot(turbine, nt, speed, qn_op=None):
+    fig, ax = plt.subplots(figsize=(7.2, 4.4))
+    lo, hi = turbine.range_at(speed)
+    q = np.linspace(0.3 * lo, 1.3 * hi, 150)
+    ax.plot(q, nt * turbine.head_stage(q, speed), color="#d62728", lw=1.6, label=f"Head loss, {nt} stages (ft)")
+    ax2 = ax.twinx()
+    ax2.plot(q, turbine.power_stage(q, speed), color="#1f77b4", lw=1.4, label="Power per stage (hp)")
+    ax2.plot(q, 100 * turbine.efficiency(q, speed), color="#2ca02c", lw=1.2, ls="--", label="Efficiency (%)")
+    for x_ in (lo, hi):
+        ax.axvline(x_, color=wplt.INK2, lw=0.8, ls=":")
+    if qn_op is not None:
+        ax.axvline(qn_op, color="#9467bd", lw=1.2)
+        ax.plot([qn_op], [nt * float(turbine.head_stage(qn_op, speed))], "s", color="#9467bd", ms=7)
+    ax.set_xlabel("Net turbine flow rate (bbl/d)")
+    ax.set_ylabel("Head loss (ft)")
+    ax2.set_ylabel("Power per stage (hp) / efficiency (%)")
+    ax.set_title(f"{turbine.name} at {speed:,.0f} rpm", fontsize=10)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="upper left")
+    ax.grid(alpha=0.3, ls="--")
+    fig.tight_layout()
+    return fig
+
+
+def hsp_design_tab(o, eqd, ipr_curve):
+    """Design | Hydraulic Drive Downhole Pump - after PROSPER (Tutorial 27)."""
+    st.caption("HSP design after PROSPER Design | Hydraulic Drive Downhole Pump: the pump duty at the design rate "
+               "(intake from the IPR up the casing, discharge from the top node down the tubing with production + "
+               "power fluid), the pumps whose range covers it at the speed, the stages and power of the chosen pump, "
+               "then the turbine stages that give that power with the power fluid rate, the pressure drop across the "
+               "turbine and the surface injection pressure.")
+    if not whsp.PUMPS or not whsp.TURBINES:
+        st.error("The HSP pump and turbine databases are missing.")
+        return
+    top_, secs_, pts_ = eqd["downhole"]
+    tub = secs_[secs_["Type"] == "Tubing"]
+    bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+    gmd, gt = eqd["geothermal"]
+    fluid, fluid_note = vlp_fluid(o, "oil", max(float(ipr_curve.pr), 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                  float(np.max(gt)) + 10)
+    if fluid is None:
+        st.warning(fluid_note)
+        return
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Input data**")
+        c = st.columns(3)
+        md = num(c[0], "Pump depth (ft MD)", "hspd_md", float(round(bottom_tub)), float(top_) + 50, 60000.0)
+        max_od = num(c[1], "Pump maximum OD (in)", "hspd_od", 6.8, 1.0, 20.0, None, "%.3g")
+        max_tod = num(c[2], "Turbine maximum OD (in)", "hspd_tod", 6.8, 1.0, 20.0, None, "%.3g")
+        c = st.columns(3)
+        q_des = num(c[0], "Design (liquid) rate (STB/d)", "hspd_q", 6500.0, 1.0, 1e6)
+        wc = num(c[1], "Water cut (%)", "hspd_wc", float(val("sys_wc", 0.0)), 0.0, 100.0)
+        gor = num(c[2], "Total GOR (scf/STB)", "hspd_gor", float(val("sys_gor", 300.0)), 0.0, 1e6)
+        c = st.columns(3)
+        top_p = num(c[0], "Top node pressure (psia)", "hspd_top", float(val("sys_whp", 164.7)), 14.7, 1e4)
+        speed = num(c[1], "Pump speed (rpm)", "hspd_speed", 7500.0, 100.0, 30000.0)
+        pct = num(c[2], "% Power fluid of reservoir fluid", "hspd_pct", 100.0, 1.0, 1000.0,
+                  help="Power fluid rate = this % of the design liquid rate (100 %: as much power fluid as produced "
+                       "liquid).")
+        wear = num(st, "Pump wear factor (fraction)", "hspd_wear", 0.0, -0.5, 0.9, None, "%.3g")
+        sal = _hsp_salinity_input("hspd")
+        ms = ss.get("vlp_matches", {}).get("ms", {})
+        sel_c = ss.get("vlp_selected")
+        corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+        corr = sel(st, "Tubing correlation", corr_opts, "hspd_corr", sel_c if sel_c in corr_opts else "pe2_style",
+                   format_func=VLP_LABELS.get)
+        m_fit = ms.get(corr)
+        use_fit = flag(st.toggle, "Use matched parameters", "hspd_use_fit", m_fit is not None, disabled=m_fit is None)
+        if m_fit is not None and use_fit:
+            p1, p2 = float(m_fit.p1), float(m_fit.p2)
+        else:
+            c2 = st.columns(2)
+            p1 = num(c2[0], "Parameter 1 (gravity)", f"hspd_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
+            p2 = num(c2[1], "Parameter 2 (friction)", f"hspd_p2_{corr}", 1.0, 0.01, 10.0, None, "%.4f")
+        go = st.button("Calculate pump duty", type="primary", key="hspd_go")
+    tod, cid = _jet_section_at(secs_, md)
+    d = whsp.HSPDutyInput(md, q_des, wc / 100.0, gor, top_p, speed, pct, wear, sal, cid or 6.4, tod or 4.5, max_od,
+                          max_tod)
+    u_ = float(val("eq_u", eqd.get("u_geo", 8.0)))
+    if go:
+        if tod is None:
+            st.error("Enter the tubing outside diameter and the casing inside diameter at the pump (Equipment Data) - "
+                     "the power fluid goes down that annulus.")
+        else:
+            cv = ipr_curve
+            try:
+                cv = rebuild_ipr({"wc": wc / 100.0})
+            except ValueError:
+                pass
+            path = vlp_path(eqd, "tubing", (md,))
+            try:
+                pwf = float(wgl.ipr_pwf(cv, q_des))
+                if not np.isfinite(pwf):
+                    raise ValueError("The design rate is above the well's AOF.")
+                with st.spinner("Calculating the pump duty ..."):
+                    du = whsp.duty(path, fluid, pwf, d, corr, p1, p2, u_, eqd["heat_capacities"])
+                ss["hsp_duty"] = {"du": du, "d": d, "path": path, "corr": (corr, p1, p2)}
+            except ValueError as e:
+                st.error(str(e))
+    with right:
+        out = ss.get("hsp_duty")
+        if out is None:
+            st.info("Set the design conditions and press Calculate pump duty.")
+            return
+        du, d0, path = out["du"], out["d"], out["path"]
+        if d0 != d:
+            st.info("Inputs have changed - press Calculate pump duty to update.")
+        g = 14.696
+        m = st.columns(4)
+        m[0].metric("Intake (psig)", f"{du.pip - g:,.1f}")
+        m[1].metric("Discharge (psig)", f"{du.pdis - g:,.1f}")
+        m[2].metric("Head required (ft)", f"{du.head:,.1f}")
+        m[3].metric("Average rate (RB/d)", f"{du.q_avg:,.0f}")
+        t1, t2, t3, t4 = st.tabs(["Pump duty", "Equipment and results", "Pump plot", "Turbine plot"])
+        with t1:
+            st.dataframe(whsp.duty_table(du, d0).style.format("{:,.6g}"), use_container_width=True)
+        res = None
+        with t2:
+            cands = whsp.candidate_pumps(du, d0)
+            st.markdown("**Pumps** (speed within the pump's range, intake and discharge rates within its range at "
+                        "the speed, OD within the maximum)")
+            st.dataframe(cands.style.format(precision=3), hide_index=True, use_container_width=True)
+            ok = list(cands.loc[cands["Suitable"], "Pump"]) or list(cands["Pump"])
+            c = st.columns(2)
+            pname = sel(c[0], "Pump", ok, "hspd_pump")
+            pump = whsp.PUMPS[pname]
+            sal_ = du.detail.get("salinity")
+            bw_top = whsp.water_bw_rho(sal_, d0.top_p, du.detail.get("t_wellhead", 150.0))[0]
+            tc = whsp.candidate_turbines(d0, bw_top=bw_top)
+            tok = list(tc.loc[tc["Suitable"], "Turbine"]) or list(tc["Turbine"])
+            tname = sel(c[1], "Turbine", tok, "hspd_turbine",
+                        help="It is the user's responsibility to check that the turbine is compatible with the pump "
+                             "(PROSPER).")
+            st.markdown("**Turbines** (net turbine flow = power fluid at the top node less the balance supply)")
+            st.dataframe(tc.style.format(precision=3), hide_index=True, use_container_width=True)
+            try:
+                res = whsp.design(path, fluid, du, d0, pump, whsp.TURBINES[tname], eqd["heat_capacities"], u_)
+            except ValueError as e:
+                st.error(str(e))
+            if res is not None:
+                rows_ = []
+                for k_, v_ in res.items():
+                    if k_ == "notes":
+                        continue
+                    if "(psia)" in k_:
+                        k_, v_ = k_.replace("(psia)", "(psig)"), v_ - g
+                    rows_.append((k_, v_))
+                st.markdown("**Results**")
+                st.dataframe(pd.DataFrame(rows_, columns=["Result", "Value"]).style.format({"Value": "{:,.6g}"}),
+                             hide_index=True, use_container_width=True)
+                for n_ in res["notes"]:
+                    st.warning(n_)
+                ss["hsp_design"] = {"md": md, "speed": speed, "wear": wear, "pump": pname,
+                                    "n": float(res["Number of pump stages"]), "turbine": tname,
+                                    "nt": float(res["Number of turbine stages"])}
+        with t3:
+            if res is not None:
+                st.pyplot(hsp_pump_plot(pump, res["Number of pump stages"], speed, du.q_avg,
+                                        res["Number of pump stages"] * res["Head per stage (ft)"], wear),
+                          clear_figure=True)
+        with t4:
+            if res is not None:
+                st.pyplot(hsp_turbine_plot(whsp.TURBINES[tname], res["Number of turbine stages"], speed,
+                                           res["Net turbine flow (bbl/d)"]), clear_figure=True)
+
+
+def hsp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
+    """Calculation | System for an HSP well (power fluid varied so the turbine power equals the pump power)."""
+    eq = ss.get("hsp_equipment")
+    if not eq:
+        st.info("Enter the HSP in the Equipment Data tab (Hydraulic submersible pump section).")
+        return
+    sig = ("hsp", tuple(sorted(base.items())), corr, p1, p2, tuple((k_, tuple(v_)) for k_, v_ in sens.items()),
+           tuple(sorted((k_, repr(v_)) for k_, v_ in eq.items())))
+    if go:
+        try:
+            combos = wsys.combinations(sens)
+            path = vlp_path(eqd, "tubing", (eq["pump_md"],))
+            results = []
+            with st.spinner(f"Calculating {len(combos)} case(s)..."):
+                for ch in combos:
+                    prm = {**base, **{k_: v_ for k_, v_ in ch.items() if k_ in ("whp", "wc", "gor", "u")}}
+                    inst = _hsp_installed(eq, speed=float(ch.get("hsp_speed", eq["speed"])),
+                                          wear=float(ch.get("hsp_wear", eq["wear"])))
+                    changes = {k_: float(ch[k_]) for k_ in wsys.IPR_KEYS if k_ in ch}
+                    changes["wc"] = float(prm["wc"]) / 100.0
+                    if "gor" in prm:
+                        changes["gor"] = float(prm["gor"])
+                    cv = ipr_for(changes)
+                    sol, crv = whsp.system(path, fluid, lambda q, cv=cv: float(wgl.ipr_pwf(cv, q)), prm["wc"] / 100.0,
+                                           prm["gor"], prm["whp"], inst, corr, p1, p2, prm["u"],
+                                           eqd["heat_capacities"], q_max=float(np.max(cv.q)) * 0.995, n=20)
+                    results.append((ch, sol, crv))
+            ss["hsp_sys_res"] = {"sig": sig, "results": results}
+        except (ValueError, RuntimeError, ZeroDivisionError, KeyError) as e:
+            st.error(f"Calculation failed: {e}")
+    out = ss.get("hsp_sys_res")
+    if not out:
+        st.info("Press Calculate.")
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate to update.")
+    rows = []
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    for i, (ch, sol, crv) in enumerate(out["results"]):
+        lab = ", ".join(f"{labels.get(k_, k_).split(' (')[0]} {v_:g}" for k_, v_ in ch.items()) or "base"
+        d_ = {labels.get(k_, k_): v_ for k_, v_ in ch.items()}
+        if sol is None:
+            d_["Note"] = "No solution - the HSP cannot lift this case to the top node pressure."
+        else:
+            d_.update(sol)
+        rows.append(d_)
+        if len(crv) and i < 8:
+            col = wplt.SERIES[i % len(wplt.SERIES)]
+            ax.plot(crv["Liquid rate (STB/d)"], crv["Pump discharge from the pump (psia)"], color=col, lw=1.5,
+                    label=f"Pump - {lab}")
+            ax.plot(crv["Liquid rate (STB/d)"], crv["Discharge needed by the tubing (psia)"], color=col, lw=1.2,
+                    ls="--", label=f"Tubing - {lab}")
+            if sol is not None:
+                ax.scatter([sol["Liquid rate (STB/d)"]], [sol["Pump discharge pressure (psia)"]], color=col, zorder=5)
+    tab_ = pd.DataFrame(rows)
+    st.markdown(f"**Results** - {len(rows)} case(s); pump {eq['pump']} ({eq['stages']} stages), turbine "
+                f"{eq['turbine']} ({eq['turbine_stages']} stages)")
+    st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.download_button("Download HSP system results (CSV)", tab_.to_csv(index=False).encode(), "hsp_system.csv")
+    ax.set_xlabel("Liquid rate (STB/d)")
+    ax.set_ylabel("Pump discharge pressure (psia)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=6.5, ncol=2)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    st.caption("Solid: the discharge pressure the pump reaches from the IPR's intake (stage by stage); dashed: the "
+               "discharge pressure the tubing needs with production + the power fluid that drives it.")
+
+
+def hsp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, hsp):
+    """Gradient traverse of an HSP well at one liquid rate (as PROSPER's): the power fluid rate that balances the
+    turbine and pump powers, tubing from the top node to the pump discharge with production + power fluid, the pump
+    intake from the pump curve, casing to the bottom node."""
+    inst = _hsp_installed(hsp)
+    wc, gor = base["wc"] / 100.0, float(base["gor"])
+    summ, _ = whsp.traverse_profile(path, fluid, float(base["whp"]), q, wc, gor, inst, None, corr, p1, p2,
+                                    float(base["u"]), hc)
+    md_p = hsp["pump_md"]
+    above, below = wesp.sub_path(path, path.md[0], md_p), wesp.sub_path(path, md_p, path.md[-1])
+    qpf = summ["Power fluid rate (STB/d)"]
+    qt = q + qpf
+    wct = (q * wc + qpf) / qt
+    fl_mix = wjet._blend_fluid(fluid, q, wc, qpf, summ["salinity"])
+    det, reg, prof = wsys.solution_details(above, fl_mix, kind, {**base, "wc": 100 * wct}, qt, corr, p1, p2, hc,
+                                           None, comp=comp_current(), t_bottom=summ["Pump discharge temperature (F)"])
+    pdis = float(prof["Pressure (psia)"].iloc[-1])
+    pip = summ["Pump intake pressure (psia)"]
+    det_b, _, prof_b = wsys.solution_details(below, fluid, kind, {**base, "whp": pip}, q, corr, p1, p2, hc, None,
+                                             comp=comp_current())
+    z_p = float(np.interp(md_p, path.md, path.tvd))
+    t_in = summ["Pump intake temperature (F)"]
+    pump_row = pd.DataFrame([{"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pdis,
+                              "Temperature (°F)": summ["Pump discharge temperature (F)"], "Section": "Pump discharge"},
+                             {"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pip, "Temperature (°F)": t_in,
+                              "Section": "Pump intake"}])
+    prof = pd.concat([prof.assign(Section="Tubing"), pump_row, prof_b.assign(Section="Casing")], ignore_index=True)
+    det = dict(det)
+    det["Bottom node pressure (psia)"] = float(prof_b["Pressure (psia)"].iloc[-1])
+    det["dP gravity - production string (psi)"] += det_b["dP gravity - production string (psi)"]
+    det["dP friction - production string (psi)"] += det_b["dP friction - production string (psi)"]
+    det["Pump discharge pressure (psia)"], det["Pump intake pressure (psia)"] = pdis, pip
+    det["Pump dP (psi)"] = pdis - pip
+    det["Pump intake temperature (°F)"] = t_in
+    det["Pump discharge temperature (°F)"] = summ["Pump discharge temperature (F)"]
+    det["HSP power fluid rate (STB/d)"] = qpf
+    det["HSP pump power (hp)"] = summ["Pump power (hp)"]
+    det["Power fluid injection pressure (psia)"] = summ["Power fluid injection pressure (psia)"]
+    det["Power fluid static (psi)"], det["Power fluid friction (psi)"] = (summ["Power fluid static (psi)"],
+                                                                           summ["Power fluid friction (psi)"])
+    det["Delta P across turbine (psi)"] = summ["Delta P across turbine (psi)"]
+    return det, reg, prof
+
+
+# ================================================================ progressive cavity pump
+PCP_VARS = {"pcp_speed": "PCP speed (rpm)", "pcp_wear": "PCP wear factor (fraction)"}
+
+
+def pcp_drive(o):
+    return "Sucker rod" if getattr(o, "artificial_lift", "") == "pcp_rod" else "Downhole motor"
+
+
+def _pcp_pick_lists():
+    pumps = list(wpcp.PUMPS)
+    motors = sorted(wpcp.MOTORS, key=lambda n: (wpcp.MOTORS[n].manufacturer, wpcp.MOTORS[n].series,
+                                                wpcp.MOTORS[n].hp, wpcp.MOTORS[n].volts))
+    return pumps, motors, list(wpcp.CABLES), list(wpcp.RODS)
+
+
+def _pcp_installed(eq, speed=None, wear=None):
+    """PCPInstalled from the Equipment tab dict (names resolved in the databases)."""
+    return wpcp.PCPInstalled(
+        wpcp.PUMPS[eq["pump"]], float(eq["pump_md"]), float(eq["speed"] if speed is None else speed),
+        float(eq["wear"] if wear is None else wear), float(eq["sep"]), eq["drive"],
+        wpcp.MOTORS.get(eq.get("motor")) if eq["drive"] == "Downhole motor" else None,
+        wpcp.CABLES.get(eq.get("cable")) if eq["drive"] == "Downhole motor" else None, float(eq.get("cable_len", 0.0)),
+        wpcp.RODS.get(eq.get("rod")) if eq["drive"] == "Sucker rod" else None, float(eq.get("rod_len", 0.0)),
+        float(eq.get("casing_id") or np.nan))
+
+
+def _pcp_copy_design():
+    pd_ = ss.get("pcp_design")
+    if not pd_:
+        return
+    for k_ in ("md", "wear", "sep", "cable_len", "rod_len"):
+        if val(f"pcd_{k_}") is not None:
+            put(f"pcq_{k_}", val(f"pcd_{k_}"))
+    for k_ in ("pump", "motor", "cable", "rod"):
+        if pd_.get(k_):
+            put(f"pcq_{k_}", pd_[k_])
+    if pd_.get("speed"):
+        put("pcq_speed", round(float(pd_["speed"]), 3))
+
+
+def pcp_equipment_panel(o, top_md, secs):
+    """System | Progressive Cavity Pump: the installed PCP used by the Calculation tab."""
+    drive = pcp_drive(o)
+    st.subheader(f"Progressive cavity pump ({drive.lower()} drive)")
+    st.caption("The PCP used in the Calculation tab (PROSPER System | Progressive Cavity Pump). The pump's speed sets "
+               "the rate; the head it develops sets the slip. Run the PCP design (Design tab) and copy it here, or "
+               "enter the pump directly.")
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 3000.0
+    st.button("Copy from the PCP design", on_click=_pcp_copy_design, disabled=not ss.get("pcp_design"),
+              key="pcq_copy")
+    pumps, motors, cables, rods = _pcp_pick_lists()
+    c = st.columns(4)
+    md = num(c[0], "Pump depth (ft MD)", "pcq_md", float(round(min(bottom - 50.0, bottom))), float(top_md) + 10,
+             60000.0)
+    speed = num(c[1], "Pump speed (rpm)", "pcq_speed", 150.0, 1.0, 2000.0)
+    wear = num(c[2], "Pump wear factor (fraction)", "pcq_wear", 0.0, 0.0, 0.9, None, "%.3g",
+               help="Derates the pump's head capacity as PROSPER: the slip at head H is that of H / (1 - wear). "
+                    "PROSPER's design screen ignores it; the Calculation tab applies it.")
+    sep = num(c[3], "Gas separator efficiency (fraction)", "pcq_sep", 0.0, 0.0, 1.0, None, "%.3g")
+    pump = sel(st, "Pump", pumps, "pcq_pump", pumps[-1])
+    p_ = wpcp.PUMPS[pump]
+    st.caption(f"{p_.size:g} in OD, maximum head {p_.max_head:,.0f} ft, {p_.head_grad:.4f} RB/d per rpm "
+               f"({p_.ref_rate:,.0f} RB/d at {p_.ref_speed:g} rpm and zero head).")
+    tod, cid = _jet_section_at(secs, md) if secs is not None else (None, None)
+    out = {"pump_md": md, "speed": speed, "wear": wear, "sep": sep, "pump": pump, "drive": drive,
+           "casing_id": cid, "name": pump}
+    if drive == "Downhole motor":
+        c = st.columns([2, 1, 1])
+        dflt_m = "Centrilift 450 175HP 2285V 50A" if "Centrilift 450 175HP 2285V 50A" in motors else motors[0]
+        out["motor"] = sel(c[0], "Motor", motors, "pcq_motor", dflt_m)
+        out["cable"] = sel(c[1], "Cable", cables, "pcq_cable", "#1 Copper" if "#1 Copper" in cables else cables[0])
+        out["cable_len"] = num(c[2], "Cable length (ft)", "pcq_cable_len", float(round(md + 500.0)), 0.0, 60000.0)
+        m_ = wpcp.MOTORS[out["motor"]]
+        st.caption(f"Motor {m_.od:g} in OD, {m_.hp:g} hp / {m_.volts:g} V / {m_.amps:g} A at {m_.hz:g} Hz "
+                   f"({60 * m_.hz:g} rpm synchronous); at {speed:g} rpm it gives "
+                   f"{m_.hp * float(m_.scale(speed)):,.2f} hp at {m_.volts * float(m_.scale(speed)):,.1f} V. "
+                   + ("Load curves: the manufacturer's coefficients." if m_.c_amps else
+                      "Load curves: PROSPER's default motor curves."))
+        if cid is not None and m_.od >= cid:
+            st.warning(f"The motor ({m_.od:g} in) does not fit the casing ({cid:g} in ID).")
+    else:
+        c = st.columns([2, 1])
+        out["rod"] = sel(c[0], "Sucker rod", rods, "pcq_rod", rods[0])
+        out["rod_len"] = num(c[1], "Total rod length (ft)", "pcq_rod_len", float(round(md)), 1.0, 60000.0)
+        st.caption("With a sucker rod drive the production flows up the rod-tubing annulus (PROSPER). Rod loads and "
+                   "stresses are our own estimates (PROSPER's rod outputs are not reproduced).")
+    if abs(bottom - md) > 1.0 and md > bottom:
+        st.warning(f"The tubing ends at {bottom:,.0f} ft MD, above the pump at {md:,.0f} ft MD.")
+    ss["pcp_equipment"] = out
+    return out
+
+
+def pcp_pump_plot(pump: "wpcp.PCPPump", d=None, n_des=None, sol=None):
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    n = np.linspace(0, 1.25 * max(pump.ref_speed, n_des or 0), 80)
+    heads = sorted(set([0.0] + list(pump.heads)))
+    cm = plt.get_cmap("viridis")
+    for i, h in enumerate(heads):
+        q = pump.rate(n, h)
+        ax.plot(n, q, color=cm(i / max(len(heads) - 1, 1)), lw=1.5, label=f"{h:,.0f} ft")
+    if d is not None and n_des is not None:
+        ax.scatter([n_des], [d.q_avg], color="#d62728", zorder=6,
+                   label=f"Design: {d.q_avg:,.0f} RB/d at {d.head:,.0f} ft")
+    if sol is not None:
+        ax.scatter([sol[0]], [sol[1]], marker="s", color="k", zorder=6, label="System solution")
+    ax.set_xlabel("Pump speed (rpm)")
+    ax.set_ylabel("Rate through the pump (RB/d)")
+    ax.set_title(pump.name, fontsize=10)
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=7, title="Head", title_fontsize=7, ncol=2)
+    fig.tight_layout()
+    return fig
+
+
+def pcp_design_tab(o, eqd, ipr_curve):
+    """Design | Progressive Cavity Pump - after PROSPER (Tutorial 29): pump duty, pump, motor and cable or rod."""
+    drive = pcp_drive(o) if getattr(o, "artificial_lift", "") in ("pcp_motor", "pcp_rod") else None
+    st.caption("PCP design after PROSPER Design | Progressive Cavity Pump: the pump duty at the design rate (intake "
+               "pressure from the IPR up the casing, discharge pressure from the top node down the tubing), the head "
+               "and the average downhole rate the pump must deliver, then the pump (its speed and power at that "
+               "head), and the motor and cable (downhole motor drive) or the rod (sucker rod drive).")
+    if drive is None:
+        drive = radio(st, "Drive", list(wpcp.DRIVES), "pcd_drive", horizontal=True,
+                      help="Set by the artificial lift in the Options summary when a PCP is chosen there.")
+    top_, secs_, pts_ = eqd["downhole"]
+    tub = secs_[secs_["Type"] == "Tubing"]
+    bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+    gmd, gt = eqd["geothermal"]
+    fluid, fluid_note = vlp_fluid(o, "oil", max(float(ipr_curve.pr), 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                  float(np.max(gt)) + 10)
+    if fluid is None:
+        st.warning(fluid_note)
+        return
+    pumps, motors, cables, rods = _pcp_pick_lists()
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Input data**")
+        c = st.columns(2)
+        md = num(c[0], "Pump depth (ft MD)", "pcd_md", float(round(bottom_tub - 50.0)), float(top_) + 10, 60000.0)
+        max_od = num(c[1], "Maximum OD (in)", "pcd_od", 6.4, 1.0, 20.0, None, "%.3g")
+        c = st.columns(2)
+        sep = num(c[0], "Gas separator efficiency (fraction)", "pcd_sep", 0.0, 0.0, 1.0, None, "%.3g")
+        wear = num(c[1], "Pump wear factor (fraction)", "pcd_wear", 0.0, 0.0, 0.9, None, "%.3g")
+        c = st.columns(2)
+        q_des = num(c[0], "Design rate (STB/d)", "pcd_q", 750.0, 1.0, 1e6)
+        wc = num(c[1], "Water cut (%)", "pcd_wc", float(val("sys_wc", 0.0)), 0.0, 100.0)
+        c = st.columns(2)
+        gor = num(c[0], "Total GOR (scf/STB)", "pcd_gor", float(val("sys_gor", 300.0)), 0.0, 1e6)
+        top_p = num(c[1], "Top node pressure (psia)", "pcd_top", float(val("sys_whp", 264.7)), 14.7, 1e4)
+        if drive == "Downhole motor":
+            c = st.columns(3)
+            cable_len = num(c[0], "Cable length (ft)", "pcd_cable_len", float(round(md + 500.0)), 0.0, 60000.0)
+            v_surf = num(c[1], "Voltage at surface (V)", "pcd_vsurf", 9000.0, 1.0, 1e5,
+                         help="Available surface voltage - compared with the voltage the motor and cable need.")
+            margin = num(c[2], "Motor power safety margin (fraction)", "pcd_margin", 0.0, 0.0, 2.0, None, "%.3g")
+            rod_len = 0.0
+        else:
+            rod_len = num(st, "Total rod length (ft)", "pcd_rod_len", float(round(md)), 1.0, 60000.0)
+            cable_len, v_surf, margin = 0.0, np.nan, 0.0
+        ms = ss.get("vlp_matches", {}).get("ms", {})
+        sel_c = ss.get("vlp_selected")
+        corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+        corr = sel(st, "Tubing correlation", corr_opts, "pcd_corr", sel_c if sel_c in corr_opts else "pe2_style",
+                   format_func=VLP_LABELS.get)
+        m_fit = ms.get(corr)
+        use_fit = flag(st.toggle, "Use matched parameters", "pcd_use_fit", m_fit is not None,
+                       disabled=m_fit is None)
+        if m_fit is not None and use_fit:
+            p1, p2 = float(m_fit.p1), float(m_fit.p2)
+        else:
+            c2 = st.columns(2)
+            p1 = num(c2[0], "Parameter 1 (gravity)", f"pcd_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
+            p2 = num(c2[1], "Parameter 2 (friction)", f"pcd_p2_{corr}", 1.0, 0.01, 10.0, None, "%.4f")
+        rod_d = None
+        if drive == "Sucker rod":
+            rod_d = wpcp.RODS[sel(st, "Sucker rod", rods, "pcd_rod", rods[0])]
+        go = st.button("Calculate pump duty", type="primary", key="pcd_go")
+    hc = eqd["heat_capacities"]
+    u_ = float(val("eq_u", eqd.get("u_geo", 8.0)))
+    if go:
+        cv = ipr_curve
+        try:
+            cv = rebuild_ipr({"wc": wc / 100.0})
+        except ValueError:
+            pass
+        path = vlp_path(eqd, "tubing", (md,))
+        try:
+            with st.spinner("Calculating the pump duty ..."):
+                du = wpcp.duty(path, fluid, float(wgl.ipr_pwf(cv, q_des)), q_des, wc / 100.0, gor, top_p, md, sep,
+                               corr, p1, p2, u_, hc, rod_d if drive == "Sucker rod" else None)
+                case = {"q": np.array([q_des]), "wc": np.array([wc / 100.0]), "gor": np.array([du.gor_above])}
+                mass, cp = wpcp._cp_mix(fluid, case, hc)
+            ss["pcp_duty"] = {"duty": du, "cp": cp, "mass": mass, "drive": drive}
+        except ValueError as e:
+            st.error(str(e))
+    with right:
+        res = ss.get("pcp_duty")
+        if res is None:
+            st.info("Set the design conditions and press Calculate pump duty.")
+            return
+        du = res["duty"]
+        m = st.columns(4)
+        m[0].metric("Intake (psig)", f"{du.pip - 14.696:,.1f}")
+        m[1].metric("Discharge (psig)", f"{du.pdp - 14.696:,.1f}")
+        m[2].metric("Head required (ft)", f"{du.head:,.1f}")
+        m[3].metric("Average downhole rate (RB/d)", f"{du.q_avg:,.1f}")
+        t1, t2, t3 = st.tabs(["Pump duty", "Select equipment", "Pump plot"])
+        with t1:
+            st.dataframe(wpcp.duty_table(du).style.format({"Value": "{:,.6g}"}), hide_index=True,
+                         width="stretch")
+        with t2:
+            cands = wpcp.candidate_pumps(du, max_od=max_od)
+            st.dataframe(cands.style.format(precision=3), hide_index=True, width="stretch")
+            ok = list(cands.loc[cands["Suitable"], "Pump"]) or list(cands["Pump"])
+            pick = sel(st, "Pump", ok, "pcd_pump", ok[0])
+            pump = wpcp.PUMPS[pick]
+            motor = cable = rod = None
+            if res["drive"] == "Downhole motor":
+                n_ = float(pump.speed_for(du.q_avg, du.head, wear))
+                pw_ = float(wpcp.design_power(pump, n_, du.head))
+                fit = [n for n in motors if wpcp.MOTORS[n].od <= max_od and
+                       wpcp.MOTORS[n].hp * float(wpcp.MOTORS[n].scale(n_)) >= pw_ * (1 + margin)]
+                st.caption(f"{len(fit)} motors within the maximum OD give the {pw_:,.2f} hp needed at {n_:,.1f} rpm"
+                           + (f" (+{100 * margin:g} % margin)" if margin else "") + ".")
+                mlist = fit or motors
+                dflt_m = ("Centrilift 450 175HP 2285V 50A" if "Centrilift 450 175HP 2285V 50A" in mlist
+                          else mlist[0])
+                motor = wpcp.MOTORS[sel(st, "Motor", mlist, "pcd_motor", dflt_m)]
+                auto = "Smallest that carries the current"
+                cab_pick = sel(st, "Cable", [auto] + cables, "pcd_cable", auto)
+                cable = None if cab_pick == auto else wpcp.CABLES[cab_pick]
+            else:
+                rod = rod_d
+            r = wpcp.design(du, pump, res["drive"], motor, cable, cable_len, wear, margin, rod, rod_len,
+                            res["cp"], res["mass"])
+            notes = r.pop("notes")
+            if res["drive"] == "Downhole motor" and np.isfinite(v_surf) and "Required surface voltage (V)" in r:
+                if r["Required surface voltage (V)"] > v_surf:
+                    notes.append(f"The motor and cable need {r['Required surface voltage (V)']:,.0f} V at surface, "
+                                 f"above the {v_surf:,.0f} V available.")
+            st.dataframe(pd.DataFrame({"Design": {k_: (f"{v_:,.4f}" if isinstance(v_, (float, np.floating)) else
+                                                        str(v_)) for k_, v_ in r.items()}}),
+                         width="stretch")
+            for n_ in notes:
+                st.warning(n_)
+            ss["pcp_design"] = {"pump": pick, "speed": r["Pump speed (rpm)"],
+                                "motor": motor.name if motor else None,
+                                "cable": (cable.name if cable else r.get("Cable")) if motor else None,
+                                "rod": rod.label if rod else None}
+            st.caption("Copy the design to the Equipment tab (PCP section) to use it in the Calculation tab.")
+        with t3:
+            p_ = wpcp.PUMPS[ss.get("pcp_design", {}).get("pump") or cands["Pump"].iloc[0]]
+            st.pyplot(pcp_pump_plot(p_, du, float(p_.speed_for(du.q_avg, du.head, wear))), clear_figure=True)
+            st.caption("Rate through the pump against speed at the database heads: rate = head gradient x speed + "
+                       "intercept(head). The dot is the design (average downhole rate at the head required).")
+
+
+def pcp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
+    """Calculation | System for a PCP well: the rate at which the pump's own rate at the head it develops equals
+    the average rate through it."""
+    eq = ss.get("pcp_equipment")
+    if not eq:
+        st.info("Enter the pump in the Equipment Data tab (Progressive cavity pump section).")
+        return
+    sig = ("pcp", tuple(sorted(base.items())), corr, p1, p2, tuple((k_, tuple(v_)) for k_, v_ in sens.items()),
+           tuple(sorted((k_, repr(v_)) for k_, v_ in eq.items())))
+    if go:
+        try:
+            combos = wsys.combinations(sens)
+            path = vlp_path(eqd, "tubing", (eq["pump_md"],))
+            results = []
+            with st.spinner(f"Calculating {len(combos)} case(s)..."):
+                for ch in combos:
+                    prm = {**base, **{k_: v_ for k_, v_ in ch.items() if k_ in ("whp", "wc", "gor", "u")}}
+                    inst = _pcp_installed(eq, ch.get("pcp_speed"), ch.get("pcp_wear"))
+                    changes = {k_: float(ch[k_]) for k_ in wsys.IPR_KEYS if k_ in ch}
+                    changes["wc"] = float(prm["wc"]) / 100.0
+                    if "gor" in prm:
+                        changes["gor"] = float(prm["gor"])
+                    cv = ipr_for(changes)
+                    sol, crv = wpcp.system(path, fluid, lambda q, cv=cv: float(wgl.ipr_pwf(cv, q)),
+                                           prm["wc"] / 100.0, prm["gor"], prm["whp"], inst, corr, p1, p2, prm["u"],
+                                           eqd["heat_capacities"], q_max=float(np.max(cv.q)) * 0.995, n=24)
+                    results.append((ch, sol, crv))
+            ss["pcp_sys_res"] = {"sig": sig, "results": results}
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            st.error(f"Calculation failed: {e}")
+    out = ss.get("pcp_sys_res")
+    if not out:
+        st.info("Press Calculate.")
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate to update.")
+    rows, notes = [], []
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    for i, (ch, sol, crv) in enumerate(out["results"]):
+        lab = ", ".join(f"{labels.get(k_, k_).split(' (')[0]} {v_:g}" for k_, v_ in ch.items()) or "base"
+        d_ = {labels.get(k_, k_): v_ for k_, v_ in ch.items()}
+        if sol is None:
+            d_["Note"] = "No solution - the pump cannot lift this case to the top node pressure."
+        else:
+            sol = dict(sol)
+            for n_ in sol.pop("notes", []):
+                notes.append(f"{lab}: {n_}")
+            d_.update(sol)
+        rows.append(d_)
+        if len(crv) and i < 8:
+            col = wplt.SERIES[i % len(wplt.SERIES)]
+            ax.plot(crv["Liquid rate (STB/d)"], crv["Pump rate at that head (RB/d)"], color=col, lw=1.5,
+                    label=f"Pump - {lab}")
+            ax.plot(crv["Liquid rate (STB/d)"], crv["Average rate (RB/d)"], color=col, lw=1.2, ls="--",
+                    label=f"Well - {lab}")
+            if sol is not None and np.isfinite(sol.get("Liquid rate (STB/d)", np.nan)):
+                ax.scatter([sol["Liquid rate (STB/d)"]], [sol["Average rate through pump (RB/d)"]], color=col,
+                           zorder=5)
+    tab_ = pd.DataFrame(rows)
+    st.markdown(f"**Results** - {len(rows)} case(s); pump {eq['pump']}")
+    st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.download_button("Download PCP system results (CSV)", tab_.to_csv(index=False).encode(), "pcp_system.csv")
+    for n_ in dict.fromkeys(notes):
+        st.warning(n_)
+    ax.set_xlabel("Liquid rate (STB/d)")
+    ax.set_ylabel("Rate through the pump (RB/d)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=6.5, ncol=2)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    if len(tab_) > 1 and "Oil rate (STB/d)" in tab_:
+        var_cols = [labels.get(k_, k_) for k_ in sens]
+        if var_cols:
+            fig2, ax2 = plt.subplots(figsize=(7.8, 4.0))
+            x_ = var_cols[0]
+            groups = tab_.groupby(var_cols[1:]) if len(var_cols) > 1 else [("", tab_)]
+            for gk, gdf in groups:
+                ax2.plot(gdf[x_], gdf["Oil rate (STB/d)"], marker="o", ms=4,
+                         label=(f"{var_cols[1].split(' (')[0]} {gk if not isinstance(gk, tuple) else gk[0]:g}"
+                                if len(var_cols) > 1 else None))
+            ax2.set_xlabel(x_)
+            ax2.set_ylabel("Oil rate (STB/d)")
+            ax2.grid(alpha=0.3, ls="--")
+            if len(var_cols) > 1:
+                ax2.legend(fontsize=7)
+            fig2.tight_layout()
+            st.pyplot(fig2, clear_figure=True)
+    st.caption("As PROSPER: at each rate the intake pressure comes from the IPR (up the casing) and the discharge "
+               "pressure from the top node (down the tubing); the head between them sets the pump's own rate at its "
+               "speed (head gradient x speed + intercept(head)). The solution is where that equals the average rate "
+               "through the pump. Power = power gradient(dP / 0.433 psi/ft) x speed; motor and cable from the "
+               "Equipment tab.")
+
+
+def pcp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, pcp_eq):
+    """Gradient traverse of a PCP well at one rate (as PROSPER's): tubing (or rod-tubing annulus) from the top node
+    to the pump discharge, the pump at its speed (intake from the head at which it passes the rate), casing to the
+    bottom node."""
+    inst = _pcp_installed(pcp_eq)
+    md_p = inst.pump_md
+    p_ = wpcp.with_rod(path, inst.rod, md_p) if inst.drive == "Sucker rod" else path
+    s, *_ = wpcp.traverse_profile(p_, fluid, base["whp"], q, base["wc"] / 100.0, float(base["gor"]), inst, corr, p1,
+                                  p2, float(base["u"]), hc)
+    above, below = wesp.sub_path(p_, p_.md[0], md_p), wesp.sub_path(p_, md_p, p_.md[-1])
+    det, reg, prof = wsys.solution_details(above, fluid, kind, base, q, corr, p1, p2, hc, None, comp=comp_current(),
+                                           t_bottom=s["Pump discharge temperature (F)"])
+    pip, pdp = s["Pump intake pressure (psia)"], s["Pump discharge pressure (psia)"]
+    det_b, _, prof_b = wsys.solution_details(below, fluid, kind, {**base, "whp": pip}, q, corr, p1, p2, hc, None,
+                                             comp=comp_current())
+    z_p = float(np.interp(md_p, path.md, path.tvd))
+    pump_row = pd.DataFrame([{"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pdp,
+                              "Temperature (°F)": s["Pump discharge temperature (F)"], "Section": "Pump discharge"},
+                             {"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pip,
+                              "Temperature (°F)": s["Pump intake temperature (F)"], "Section": "Pump intake"}])
+    prof = pd.concat([prof.assign(Section="Tubing"), pump_row, prof_b.assign(Section="Casing")], ignore_index=True)
+    det = dict(det)
+    det["Bottom node pressure (psia)"] = float(prof_b["Pressure (psia)"].iloc[-1])
+    det["dP gravity - production string (psi)"] += det_b["dP gravity - production string (psi)"]
+    det["dP friction - production string (psi)"] += det_b["dP friction - production string (psi)"]
+    det["Pump discharge pressure (psia)"], det["Pump intake pressure (psia)"] = pdp, pip
+    det["Pump dP (psi)"] = pdp - pip
+    det["Pump intake temperature (°F)"] = s["Pump intake temperature (F)"]
+    det["Pump discharge temperature (°F)"] = s["Pump discharge temperature (F)"]
+    det["PCP head (ft)"] = s["Pump head (ft)"]
+    det["PCP average rate (RB/d)"] = s["Average rate through pump (RB/d)"]
+    return det, reg, prof
+
+
 GL_VALVE_COLS = ["Measured depth (ft)", "Type", "Number of valves", "Port size (64ths in)", "R value",
                  "Dome pressure at 60 °F (psig)"]
 
@@ -3139,6 +4072,78 @@ def gaslift_data_panel(o, top_md, secs):
                               p_casing=pc if np.isfinite(pc) else 1214.7, dp_valve=dp if np.isfinite(dp) else 100.0,
                               max_md=max_md if np.isfinite(max_md) else 1e9, fixed_md=fixed, valves=valves,
                               annulus_friction=fric, dome_high_p=hp, tc_derate=derate)
+    ss["gl_setup"] = setup
+    return setup
+
+
+def _ct_transfer_design():
+    out = ss.get("ct_res")
+    if not out or out.get("res") is None:
+        ss["_ct_tr_msg"] = "No coiled tubing design yet - run Design | Gas lift (coiled tubing) first."
+        return
+    ss.pop("_ct_tr_msg", None)
+    r = out["res"]
+    put("ctq_method", wct.METHODS[0])
+    put("ctq_md", float(round(r.max_md, 2)))
+    put("ctq_pc", float(r.p_inj_actual))
+    put("ctq_dpv", float(r.inp.dp_valve))
+    put("ctq_qgi", float(round(r.qgi_actual, 4)))
+
+
+def coiled_data_panel(o, top_md, secs):
+    """System | Coiled Tubing Data: the installed coiled tubing gas lift used by the Calculation tab."""
+    st.subheader("Coiled tubing gas lift data")
+    st.caption("PROSPER System | Coiled Tubing Data: the lift gas goes down a coiled tubing inside the tubing and the "
+               "well produces up the coiled tubing - tubing annulus above the injection point (the full tubing below "
+               "it). Design a new installation in the Design tab and transfer the injection depth here.")
+    c = st.columns(3)
+    fric = sel(c[0], "Coiled tubing type", list(wct.FRICTION), "ctq_fric",
+               help="No friction: static gas column in the coiled tubing. Friction loss: the lift gas flowing down "
+                    "the coiled tubing ID loses pressure by friction.")
+    method = sel(c[1], "Lift method", list(wct.METHODS), "ctq_method", wct.METHODS[0],
+                 help="Specified injection depth: the gas enters at the coiled tubing end if its pressure there is at "
+                      "least the tubing pressure + dP across the valve, else not at all. Optimum injection depth: the "
+                      "deepest point down to the coiled tubing end where that holds.")
+    rate_mode = sel(c[2], "Input method", list(wgls.RATE_MODES), "ctq_rate_mode")
+    c = st.columns(5)
+    gas = wgl.LiftGas(num(c[0], "Gas lift gas gravity", "ctq_sg", 0.7, 0.55, 2.0, None, "%.3f"),
+                      num(c[2], "CO2 (%)", "ctq_co2", 0.0, 0.0, 100.0), num(c[3], "N2 (%)", "ctq_n2", 0.0, 0.0, 100.0),
+                      num(c[1], "H2S (%)", "ctq_h2s", 0.0, 0.0, 100.0))
+    if rate_mode == wgls.RATE_MODES[0]:
+        qgi = num(c[4], "Injected gas rate (MMscf/d)", "ctq_qgi", 1.0, 0.0, 200.0, None, "%.4g")
+        glr = float(val("ctq_glr", 500.0))
+    else:
+        glr = num(c[4], "GLR injected (scf/STB)", "ctq_glr", 500.0, 0.0, 1e6)
+        qgi = float(val("ctq_qgi", 1.0))
+    c = st.columns(4)
+    ct = wct.CoiledTubing(num(c[0], "Coiled tubing inside diameter (in)", "ctq_id", 0.8, 0.1, 5.0, None, "%.4g"),
+                          num(c[1], "Coiled tubing thickness (in)", "ctq_wall", 0.2, 0.01, 1.0, None, "%.4g"),
+                          num(c[2], "Inside roughness (in)", "ctq_ein", 0.0006, 0.0, 0.1, None, "%.5f"),
+                          num(c[3], "Outside roughness (in)", "ctq_eout", 0.0006, 0.0, 0.1, None, "%.5f"),
+                          fric == wct.FRICTION[1])
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
+    c = st.columns(3)
+    depth = num(c[0], "Coiled tubing specified depth (ft MD)" if method == wct.METHODS[0] else
+                "Maximum depth of injection (ft MD)", "ctq_md", float(round(bottom - 30.0)), float(top_md) + 10,
+                60000.0, help="The coiled tubing end: the injection depth (specified) or the deepest injection "
+                              "point (optimum).")
+    pc = num(c[1], "Gas injection pressure (psia)", "ctq_pc", 1214.7, 14.7, 2e4,
+             help="Pressure of the lift gas at the coiled tubing head.")
+    dp = num(c[2], "dP across valve (psi)", "ctq_dpv", 50.0, 0.0, 2000.0,
+             help="The gas pressure at the injection point must exceed the tubing pressure by at least this.")
+    st.button("Transfer from the coiled tubing design", on_click=_ct_transfer_design, key="ctq_transfer",
+              help="Maximum operating depth (as the specified depth), injection pressure, dP and the gas through the "
+                   "selected orifice of the last coiled tubing design.")
+    if ss.get("_ct_tr_msg"):
+        st.warning(ss["_ct_tr_msg"])
+    if tub is not None and len(tub) and (tub["Flow ID (in)"] <= ct.od_in * 1.03).any():
+        st.error(f"The coiled tubing OD ({ct.od_in:g} in) does not fit inside the tubing.")
+    st.caption(f"Coiled tubing OD {ct.od_in:g} in. Lift gas in the coiled tubing at the flowing temperature less "
+               f"{wct.CT_T_FRAC:g} x (flowing - formation temperature) - PROSPER Tutorial 25.")
+    m = wgls.METHODS[0] if method == wct.METHODS[0] else wgls.METHODS[1]
+    setup = wgls.GasLiftSetup(method=m, gas=gas, rate_mode=rate_mode, qgi=qgi, glr_inj=glr, p_casing=pc, dp_valve=dp,
+                              max_md=depth, fixed_md=depth, coiled=ct)
     ss["gl_setup"] = setup
     return setup
 
@@ -3386,9 +4391,32 @@ with tabs[3]:
         esp_equipment_panel(top_md, secs)
     else:
         ss.pop("esp_equipment", None)
+    if o is not None and getattr(o, "artificial_lift", "none") == "srp":
+        st.divider()
+        srp_equipment_panel(top_md, secs)
+    else:
+        ss.pop("srp_equipment", None)
+    if o is not None and getattr(o, "artificial_lift", "none") == "jet":
+        st.divider()
+        jet_equipment_panel(top_md, secs)
+    else:
+        ss.pop("jet_equipment", None)
+    if o is not None and getattr(o, "artificial_lift", "none") in ("pcp_motor", "pcp_rod"):
+        st.divider()
+        pcp_equipment_panel(o, top_md, secs)
+    else:
+        ss.pop("pcp_equipment", None)
+    if o is not None and getattr(o, "artificial_lift", "none") == "hsp":
+        st.divider()
+        hsp_equipment_panel(top_md, secs)
+    else:
+        ss.pop("hsp_equipment", None)
     if o is not None and getattr(o, "artificial_lift", "none") == "gas_lift":
         st.divider()
         gaslift_data_panel(o, top_md, secs)
+    elif o is not None and getattr(o, "artificial_lift", "none") == "ct_gas_lift":
+        st.divider()
+        coiled_data_panel(o, top_md, secs)
     else:
         ss.pop("gl_setup", None)
     ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": ed_s, "t_surround": t_sur,
@@ -3457,11 +4485,23 @@ def rebuild_ipr(changes):
     changes = dict(changes)
     if "wc" in changes and "wc" not in inspect.signature(fn).parameters:
         changes.pop("wc")                          # models without a water-cut input ignore it
+    gor_new = changes.pop("gor", None)
+    params0 = inspect.signature(fn).parameters
+    if gor_new is not None and "mu" in params0 and "bo" in params0 and ss.get("ipr_pvt_ctx") is not None:
+        # PROSPER re-evaluates a Darcy-type PI with the oil at the calculation's GOR (and its bubble point)
+        o_, t_ = ss["ipr_pvt_ctx"]
+        pv0, _ = oil_pvt_at(o_, 1000.0, t_)
+        if pv0 is not None and abs(float(gor_new) - float(pv0.get("gor", gor_new))) > 1e-6:
+            changes["_gor"] = float(gor_new)
     if not changes:
         if ss.get("ipr_curve") is not None:
             return ss["ipr_curve"]
         c = fn(*b.args, **b.kwargs)
         return wcomp.apply_sand_control(c, ss["ipr_sc_dp"]) if ss.get("ipr_sc_dp") is not None else c
+    gor_eval = changes.pop("_gor", None)
+    if not changes and gor_eval is None:
+        if ss.get("ipr_curve") is not None:
+            return ss["ipr_curve"]
     for key, v in changes.items():
         if key not in inspect.signature(fn).parameters:
             raise ValueError(f"The {ss.get('ipr_meta', {}).get('model', 'current')} IPR has no '{key}' input.")
@@ -3469,11 +4509,15 @@ def rebuild_ipr(changes):
     # A new reservoir pressure changes the oil viscosity and FVF the Darcy-type PI is evaluated with (PROSPER
     # recalculates them at the reservoir pressure).
     params = inspect.signature(fn).parameters
-    if "pr" in changes and "mu" in params and "bo" in params and ss.get("ipr_pvt_ctx") is not None:
+    if ("pr" in changes or gor_eval is not None) and "mu" in params and "bo" in params \
+            and ss.get("ipr_pvt_ctx") is not None:
         o_, t_ = ss["ipr_pvt_ctx"]
-        pv_, _ = oil_pvt_at(o_, float(changes["pr"]), t_)
+        b.apply_defaults()
+        pv_, _ = oil_pvt_at(o_, float(b.arguments["pr"]), t_, gor_eval)
         if pv_ is not None:
             b.arguments["mu"], b.arguments["bo"] = pv_["mu"], pv_["bo"]
+            if gor_eval is not None and "pb" in params:
+                b.arguments["pb"] = float(pv_["pb"])
     c = fn(*b.args, **b.kwargs)
     if ss.get("ipr_sc_dp") is not None:
         c = wcomp.apply_sand_control(c, ss["ipr_sc_dp"])
@@ -4687,13 +5731,56 @@ def esp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, surface, esp):
     return det, reg, prof
 
 
+def jet_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, jet):
+    """Gradient traverse of a jet pump well at one liquid rate (as PROSPER's): tubing from the top node to the pump
+    discharge with production + power fluid, the pump (intake from the discharge, Ps = Pd (1 + H) - H Pn), casing
+    from the intake down to the bottom node."""
+    md_p = jet["pump_md"]
+    above, below = wesp.sub_path(path, path.md[0], md_p), wesp.sub_path(path, md_p, path.md[-1])
+    wc, gor = base["wc"] / 100.0, float(base["gor"])
+    case = {"q": np.array([q]), "wc": np.array([wc]), "gor": np.array([gor])}
+    w, cp = fluid.mass_cp(case, hc)
+    t_in = float(wvlp.temperature_profile(below, np.asarray(w, float), cp, float(base["u"]))[0, 0])
+    qt = q + jet["q_pf"]
+    wct = (q * wc + jet["q_pf"]) / qt
+    fl_mix = wjet._blend_fluid(fluid, q, wc, jet["q_pf"], jet["sal"])
+    det, reg, prof = wsys.solution_details(above, fl_mix, kind, {**base, "wc": 100 * wct}, qt, corr, p1, p2, hc,
+                                           None, comp=comp_current(), t_bottom=t_in)
+    pdis = float(prof["Pressure (psia)"].iloc[-1])
+    t_tub = np.interp(above.md, prof["MD (ft)"].to_numpy(), prof["Temperature (°F)"].to_numpy())
+    pump = wjet.JetPumpInstalled(md_p, jet["an"], jet["at"], jet["q_pf"], jet["p_surf"], jet["losses"],
+                                 wjet.PowerFluid(jet["sal"]), jet["casing_id"], jet["tubing_od"], jet["name"])
+    pu = wjet.intake_from_discharge(path, fluid, q, wc, gor, pdis, t_tub, t_in, pump, hc)
+    pip = pu["pip"]
+    det_b, _, prof_b = wsys.solution_details(below, fluid, kind, {**base, "whp": pip}, q, corr, p1, p2, hc, None,
+                                             comp=comp_current())
+    z_p = float(np.interp(md_p, path.md, path.tvd))
+    pump_row = pd.DataFrame([{"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pdis, "Temperature (°F)": t_in,
+                              "Section": "Pump discharge"},
+                             {"MD (ft)": md_p, "TVD (ft)": z_p, "Pressure (psia)": pip, "Temperature (°F)": t_in,
+                              "Section": "Pump intake"}])
+    prof = pd.concat([prof.assign(Section="Tubing"), pump_row, prof_b.assign(Section="Casing")], ignore_index=True)
+    det = dict(det)
+    det["Bottom node pressure (psia)"] = float(prof_b["Pressure (psia)"].iloc[-1])
+    det["dP gravity - production string (psi)"] += det_b["dP gravity - production string (psi)"]
+    det["dP friction - production string (psi)"] += det_b["dP friction - production string (psi)"]
+    det["Pump discharge pressure (psia)"], det["Pump intake pressure (psia)"] = pdis, pip
+    det["Pump dP (psi)"] = pdis - pip
+    det["Pump intake temperature (°F)"] = t_in
+    det["Nozzle injection pressure (psia)"] = pu["pn"]
+    det["Power fluid static (psi)"], det["Power fluid friction (psi)"] = pu["static"], -pu["friction"]
+    det["Flow ratio M"], det["Head ratio H"] = pu["M"], pu["H"]
+    return det, reg, prof
+
+
 def gl_lift_for(eqd, o, gl, extra=()):
     """Flow path with the gas lift depths as nodes, and the lift setup with its annulus."""
     path = vlp_path(eqd, o.flow_type, tuple(gl.extra_md()) + tuple(extra))
     return path, dataclasses.replace(gl, annulus=wgls.annulus_geometry(path, eqd["downhole"][1]))
 
 
-def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl=None):
+def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl=None, jet=None, pcp=None,
+                  hsp=None):
     """Gradient traverse: pressure, temperature, holdup and velocities along the well at chosen rates."""
     hc = eqd["heat_capacities"]
     with col:
@@ -4715,13 +5802,38 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
             st.caption(f"With the ESP from the Equipment tab: {esp['pump'].name}, {esp['stages']} stages at "
                        f"{esp['freq']:g} Hz, set at {esp['pump_md']:,.0f} ft MD. Above the pump the flow is in the "
                        "tubing, below it in the casing; the pressure steps up across the pump.")
+        if jet:
+            st.caption(f"With the jet pump from the Equipment tab: {jet['name']} at {jet['pump_md']:,.0f} ft MD, "
+                       f"{jet['q_pf']:,.0f} STB/d of power fluid at {jet['p_surf']:,.1f} psia. Above the pump the "
+                       "tubing carries production + power fluid, below it the casing carries production; the pressure "
+                       "steps up across the pump.")
+            if surface is not None:
+                st.caption("Surface equipment is not used with the jet pump: the traverse starts at the wellhead.")
+        if pcp:
+            st.caption(f"With the PCP from the Equipment tab: {pcp['pump']} at {pcp['speed']:,.1f} rpm, set at "
+                       f"{pcp['pump_md']:,.0f} ft MD. Above the pump the flow is in the "
+                       + ("rod-tubing annulus" if pcp["drive"] == "Sucker rod" else "tubing") + ", below it in the "
+                       "casing; the pressure steps up across the pump by the head at which it passes the rate.")
+            if surface is not None:
+                st.caption("Surface equipment is not used with the PCP: the traverse starts at the wellhead.")
+        if hsp:
+            st.caption(f"With the HSP from the Equipment tab: {hsp['pump']} ({hsp['stages']} stages) and "
+                       f"{hsp['turbine']} ({hsp['turbine_stages']} stages) at {hsp['speed']:,.0f} rpm, set at "
+                       f"{hsp['pump_md']:,.0f} ft MD. At each rate the power fluid is the rate whose turbine power "
+                       "equals the pump power; above the pump the tubing carries production + power fluid.")
+            if surface is not None:
+                st.caption("Surface equipment is not used with the HSP: the traverse starts at the wellhead.")
         go = st.button("Calculate traverse", type="primary", disabled=not rates)
     sig = (kind, tuple(sorted(base.items())), corr, p1, p2, tuple(rates), repr(surface), o.flow_type,
+           None if not jet else tuple(sorted((k_, repr(v_)) for k_, v_ in jet.items())),
            None if not esp else (esp["pump_md"], esp["freq"], esp["stages"], esp["pump"].name, esp["sep"],
-                                 esp["wear"], esp.get("chp")), repr(gl))
+                                 esp["wear"], esp.get("chp")), repr(gl),
+           None if not pcp else tuple(sorted((k_, repr(v_)) for k_, v_ in pcp.items())),
+           None if not hsp else tuple(sorted((k_, repr(v_)) for k_, v_ in hsp.items())))
     if go:
         try:
-            path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ())
+            path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ((jet["pump_md"],) if jet else (
+                (pcp["pump_md"],) if pcp else ((hsp["pump_md"],) if hsp else ()))))
             if gl is not None:
                 path, gl_ = gl_lift_for(eqd, o, gl)
             out = []
@@ -4734,6 +5846,12 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
                         reg = {}
                     elif esp:
                         det, reg, prof = esp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, surface, esp)
+                    elif jet:
+                        det, reg, prof = jet_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, jet)
+                    elif pcp:
+                        det, reg, prof = pcp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, pcp)
+                    elif hsp:
+                        det, reg, prof = hsp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, hsp)
                     else:
                         det, reg, prof = wsys.solution_details(path, fluid, kind, base, q, corr, p1, p2, hc, surface,
                                                               comp=comp_current())
@@ -4764,7 +5882,10 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
                    "Tubing pressure at injection (psia)", "Casing pressure at injection (psia)", "Multipoint flag",
                    "Pump discharge pressure (psia)", "Pump intake pressure (psia)", "Pump dP (psi)",
                    "Pump intake temperature (°F)", "Pump discharge temperature (°F)",
-                   "Liquid level in annulus (ft TVD)"):
+                   "Liquid level in annulus (ft TVD)", "Nozzle injection pressure (psia)", "Power fluid static (psi)",
+                   "Power fluid friction (psi)", "Flow ratio M", "Head ratio H", "PCP head (ft)",
+                   "PCP average rate (RB/d)", "HSP power fluid rate (STB/d)", "HSP pump power (hp)",
+                   "Power fluid injection pressure (psia)", "Delta P across turbine (psi)"):
             if k_ in det:
                 r[k_] = det[k_]
         rows.append(r)
@@ -4793,7 +5914,8 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
         z_p = float(res[0][3].loc[res[0][3]["Section"] == "Pump intake", "TVD (ft)"].iloc[0])
         for a_ in ax:
             a_.axhline(z_p, color=wplt.INK2, lw=0.8, ls="-.")
-        ax[0].text(ax[0].get_xlim()[0], z_p, " ESP", va="bottom", fontsize=8, color=wplt.INK2)
+        ax[0].text(ax[0].get_xlim()[0], z_p, " Jet pump" if jet else (" PCP" if pcp else (" HSP" if hsp else " ESP")), va="bottom", fontsize=8,
+                   color=wplt.INK2)
     for a_, t_ in zip(ax, ("Pressure (psia)" + (" (dashed: casing)" if gl is not None else ""), "Temperature (°F)",
                            "Liquid holdup (dotted: no-slip)",
                            "Mixture velocity (dashed: erosional), ft/s")):
@@ -4978,7 +6100,8 @@ def _default_list(vals):
     return ", ".join(f"{v:.4g}" for v in vals)
 
 
-def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl=None):
+def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl=None, jet=None, pcp=None, hsp=None,
+             srp=None):
     """Lift-curve tables for reservoir simulation: BHP over rate x THP x WFR x GFR."""
     hc = eqd["heat_capacities"]
     ax_ = wlc.AXES[kind]
@@ -5035,6 +6158,35 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
                                _default_list(sorted({0.0, g0 * 0.5, g0, g0 * 2})),
                                "comma separated; exported as GRAT (Mscf/d)")
             alq = sorted({v for v in alq if v >= 0})
+        jet_alq = "p_surf"
+        if jet:
+            ja = sel(st, "Jet pump ALQ axis", ["Power fluid injection pressure", "Power fluid injection rate"],
+                     "vfp_jet_axis")
+            jet_alq = "p_surf" if ja.endswith("pressure") else "q_pf"
+            v0 = float(jet[jet_alq])
+            alq = num_list(st, ("Injection pressures (psia)" if jet_alq == "p_surf" else
+                                "Power fluid rates (STB/d)") + " - the ALQ axis", f"vfp_alq_jet_{jet_alq}",
+                           _default_list(sorted({round(v0 * 0.75), round(v0), round(v0 * 1.25)})),
+                           "comma separated; one value = no ALQ axis")
+            alq = sorted({v for v in alq if v > 0})
+        if pcp:
+            n0 = float(pcp["speed"])
+            alq = num_list(st, "Pump speeds (rpm) - the ALQ axis", "vfp_alq_pcp",
+                           _default_list(sorted({round(n0 * 0.75, 1), round(n0, 3), round(n0 * 1.25, 1)})),
+                           "comma separated; one value = no ALQ axis")
+            alq = sorted({v for v in alq if v > 0})
+        if srp:
+            n0 = float(srp["n_spm"])
+            alq = num_list(st, "Pumping speeds (strokes/min) - the ALQ axis", "vfp_alq_srp",
+                           _default_list(sorted({round(n0 * 0.75, 2), round(n0, 4), round(n0 * 1.25, 2)})),
+                           "comma separated; one value = no ALQ axis")
+            alq = sorted({v for v in alq if v > 0})
+        if hsp:
+            n0 = float(hsp["speed"])
+            alq = num_list(st, "Pump speeds (rpm) - the ALQ axis", "vfp_alq_hsp",
+                           _default_list(sorted({round(n0 * 0.9), round(n0), round(n0 * 1.1)})),
+                           "comma separated; one value = no ALQ axis")
+            alq = sorted({v for v in alq if v > 0})
         c2 = st.columns([1, 2])
         tno = int(num(c2[0], "Table number", "vfp_tno", 1.0, 1.0, 9999.0, 1.0, "%.0f"))
         wfr = [v for v in wfr if v >= 0]
@@ -5043,7 +6195,7 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
         n_alq = max(len(alq), 1)
         npts = len(flo) * len(set(thp)) * len(set(wfr)) * len(set(gfr)) * n_alq
         c2[1].caption(f"{npts:,} points ({len(flo)} rates x {len(set(thp))} pressures x {len(set(wfr))} x "
-                      f"{len(set(gfr))}" + (f" x {n_alq} " + ("ALQ values" if gl is not None else "frequencies")
+                      f"{len(set(gfr))}" + (f" x {n_alq} " + ("ALQ values" if (gl is not None or jet or pcp or hsp or srp) else "frequencies")
                                             if len(alq) > 1 else "") + ").")
         if kind == "oil" and any(v >= 100 for v in wfr):
             st.error("Water cut must be below 100 %.")
@@ -5053,14 +6205,67 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
                        f"{esp['pump_md']:,.0f} ft MD). With more than one frequency, frequency is the ALQ axis of the "
                        "VFPPROD table (set it in the simulator through the well's ALQ). Points where the pump would "
                        "draw the intake below atmospheric (rate too low for the pump) are left blank.")
+        if jet:
+            st.caption(f"Tables include the jet pump from the Equipment tab ({jet['name']}, {jet['pump_md']:,.0f} ft "
+                       "MD): tubing to the pump discharge with production + power fluid, the intake from the pump, "
+                       "casing to the bottom node. With more than one value, the injection pressure or rate is the "
+                       "ALQ axis of the VFPPROD table. Points the pump cannot deliver are left blank.")
+        if pcp:
+            st.caption(f"Tables include the PCP from the Equipment tab ({pcp['pump']}, {pcp['pump_md']:,.0f} ft MD): "
+                       "tubing to the pump discharge, the intake from the head at which the pump passes the rate at its "
+                       "speed, casing to the bottom node. With more than one speed, the speed (rpm) is the ALQ axis of "
+                       "the VFPPROD table. Points the pump cannot pass at that speed are left blank.")
+        if srp:
+            st.caption(f"Tables include the rod pump from the Equipment tab ({srp['plunger']:g} in pump at "
+                       f"{srp['pump_md']:,.0f} ft MD, {srp['stroke']:g} in stroke): as PROSPER's rod pump lift "
+                       "curves, the rate the pump delivers against the bottom-hole pressure (displacement x volumetric "
+                       "efficiency x liquid fraction at the intake, the downhole stroke from the fluid load), inverted "
+                       "to bottom-hole pressure against rate for the VFP table. With more than one speed, the pumping "
+                       "speed is the ALQ axis. Rates beyond what the pump delivers are left blank.")
+        if hsp:
+            st.caption(f"Tables include the HSP from the Equipment tab ({hsp['pump']}, {int(hsp['stages'])} stages; "
+                       f"{hsp['turbine']}, {int(hsp['turbine_stages'])} stages; {hsp['pump_md']:,.0f} ft MD): at "
+                       "every point the power fluid is the rate whose turbine gives the pump power (PROSPER's HSP "
+                       "traverse). With more than one speed, the pump speed (rpm) is the ALQ axis of the VFPPROD "
+                       "table. Points outside the pump's speed range, or that the pump or turbine cannot deliver, are "
+                       "left blank. About 1-2 s per point.")
         go = st.button("Generate lift curves", type="primary", disabled=not (flo and thp and wfr and gfr))
     sig = (kind, corr, p1, p2, tuple(flo), tuple(thp), tuple(wfr), tuple(gfr), repr(surface), o.flow_type, base["u"],
            tno, None if not esp else (esp["pump_md"], esp["freq"], esp["stages"], esp["pump"].name, esp["sep"],
-                                      esp["wear"], esp["motor"].name, tuple(alq)), repr(gl), tuple(alq))
+                                      esp["wear"], esp["motor"].name, tuple(alq)), repr(gl), tuple(alq),
+           None if not jet else (tuple(sorted((k_, repr(v_)) for k_, v_ in jet.items())), jet_alq),
+           None if not pcp else tuple(sorted((k_, repr(v_)) for k_, v_ in pcp.items())),
+           None if not hsp else tuple(sorted((k_, repr(v_)) for k_, v_ in hsp.items())),
+           None if not srp else tuple(sorted((k_, repr(v_)) for k_, v_ in srp.items())))
     if go:
         try:
-            path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ())
+            path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ((jet["pump_md"],) if jet else (
+                (pcp["pump_md"],) if pcp else ((hsp["pump_md"],) if hsp else (
+                    (srp["pump_md"],) if srp else ())))))
+            hsp_ = _hsp_installed(hsp) if hsp else None
+            srp_ = None
+            ipr_s = ss.get("ipr_curve")
+            corr_v, p1_v, p2_v = corr, p1, p2
+            if srp:
+                pl_ = min(wsrp.PLUNGERS, key=lambda x: abs(x - srp["plunger"]))
+                srp_ = wsrp.SRPSystemInput(rod_no=int(srp["rod_no"]), plunger=pl_, stroke=srp["stroke"],
+                                           n_spm=alq[0] if len(alq) == 1 else srp["n_spm"], ev=srp["ev"] / 100.0,
+                                           pump_md=srp["pump_md"], anchor_method=srp["anchor_method"],
+                                           anchor_eff=srp["anchor_eff"], anchor_type=srp["anchor_type"],
+                                           anchor_area=srp["anchor_area"])
+                if srp["no_slip"]:
+                    corr_v, p1_v, p2_v = "no_slip", 1.0, 1.0
             gl_ = None
+            jet_ = None
+            pcp_ = None
+            if pcp:
+                pcp_ = _pcp_installed(pcp, alq[0] if len(alq) == 1 else None)
+            if jet:
+                jet_ = wjet.JetPumpInstalled(jet["pump_md"], jet["an"], jet["at"], jet["q_pf"], jet["p_surf"],
+                                             jet["losses"], wjet.PowerFluid(jet["sal"]), jet["casing_id"],
+                                             jet["tubing_od"], jet["name"])
+                if len(alq) == 1:
+                    jet_ = dataclasses.replace(jet_, **{jet_alq: alq[0]})
             if gl is not None:
                 path, gl_ = gl_lift_for(eqd, o, gl)
                 if len(alq) == 1:
@@ -5068,11 +6273,16 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
                                                       {"qgi": alq[0], "rate_mode": wgls.RATE_MODES[0]}))
             with st.spinner(f"Calculating {npts:,} traverses..."):
                 esp_ = {**esp, "freq": alq[0]} if esp and len(alq) == 1 else esp
-                axes, bhp, wh = wlc.vfp_table(path, fluid, kind, corr, p1, p2, float(base["u"]), flo, thp, wfr, gfr,
-                                              hc, surface, esp_, alq if (esp or gl) and len(alq) > 1 else None,
-                                              lift=gl_)
+                axes, bhp, wh = wlc.vfp_table(path, fluid, kind, corr_v, p1_v, p2_v, float(base["u"]), flo, thp, wfr,
+                                              gfr, hc, surface, esp_, alq if (esp or gl or jet or pcp or hsp or srp)
+                                              and len(alq) > 1 else None, lift=gl_, jet=jet_, jet_alq=jet_alq, pcp=pcp_,
+                                              srp=srp_, srp_p_max=(float(ipr_s.pr) * 1.1 if srp and ipr_s is not None
+                                                                   else None),
+                                              hsp=None if not hsp else (dataclasses.replace(hsp_, speed=alq[0])
+                                                                        if len(alq) == 1 else hsp_))
             ss["vfp_res"] = {"sig": sig, "axes": axes, "bhp": bhp, "wh": wh if surface is not None else None,
-                             "alq_kind": "esp" if gl is None else ("multipoint" if gl.multipoint else "gas_lift"),
+                             "alq_kind": ("srp_speed" if srp else "hsp_speed" if hsp else "pcp_speed" if pcp else f"jet_{jet_alq}" if jet else
+                                          "esp" if gl is None else ("multipoint" if gl.multipoint else "gas_lift")),
                              "datum": float(path.tvd[-1]), "md": float(path.md[-1]), "tno": tno,
                              "label": f"{VLP_LABELS[corr]} P1 {p1:.4f} P2 {p2:.4f}"}
         except (ValueError, KeyError, TypeError) as e:
@@ -5088,8 +6298,10 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
                 f"{vr['label']}")
     alq_kind = vr.get("alq_kind", "esp")
     alq_lab = {"esp": "ESP frequency (Hz)", "gas_lift": "Lift gas rate (MMscf/d)",
-               "multipoint": "Casing head pressure (psia)"}[alq_kind]
-    for w_ in wlc.vfp_checks(axes, bhp, esp=bool(esp)):
+               "multipoint": "Casing head pressure (psia)", "jet_p_surf": "Jet pump injection pressure (psia)",
+               "jet_q_pf": "Jet pump power fluid rate (STB/d)", "pcp_speed": "PCP speed (rpm)",
+               "hsp_speed": "HSP pump speed (rpm)", "srp_speed": "Rod pump speed (strokes/min)"}[alq_kind]
+    for w_ in wlc.vfp_checks(axes, bhp, esp=bool(esp) or bool(jet) or bool(pcp) or bool(hsp) or bool(srp)):
         st.warning(w_)
     c = st.columns(3 if alq_a is not None else 2)
     jw = c[0].selectbox(f"{ax_['wfr'][0]} ({ax_['wfr'][1]})", range(len(wfr_a)), format_func=lambda i: f"{wfr_a[i]:g}",
@@ -5127,12 +6339,391 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
                    "(Mscf/STB)" if kind == "oil" else "FLO = gas rate (Mscf/d), WFR = WGR (STB/Mscf), GFR = OGR "
                    "(STB/Mscf)") + "; THP and BHP in psia; datum = bottom node TVD; " +
                    ({"esp": "ALQ = ESP frequency (Hz).", "gas_lift": "ALQ = GRAT, lift gas rate (Mscf/d).",
-                     "multipoint": "ALQ = casing head pressure (psia); set the ALQ type in the simulator."}[alq_kind]
+                     "multipoint": "ALQ = casing head pressure (psia); set the ALQ type in the simulator.",
+      "jet_p_surf": "ALQ = jet pump power fluid injection pressure (psia); set the ALQ type in the simulator.",
+      "jet_q_pf": "ALQ = jet pump power fluid rate (STB/d); set the ALQ type in the simulator.",
+      "pcp_speed": "ALQ = PCP speed (rpm); set the ALQ type in the simulator.",
+      "hsp_speed": "ALQ = HSP pump speed (rpm); set the ALQ type in the simulator.",
+      "srp_speed": "ALQ = rod pump speed (strokes/min); set the ALQ type in the simulator."}[alq_kind]
                     if alq_a is not None else "no artificial lift ALQ axis (ALQ 0).") +
                    (" THP is the manifold pressure (surface equipment included)." if vr["wh"] is not None else ""))
         with st.expander("Preview VFPPROD"):
             st.code("\n".join(ecl.splitlines()[:40]) + ("\n..." if len(ecl.splitlines()) > 40 else ""),
                     language=None)
+
+# ================================================================ sucker rod pump design
+def srp_cards_plot(res):
+    cd = res.card
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    ax.plot(np.r_[cd["Surface position (in)"], cd["Surface position (in)"].iloc[0]],
+            np.r_[cd["Surface load (lbf)"], cd["Surface load (lbf)"].iloc[0]], color=wplt.SERIES[0], lw=1.6,
+            label="Surface (polished rod) card")
+    ax.plot(np.r_[cd["Pump position (in)"], cd["Pump position (in)"].iloc[0]],
+            np.r_[cd["Pump load (lbf)"], cd["Pump load (lbf)"].iloc[0]], color=wplt.SERIES[1], lw=1.6,
+            label="Downhole (pump) card")
+    for y, lab in ((res.wrf, "Wrf"), (res.wrf + res.fo, "Wrf + Fo")):
+        ax.axhline(y, color=wplt.INK2, ls=":", lw=0.9)
+        ax.text(0.5, y, f" {lab}", fontsize=7, va="bottom", color=wplt.INK2)
+    ax.set_xlabel("Position (in)")
+    ax.set_ylabel("Load (lbf)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=7.5)
+    ax.set_title(f"{res.rods.name}, {res.n_spm:.4g} strokes/min, {res.inp.stroke:.4g} in stroke", fontsize=9.5)
+    fig.tight_layout()
+    return fig
+
+
+def srp_torque_plot(res):
+    cd = res.card.sort_values("Crank angle (deg)")
+    fig, ax = plt.subplots(figsize=(7.8, 4.2))
+    ax.plot(cd["Crank angle (deg)"], cd["Torque (lb-in)"] / 1000, color=wplt.SERIES[0], lw=1.6, label="Net torque")
+    ax.axhline(res.kin.unit.gear / 1000, color="#d62728", ls="--", lw=1.0, label="Gear reducer rating")
+    ax.axhline(0, color=wplt.INK2, lw=0.6)
+    ax.set_xlim(0, 360)
+    ax.set_xlabel("Crank angle from 12 o'clock (deg)")
+    ax.set_ylabel("Torque (1000 lb-in)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=7.5)
+    fig.tight_layout()
+    return fig
+
+
+def srp_tab(o, eqd, ipr_curve):
+    """Design | Sucker Rod Pump - after PROSPER (Tutorial 28)."""
+    st.caption("Sucker rod pump design after PROSPER Design | Sucker Rod Pump: the rod string (API RP 11L Table 4.1) "
+               "and the pumping unit (Lufkin conventional geometry) drive a damped wave equation for the rods with "
+               "an ideal full pump at the bottom (anchored tubing). Surface and pump dynamometer cards, loads, "
+               "stresses (modified Goodman), counterbalance, torque and powers follow. The damping factor is "
+               "estimated as PROSPER does (rod friction power one eighth of the rod weight times the mean rod speed, Gibbs' damping) "
+               "or entered.")
+    top_, secs_, pts_ = eqd["downhole"]
+    path = vlp_path(eqd, "tubing", ())
+    tvd_at = lambda md: float(np.interp(md, path.md, path.tvd))
+    bottom = float(secs_["MD bottom (ft)"].max())
+    pinp, _ = current_inputs()
+    g = 14.696
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Input data**")
+        units = list(wsrp.UNITS)
+        unit = sel(st, "Pumping unit", units, "srp_unit", "LUFKIN C-320D-305-100" if "LUFKIN C-320D-305-100" in units
+                   else units[0])
+        c = st.columns(2)
+        plunger = sel(c[0], "Pump (plunger) diameter (in)", list(wsrp.PLUNGERS), "srp_plunger", 2.0,
+                      format_func=lambda x: f"{x:.2f}")
+        rods = wsrp.rod_numbers(plunger)
+        rod_no = sel(c[1], "Rod string (API RP 11L)", rods, "srp_rod", 99 if 99 in rods else rods[-1],
+                     format_func=lambda n: wsrp.rod_string(n, plunger).name)
+        c = st.columns(2)
+        grade = sel(c[0], "Rod grade", list(wsrp.TENSILE), "srp_grade", "D")
+        service = sel(c[1], "Service", list(wsrp.SERVICE), "srp_service", "Non-corrosive")
+        mode = sel(st, "Calculation", list(wsrp.CALC_MODES), "srp_mode", wsrp.CALC_MODES[0])
+        c = st.columns(2)
+        q_t = num(c[0], "Target production rate (STB/d)", "srp_q", 400.0, 1.0, 1e5,
+                  help="The rate the stroke rate is estimated for, and (both modes, as PROSPER) the rate at which the "
+                       "intake pressure is taken from the IPR.")
+        if mode == wsrp.CALC_MODES[0]:
+            n_spm = 20.0
+        else:
+            n_spm = num(c[1], "Stroke rate (strokes/min)", "srp_n", 20.0, 1.0, 40.0, None, "%.5g")
+        c = st.columns(2)
+        stroke = num(c[0], "Surface stroke length (in)", "srp_s", 48.0, 10.0, 400.0, None, "%.5g")
+        c = st.columns(2)
+        pump_md = num(c[0], "Pump depth (ft MD)", "srp_md", float(round(bottom)), 100.0, bottom)
+        whp = num(c[1], "Wellhead pressure (psia)", "srp_whp", float(val("sys_whp", 114.7)), 14.7, 5000.0)
+        c = st.columns(2)
+        wc = num(c[0], "Water cut (%)", "srp_wc", float(val("sys_wc", 0.0)), 0.0, 100.0)
+        ev = num(c[1], "Pump volumetric efficiency (%)", "srp_ev", 80.0, 1.0, 100.0)
+        pip_m = sel(st, "Pump intake pressure", list(wsrp.INTAKE_METHODS[:2]), "srp_pipm", wsrp.INTAKE_METHODS[1])
+        c = st.columns(2)
+        pip = num(c[0], "Pump intake pressure (psia)", "srp_pip", 666.1, 14.7, 2e4,
+                  disabled=pip_m != wsrp.INTAKE_METHODS[0])
+        nu_est = flag(c[1].checkbox, "Estimate damping factor", "srp_nu_est", True)
+        nu = num(c[1], "Damping factor", "srp_nu", 0.18, 0.01, 2.0, None, "%.4g", disabled=nu_est,
+                 help="Dimensionless rod damping, c = nu pi a / (2 L). Typical 0.05 - 0.3.")
+        if nu_est:
+            nu = None
+        c = st.columns(2)
+        go = c[0].button("Calculate", type="primary", key="srp_go")
+        go_s = c[1].button("Rod sensitivity", key="srp_go_s", help="Repeat the design for every rod string "
+                           "of the plunger size (takes a while for deep wells).")
+    inp = wsrp.SRPInput(unit=unit, rod_no=int(rod_no), plunger=float(plunger), grade=grade, service=service,
+                        mode=mode, q_target=q_t, n_spm=n_spm, stroke=stroke, pump_md=pump_md,
+                        pump_tvd=tvd_at(pump_md), pip=pip, whp=whp, wc=wc / 100.0, api=pinp.api,
+                        sg_water=wsrp.water_sg(pinp.salinity_ppm), ev=ev / 100.0, nu=nu)
+    pwf_fn = None
+    if pip_m == wsrp.INTAKE_METHODS[1]:
+        order = np.argsort(ipr_curve.q)
+        qa, pa = np.asarray(ipr_curve.q)[order], np.asarray(ipr_curve.pwf)[order]
+        pwf_fn = lambda q: float(np.interp(q, qa, pa))
+    if go or go_s:
+        try:
+            with st.spinner("Solving the rod string wave equation ..."):
+                res = wsrp.design(inp, pwf_fn, tvd_at(bottom))
+                sens = wsrp.rod_sensitivity(dataclasses.replace(inp, pip=res.inp.pip)) if go_s else None
+            ss["srp_result"] = (res, sens)
+        except (ValueError, KeyError) as e:
+            st.error(str(e))
+    with right:
+        out = ss.get("srp_result")
+        if not out:
+            st.info("Set the inputs and press Calculate.")
+            return
+        res, sens = out
+        u = res.kin.unit
+        m = st.columns(4)
+        m[0].metric("Production (STB/d)", f"{res.q:,.1f}")
+        m[1].metric("Stroke rate (spm)", f"{res.n_spm:.4g}")
+        m[2].metric("PPRL / MPRL (lbf)", f"{res.pprl:,.0f} / {res.mprl:,.0f}")
+        m[3].metric("Max torque (1000 lb-in)", f"{res.torque_max / 1000:,.0f}")
+        warn = []
+        if res.torque_max > u.gear:
+            warn.append(f"peak torque {res.torque_max:,.0f} lb-in exceeds the gear reducer rating {u.gear:,.0f}")
+        if res.pprl > u.prl:
+            warn.append(f"peak load {res.pprl:,.0f} lbf exceeds the structure rating {u.prl:,.0f}")
+        if res.goodman_pct > 100:
+            warn.append(f"top rod at {res.goodman_pct:.0f} % of the Goodman diagram")
+        if res.inp.stroke > u.max_stroke:
+            warn.append(f"stroke {res.inp.stroke:g} in exceeds the unit's maximum {u.max_stroke:g} in")
+        for w_ in warn:
+            st.warning("Overload: " + w_ + ".")
+        t1, t2, t3, t4 = st.tabs(["Dynamometer cards", "Torque", "Results", "Rod sensitivity"])
+        with t1:
+            st.pyplot(srp_cards_plot(res))
+        with t2:
+            st.pyplot(srp_torque_plot(res))
+            st.caption("Net torque = TF (PRL - SU) - CBE TF(90) sin(theta), with the structural unbalance taken as "
+                       "zero (fits PROSPER's torque curve better than the catalogue value) and the counterbalance "
+                       "set to CBE.")
+        with t3:
+            summ = res.summary()
+            summ = {"Pump intake pressure (psia)": res.inp.pip, **summ}
+            st.dataframe(pd.DataFrame({"Value": summ}).style.format("{:,.6g}"), use_container_width=True)
+            st.download_button("Download cards (CSV)", res.card.to_csv(index=False), "srp_cards.csv", key="srp_dl")
+        with t4:
+            if sens is None:
+                st.info("Press Rod sensitivity to compare the rod strings.")
+            else:
+                st.dataframe(sens, hide_index=True, use_container_width=True)
+                st.caption("Production per polished rod horsepower is the comparison PROSPER makes; in the target "
+                           "rate mode each rod string gets its own stroke rate.")
+
+
+def srp_system_tab(o, eqd, ipr_curve):
+    """System | Sucker Rod Pumps + system analysis - after PROSPER (solution node at the pump intake)."""
+    st.caption("System analysis of an existing rod pump installation after PROSPER System | Sucker Rod Pumps: for a "
+               "liquid rate, the IPR gives the flowing BHP and the intake pressure; the gas anchor takes its share of "
+               "the gas; the discharge pressure comes from the top node down the tubing; the downhole stroke is "
+               "S + Ep - Fo L / (E A) with Fo = Ap (Pdis - PIP); the pump delivers displacement x Ev x the liquid "
+               "fraction of its intake volume. The solution is where the pump rate equals the inflow rate. (PROSPER "
+               "has no gradient traverse for rod pumps.)")
+    gmd, gt = eqd["geothermal"]
+    top_, secs_, pts_ = eqd["downhole"]
+    tub = secs_[secs_["Type"] == "Tubing"]
+    bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+    fluid, fluid_note = vlp_fluid(o, "oil", max(float(ipr_curve.pr), 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                  float(np.max(gt)) + 10)
+    if fluid is None:
+        st.warning(fluid_note)
+        return
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Sucker rod pump input data**")
+        c = st.columns(2)
+        pump_md = num(c[0], "Pump depth (ft MD)", "srps_md", float(round(bottom_tub)), float(top_) + 50,
+                      float(secs_["MD bottom (ft)"].max()))
+        ev = num(c[1], "Pump volumetric efficiency (%)", "srps_ev", 80.0, 1.0, 100.0)
+        c = st.columns(2)
+        plunger = sel(c[0], "Pump diameter (in)", list(wsrp.PLUNGERS), "srps_plunger", 2.0,
+                      format_func=lambda x: f"{x:.2f}")
+        rods = wsrp.rod_numbers(plunger)
+        rod_no = sel(c[1], "Rod number", rods, "srps_rod", 99 if 99 in rods else rods[-1],
+                     format_func=lambda n: wsrp.rod_string(n, plunger).name)
+        c = st.columns(2)
+        stroke = num(c[0], "Surface stroke length (in)", "srps_s", 48.0, 10.0, 400.0, None, "%.5g")
+        n_spm = num(c[1], "Pumping speed (strokes/min)", "srps_n", 20.0, 1.0, 40.0, None, "%.6g")
+        st.markdown("**Gas anchor**")
+        c = st.columns(2)
+        a_meth = sel(c[0], "Method", ["Calculated", "Entered"], "srps_am", "Calculated")
+        a_type = sel(c[1], "Type", list(wsrp.GAS_ANCHOR_TYPES), "srps_at", "Cup type")
+        c = st.columns(2)
+        a_area = num(c[0], "Annulus area (in2)", "srps_aa", 1.5, 1.0, 1e6, None, "%.4g",
+                     disabled=a_meth != "Calculated")
+        a_eff = num(c[1], "Efficiency (fraction)", "srps_ae", 0.5, 0.0, 1.0, None, "%.4g",
+                    disabled=a_meth != "Entered")
+        if a_meth == "Calculated" and a_type == "Poor boy":
+            st.caption("PROSPER's calculated efficiency for a poor-boy anchor is zero (no gas separated).")
+        st.markdown("**Well conditions**")
+        c = st.columns(2)
+        whp = num(c[0], "Top node pressure (psia)", "srps_whp", float(val("sys_whp", 114.7)), 14.7, 1e4)
+        wc = num(c[1], "Water cut (%)", "srps_wc", float(val("sys_wc", 0.0)), 0.0, 100.0)
+        c = st.columns(2)
+        gor = num(c[0], "Total GOR (scf/STB)", "srps_gor", float(val("sys_gor", 300.0)), 0.0, 1e6)
+        corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+        corr = sel(c[1], "Tubing correlation", corr_opts, "srps_corr",
+                   "no_slip" if "no_slip" in corr_opts else corr_opts[0], format_func=VLP_LABELS.get,
+                   help="No slip reproduces PROSPER's rod pump discharge pressures (six runs, 0.3 %).")
+        ms = ss.get("vlp_matches", {}).get("ms", {})
+        m_fit = ms.get(corr)
+        use_fit = flag(st.toggle, "Use matched parameters", "srps_use_fit", disabled=m_fit is None)
+        p1, p2 = (float(m_fit.p1), float(m_fit.p2)) if (m_fit is not None and use_fit) else (1.0, 1.0)
+        go = st.button("Calculate", type="primary", key="srps_go")
+    if go:
+        cv = ipr_curve
+        if cv.fluid == "oil":
+            try:
+                cv = rebuild_ipr({"wc": wc / 100.0})
+            except ValueError:
+                pass
+        path = vlp_path(eqd, "tubing", (pump_md,))
+        inp = wsrp.SRPSystemInput(rod_no=int(rod_no), plunger=float(plunger), stroke=stroke, n_spm=n_spm,
+                                  ev=ev / 100.0, pump_md=pump_md, anchor_method=a_meth, anchor_eff=a_eff,
+                                  anchor_type=a_type, anchor_area=a_area)
+        try:
+            with st.spinner("Solving pump against inflow ..."):
+                sol, crv = wsrp.system(inp, path, fluid, lambda q: float(wgl.ipr_pwf(cv, q)), wc / 100.0, gor, whp,
+                                       corr, p1, p2, float(val("eq_u", eqd.get("u_geo", 8.0))),
+                                       eqd["heat_capacities"], q_max=float(np.max(cv.q)) * 0.995)
+            ss["srps_result"] = (sol, crv)
+        except ValueError as e:
+            st.error(str(e))
+    with right:
+        out = ss.get("srps_result")
+        if not out:
+            st.info("Enter the installation and press Calculate.")
+            return
+        sol, crv = out
+        if sol is None:
+            st.warning("No solution: the pump rate does not meet the inflow in the rate range (pump too large for "
+                       "the well - it pumps off - or the IPR too weak).")
+            if len(crv):
+                st.dataframe(crv, hide_index=True)
+            return
+        m = st.columns(3)
+        m[0].metric("Liquid rate (STB/d)", f"{sol['Liquid rate (STB/d)']:,.1f}")
+        m[1].metric("Pump intake (psig)", f"{sol['Pump intake pressure (psia)'] - 14.696:,.1f}")
+        m[2].metric("Pump discharge (psig)", f"{sol['Pump discharge pressure (psia)'] - 14.696:,.1f}")
+        st.dataframe(pd.DataFrame({"Value": sol}).style.format("{:,.6g}"), use_container_width=True)
+        if len(crv):
+            fig, ax = plt.subplots(figsize=(7.8, 4.2))
+            ax.plot(crv["q"], crv["q_pump"], color=wplt.SERIES[0], lw=1.6, label="Pump rate at the inflow's intake "
+                                                                                 "pressure")
+            ax.plot(crv["q"], crv["q"], color=wplt.INK2, ls="--", lw=1.0, label="Inflow rate")
+            ax.scatter([sol["Liquid rate (STB/d)"]], [sol["Liquid rate (STB/d)"]], color="#b000b0", zorder=5,
+                       label="Solution")
+            ax.set_xlabel("Inflow liquid rate (STB/d)")
+            ax.set_ylabel("Liquid rate (STB/d)")
+            ax.grid(alpha=0.3, ls="--")
+            ax.legend(fontsize=7.5)
+            fig.tight_layout()
+            st.pyplot(fig)
+
+
+def jet_design_tab(o, eqd, ipr_curve):
+    """Design | Jet Pump - after PROSPER (Tutorial 32): pump duty, area ratios, database pumps, selected pump."""
+    st.caption("Jet pump design after PROSPER Design | Jet Pump (annular injection, tubing production): the pump "
+               "duty at the design rate (intake pressure from the IPR up the casing, discharge pressure from the top "
+               "node down the tubing with production + power fluid, nozzle pressure = surface pressure + power fluid "
+               "column - annulus friction), the flow and head ratios it needs, the area ratios that deliver them "
+               "(Cunningham's equation), and the database pumps that do.")
+    top_, secs_, pts_ = eqd["downhole"]
+    tub = secs_[secs_["Type"] == "Tubing"]
+    bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+    gmd, gt = eqd["geothermal"]
+    fluid, fluid_note = vlp_fluid(o, "oil", max(float(ipr_curve.pr), 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                  float(np.max(gt)) + 10)
+    if fluid is None:
+        st.warning(fluid_note)
+        return
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Input data**")
+        md, q_pf, p_surf, losses, sal, names = _jet_pump_inputs("jpd", None, bottom_tub, top_)
+        c = st.columns(2)
+        q_des = num(c[0], "Design rate (STB/d)", "jpd_q", 4000.0, 1.0, 1e6)
+        max_od = num(c[1], "Maximum OD (in)", "jpd_od", 6.4, 1.0, 20.0, None, "%.3g")
+        c = st.columns(3)
+        wc = num(c[0], "Water cut (%)", "jpd_wc", float(val("sys_wc", 0.0)), 0.0, 100.0)
+        gor = num(c[1], "Total GOR (scf/STB)", "jpd_gor", float(val("sys_gor", 300.0)), 0.0, 1e6)
+        top_p = num(c[2], "Top node pressure (psia)", "jpd_top", float(val("sys_whp", 164.7)), 14.7, 1e4)
+        ms = ss.get("vlp_matches", {}).get("ms", {})
+        sel_c = ss.get("vlp_selected")
+        corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+        corr = sel(st, "Tubing correlation", corr_opts, "jpd_corr", sel_c if sel_c in corr_opts else "pe2_style",
+                   format_func=VLP_LABELS.get)
+        m_fit = ms.get(corr)
+        use_fit = flag(st.toggle, "Use matched parameters", "jpd_use_fit", m_fit is not None,
+                       disabled=m_fit is None)
+        if m_fit is not None and use_fit:
+            p1, p2 = float(m_fit.p1), float(m_fit.p2)
+        else:
+            c2 = st.columns(2)
+            p1 = num(c2[0], "Parameter 1 (gravity)", f"jpd_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
+            p2 = num(c2[1], "Parameter 2 (friction)", f"jpd_p2_{corr}", 1.0, 0.01, 10.0, None, "%.4f")
+        go = st.button("Calculate pump duty", type="primary", key="jpd_go")
+    tod, cid = _jet_section_at(secs_, md)
+    if go:
+        if tod is None:
+            st.error("Enter the tubing outside diameter and the casing inside diameter at the pump (Equipment Data) - "
+                     "the power fluid goes down that annulus.")
+        else:
+            cv = ipr_curve
+            try:
+                cv = rebuild_ipr({"wc": wc / 100.0})
+            except ValueError:
+                pass
+            path = vlp_path(eqd, "tubing", (md,))
+            d = wjet.JetDutyInput(md, q_des, wc / 100.0, gor, top_p, q_pf, p_surf, losses, wjet.PowerFluid(sal),
+                                  cid, tod, max_od)
+            try:
+                with st.spinner("Calculating the pump duty ..."):
+                    du = wjet.duty(path, fluid, float(wgl.ipr_pwf(cv, q_des)), d, corr, p1, p2,
+                                   float(val("eq_u", eqd.get("u_geo", 8.0))), eqd["heat_capacities"])
+                ss["jet_duty"] = du
+            except ValueError as e:
+                st.error(str(e))
+    with right:
+        du = ss.get("jet_duty")
+        if du is None:
+            st.info("Set the design conditions and press Calculate pump duty.")
+            return
+        m = st.columns(4)
+        m[0].metric("Intake (psig)", f"{du.pip - 14.696:,.1f}")
+        m[1].metric("Discharge needed (psig)", f"{du.pdis - 14.696:,.1f}")
+        m[2].metric("Nozzle (psig)", f"{du.pn - 14.696:,.1f}")
+        m[3].metric("M / H needed", f"{du.M:.3f} / {du.H:.3f}")
+        t1, t2, t3 = st.tabs(["Pump duty", "Area ratios", "Select pump"])
+        with t1:
+            st.dataframe(wjet.duty_table(du).style.format("{:,.6g}"), use_container_width=True)
+        with t2:
+            ar = du.area_ratios()
+            st.dataframe(ar.style.format(precision=4), hide_index=True, use_container_width=True)
+            ok = ar[ar["Meets required H"] & ~ar["Cavitates (M > Mc)"]]
+            if len(ok):
+                best = ok.loc[ok["Efficiency (%)"].idxmax()]
+                st.caption(f"Area ratios {ok['Area ratio R'].min():.2f} - {ok['Area ratio R'].max():.2f} deliver the "
+                           f"head ratio needed; the most efficient is R = {best['Area ratio R']:.2f} "
+                           f"({best['Efficiency (%)']:.1f} %).")
+            else:
+                st.warning("No area ratio delivers the head ratio needed at this flow ratio: raise the injection "
+                           "pressure or rate, or lower the design rate.")
+        with t3:
+            cands = wjet.candidates(du)
+            if not len(cands):
+                st.warning("No database pump covers the power fluid rate at the nozzle "
+                           f"({du.q_n:,.0f} RB/d) within the maximum OD.")
+                return
+            st.dataframe(cands.style.format(precision=4), hide_index=True, use_container_width=True)
+            pick = sel(st, "Selected pump", list(cands["Pump"]), "jpd_pump", cands["Pump"].iloc[0])
+            r_ = wjet.PUMPS[wjet.PUMPS["Name"] == pick].iloc[0]
+            act = wjet.with_pump(du, float(r_["Nozzle area (in2)"]), float(r_["Throat area (in2)"]))
+            show = {k_: (v_ - 14.696 if "(psia)" in k_ else v_) for k_, v_ in act.items()}
+            show = {k_.replace("(psia)", "(psig)"): v_ for k_, v_ in show.items()}
+            st.dataframe(pd.DataFrame({"Actual": show}).astype(str), use_container_width=True)
+            ss["jet_design"] = {"pump": pick}
+            if not act["Meets the duty"]:
+                st.warning("This pump does not reach the discharge pressure needed at the design rate.")
+
 
 # ================================================================ ESP design
 def esp_library():
@@ -5335,10 +6926,11 @@ def esp_tab(o, eqd, ipr_curve):
         n_auto = int(np.ceil(d.head / float(pump.head_stage(d.q_avg, freq, wear))))
         p_need = d.fluid_hp * n_auto * float(pump.head_stage(d.q_avg, freq, wear)) / d.head / max(
             float(pump.efficiency(d.q_avg, freq)), 1e-6) * (1 + margin / 100.0)
-        mot_ok = [k for k, m in motors.items() if m.hp * freq / 60.0 >= p_need] or list(motors)
+        mot_ok = [k for k, m in motors.items() if m.hp * freq / 60.0 >= p_need and m.od < cid] or list(motors)
         mot_ok = sorted(mot_ok, key=lambda k: motors[k].hp)
         mname = sel(c[1], "Motor", mot_ok, "esp_motor",
-                    help=f"Motors able to give {p_need:,.0f} hp at {freq:g} Hz, smallest first.")
+                    help=f"Motors able to give {p_need:,.0f} hp at {freq:g} Hz that fit the casing, smallest first "
+                    "(PROSPER's motor database; 50 Hz motors shown at their 60 Hz equivalent rating).")
         motor = motors[mname]
         # smallest cable carrying the current (PROSPER)
         r0 = wesp.design(d, pump, motor, cables["#1 Copper"], freq, cable_len, wear, margin / 100.0)
@@ -5440,6 +7032,175 @@ def esp_sys_plot(curves):
     return fig
 
 
+def jet_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
+    """Calculation | System for a jet pump well (the jet pump against the tubing at the pump)."""
+    eq = ss.get("jet_equipment")
+    if not eq:
+        st.info("Enter the pump in the Equipment Data tab (Jet pump section).")
+        return
+    sig = ("jet", tuple(sorted(base.items())), corr, p1, p2, tuple((k_, tuple(v_)) for k_, v_ in sens.items()),
+           tuple(sorted((k_, repr(v_)) for k_, v_ in eq.items())))
+    if go:
+        try:
+            combos = wsys.combinations(sens)
+            path = vlp_path(eqd, "tubing", (eq["pump_md"],))
+            results = []
+            with st.spinner(f"Calculating {len(combos)} case(s)..."):
+                for ch in combos:
+                    prm = {**base, **{k_: v_ for k_, v_ in ch.items() if k_ in ("whp", "wc", "gor", "u")}}
+                    pump = wjet.JetPumpInstalled(eq["pump_md"], eq["an"], eq["at"], float(ch.get("q_pf", eq["q_pf"])),
+                                                 float(ch.get("p_surf", eq["p_surf"])), eq["losses"],
+                                                 wjet.PowerFluid(eq["sal"]), eq["casing_id"], eq["tubing_od"],
+                                                 eq["name"])
+                    changes = {k_: float(ch[k_]) for k_ in wsys.IPR_KEYS if k_ in ch}
+                    changes["wc"] = float(prm["wc"]) / 100.0
+                    if "gor" in prm:
+                        changes["gor"] = float(prm["gor"])
+                    cv = ipr_for(changes)
+                    sol, crv = wjet.system(path, fluid, lambda q, cv=cv: float(wgl.ipr_pwf(cv, q)), prm["wc"] / 100.0,
+                                           prm["gor"], prm["whp"], pump, corr, p1, p2, prm["u"],
+                                           eqd["heat_capacities"], q_max=float(np.max(cv.q)) * 0.995, n=25)
+                    results.append((ch, sol, crv))
+            ss["jet_sys_res"] = {"sig": sig, "results": results}
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            st.error(f"Calculation failed: {e}")
+    out = ss.get("jet_sys_res")
+    if not out:
+        st.info("Press Calculate.")
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate to update.")
+    rows = []
+    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    for i, (ch, sol, crv) in enumerate(out["results"]):
+        lab = ", ".join(f"{labels.get(k_, k_).split(' (')[0]} {v_:g}" for k_, v_ in ch.items()) or "base"
+        d_ = {labels.get(k_, k_): v_ for k_, v_ in ch.items()}
+        if sol is None:
+            d_["Note"] = "No solution - the jet pump cannot lift this case to the top node pressure."
+        else:
+            d_.update(sol)
+        rows.append(d_)
+        if len(crv) and i < 8:
+            col = wplt.SERIES[i % len(wplt.SERIES)]
+            ax.plot(crv["Liquid rate (STB/d)"], crv["Pump discharge from the pump (psia)"], color=col, lw=1.5,
+                    label=f"Pump - {lab}")
+            ax.plot(crv["Liquid rate (STB/d)"], crv["Discharge needed by the tubing (psia)"], color=col, lw=1.2,
+                    ls="--", label=f"Tubing - {lab}")
+            if sol is not None:
+                ax.scatter([sol["Liquid rate (STB/d)"]], [sol["Pump discharge pressure (psia)"]], color=col, zorder=5)
+    tab_ = pd.DataFrame(rows)
+    st.markdown(f"**Results** - {len(rows)} case(s); pump {ss['jet_equipment']['name']}")
+    st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.download_button("Download jet pump system results (CSV)", tab_.to_csv(index=False).encode(), "jet_system.csv")
+    if "Cavitation" in tab_ and (tab_["Cavitation"] == "Yes").any():
+        st.warning("Cavitation predicted in some cases (flow ratio above the cavitation limit at Ic = 0.8).")
+    ax.set_xlabel("Liquid rate (STB/d)")
+    ax.set_ylabel("Pump discharge pressure (psia)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=6.5, ncol=2)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    if len(tab_) > 1 and "Oil rate (STB/d)" in tab_:
+        var_cols = [labels.get(k_, k_) for k_ in sens]
+        if var_cols:
+            fig2, ax2 = plt.subplots(figsize=(7.8, 4.0))
+            x_ = var_cols[0]
+            groups = tab_.groupby(var_cols[1:]) if len(var_cols) > 1 else [("", tab_)]
+            for gk, gdf in groups:
+                ax2.plot(gdf[x_], gdf["Oil rate (STB/d)"], marker="o", ms=4,
+                         label=(f"{var_cols[1].split(' (')[0]} {gk if not isinstance(gk, tuple) else gk[0]:g}"
+                                if len(var_cols) > 1 else None))
+            ax2.set_xlabel(x_)
+            ax2.set_ylabel("Oil rate (STB/d)")
+            ax2.grid(alpha=0.3, ls="--")
+            if len(var_cols) > 1:
+                ax2.legend(fontsize=7)
+            fig2.tight_layout()
+            st.pyplot(fig2, clear_figure=True)
+    st.caption("As PROSPER: the power fluid rate and surface pressure are fixed; the pump's discharge pressure is "
+               "(Ps + H Pn)/(1 + H) with H from its area ratio at the flow ratio M (Cunningham); the solution is "
+               "where it meets the discharge pressure the tubing needs for production + power fluid.")
+
+
+def srp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
+    """Calculation | System for a sucker rod pump well (PROSPER: solution node at the pump intake)."""
+    eq = ss.get("srp_equipment")
+    if not eq:
+        st.info("Enter the pump in the Equipment Data tab (Sucker rod pump section).")
+        return
+    corr_ = "no_slip" if eq["no_slip"] else corr
+    p1_, p2_ = (1.0, 1.0) if eq["no_slip"] else (p1, p2)
+    sig = ("srp", tuple(sorted(base.items())), corr_, p1_, p2_, tuple((k_, tuple(v_)) for k_, v_ in sens.items()),
+           tuple(sorted(eq.items())))
+    if go:
+        try:
+            combos = wsys.combinations(sens)
+            path = vlp_path(eqd, "tubing", (eq["pump_md"],))
+            results = []
+            with st.spinner(f"Calculating {len(combos)} case(s)..."):
+                for ch in combos:
+                    prm = {**base, **{k_: v_ for k_, v_ in ch.items() if k_ in ("whp", "wc", "gor", "u")}}
+                    e_ = {**eq, **{k_: float(ch[k_]) for k_ in SRP_VARS if k_ in ch}}
+                    pl = min(wsrp.PLUNGERS, key=lambda x: abs(x - e_["plunger"]))
+                    rod = e_["rod_no"] if e_["rod_no"] in wsrp.rod_numbers(pl) else wsrp.rod_numbers(pl)[-1]
+                    inp = wsrp.SRPSystemInput(rod_no=int(rod), plunger=pl, stroke=e_["stroke"], n_spm=e_["n_spm"],
+                                              ev=e_["ev"] / 100.0, pump_md=e_["pump_md"],
+                                              anchor_method=e_["anchor_method"], anchor_eff=e_["anchor_eff"],
+                                              anchor_type=e_["anchor_type"], anchor_area=e_["anchor_area"])
+                    changes = {k_: float(ch[k_]) for k_ in wsys.IPR_KEYS if k_ in ch}
+                    changes["wc"] = float(prm["wc"]) / 100.0
+                    if "gor" in prm:
+                        changes["gor"] = float(prm["gor"])
+                    cv = ipr_for(changes)
+                    sol, crv = wsrp.system(inp, path, fluid, lambda q, cv=cv: float(wgl.ipr_pwf(cv, q)),
+                                           prm["wc"] / 100.0, prm["gor"], prm["whp"], corr_, p1_, p2_, prm["u"],
+                                           eqd["heat_capacities"], q_max=float(np.max(cv.q)) * 0.995)
+                    results.append((ch, sol, crv))
+            ss["srp_sys_res"] = {"sig": sig, "results": results}
+        except (ValueError, RuntimeError, ZeroDivisionError) as e:
+            st.error(f"Calculation failed: {e}")
+    out = ss.get("srp_sys_res")
+    if not out:
+        st.info("Press Calculate.")
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate to update.")
+    rows = []
+    fig, ax = plt.subplots(figsize=(7.8, 4.4))
+    qmax = 0.0
+    for i, (ch, sol, crv) in enumerate(out["results"]):
+        lab = ", ".join(f"{labels.get(k_, k_).split(' (')[0]} {v_:g}" for k_, v_ in ch.items()) or "base"
+        d_ = {labels.get(k_, k_): v_ for k_, v_ in ch.items()}
+        if sol is None:
+            d_["Note"] = "No solution - the pump rate does not meet the inflow (the pump would pump the well off)."
+        else:
+            d_.update(sol)
+        rows.append(d_)
+        if len(crv):
+            col = wplt.SERIES[i % len(wplt.SERIES)]
+            ax.plot(crv["q"], crv["q_pump"], color=col, lw=1.5, label=lab)
+            qmax = max(qmax, float(crv["q"].max()))
+            if sol is not None:
+                ax.scatter([sol["Liquid rate (STB/d)"]], [sol["Liquid rate (STB/d)"]], color=col, zorder=5)
+    tab_ = pd.DataFrame(rows)
+    st.markdown(f"**Results** - {len(rows)} case(s)")
+    st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.download_button("Download sucker rod system results (CSV)", tab_.to_csv(index=False).encode(),
+                       "srp_system.csv")
+    if qmax > 0:
+        ax.plot([0, qmax], [0, qmax], color=wplt.INK2, ls="--", lw=1.0, label="Inflow rate")
+        ax.set_xlabel("Inflow liquid rate (STB/d)")
+        ax.set_ylabel("Pump liquid rate (STB/d)")
+        ax.grid(alpha=0.3, ls="--")
+        ax.legend(fontsize=7)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+    st.caption("PROSPER's convention for rod pump wells: the solution node is the pump intake. For each inflow rate "
+               "the pump rate follows from the intake and discharge pressures (downhole stroke S + Ep - stretch, "
+               "volumetric efficiency, gas through the pump after the anchor); the solution is where the two rates "
+               "agree. The tubing above the pump carries (1 - E) of the gas.")
+
+
 def esp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
     """Calculation | System for an ESP well (PROSPER: solution node at the pump discharge)."""
     esp = ss.get("esp_equipment")
@@ -5462,6 +7223,8 @@ def esp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
                     n_ = int(round(ch.get("esp_stages", esp["stages"])))
                     changes = {k_: float(ch[k_]) for k_ in wsys.IPR_KEYS if k_ in ch}
                     changes["wc"] = float(prm["wc"]) / 100.0
+                    if "gor" in prm:
+                        changes["gor"] = float(prm["gor"])
                     cv = ipr_for(changes)
                     sol, crv = wesp.system(path, fluid, lambda q, cv=cv: float(wgl.ipr_pwf(cv, q)),
                                            prm["wc"] / 100.0, prm["gor"], prm["whp"], esp["pump_md"], pump, n_, f_,
@@ -5524,7 +7287,11 @@ with tabs[5]:
     st.header("Calculation")
     _o = ss.get("options")
     ESP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "esp")
-    GL_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "gas_lift")
+    GL_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("gas_lift", "ct_gas_lift"))
+    SRP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "srp")
+    JET_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "jet")
+    PCP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("pcp_motor", "pcp_rod"))
+    HSP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "hsp")
     _modes = CALC_MODES + ([QL_MODE] if GL_ON else [])
     if val("calc_mode") not in _modes:
         put("calc_mode", CALC_MODES[0])
@@ -5549,6 +7316,17 @@ with tabs[5]:
         blocker = "Complete the Equipment Data tab first."
     elif (SYS or QLK) and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
         blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
+    elif SRP_ON and mode == CALC_MODES[1]:
+        blocker = ("PROSPER has no gradient traverse for a sucker rod pump well: use System analysis (solution at the "
+                   "pump intake) or Lift curves.")
+    elif JET_ON and not ss.get("jet_equipment"):
+        blocker = "Enter the jet pump in the Equipment Data tab first."
+    elif HSP_ON and not ss.get("hsp_equipment"):
+        blocker = "Enter the hydraulic submersible pump in the Equipment Data tab first."
+    elif PCP_ON and not ss.get("pcp_equipment"):
+        blocker = "Enter the progressive cavity pump in the Equipment Data tab first."
+    elif SRP_ON and not ss.get("srp_equipment"):
+        blocker = "Enter the sucker rod pump in the Equipment Data tab first."
     elif GL_ON and gl_setup is None:
         blocker = "Enter the gas lift data in the Equipment Data tab first."
     elif GL_ON and not QLK and gl_setup.method in wgls.METHODS[2:] and not gl_setup.valves:
@@ -5742,6 +7520,22 @@ with tabs[5]:
                         var_defs.pop("choke", None)
                         var_defs["esp_freq"] = "Operating frequency (Hz)"
                         var_defs["esp_stages"] = "Number of stages"
+                    if JET_ON:
+                        var_defs.pop("tubing_id", None)
+                        var_defs.pop("choke", None)
+                        var_defs.update(JET_VARS)
+                    if PCP_ON:
+                        var_defs.pop("tubing_id", None)
+                        var_defs.pop("choke", None)
+                        var_defs.update(PCP_VARS)
+                    if HSP_ON:
+                        var_defs.pop("tubing_id", None)
+                        var_defs.pop("choke", None)
+                        var_defs.update(HSP_VARS)
+                    if SRP_ON:
+                        var_defs.pop("tubing_id", None)
+                        var_defs.pop("choke", None)
+                        var_defs.update(SRP_VARS)
                     if GL_ON:
                         var_defs.update(wgls.variables_for(gl_setup))
                     sens = {}
@@ -5756,6 +7550,16 @@ with tabs[5]:
                                         "dp_valve": gl_setup.dp_valve, "inj_md": gl_setup.fixed_md})
                         if GL_ON and "qgi" in chosen and "glr_inj" in chosen:
                             st.error("Choose either the gas lift gas injection rate or the GLR injected, not both.")
+                        if JET_ON and ss.get("jet_equipment"):
+                            cur.update({k_: ss["jet_equipment"][k_] for k_ in JET_VARS})
+                        if HSP_ON and ss.get("hsp_equipment"):
+                            cur.update({"hsp_speed": ss["hsp_equipment"]["speed"],
+                                        "hsp_wear": ss["hsp_equipment"]["wear"]})
+                        if PCP_ON and ss.get("pcp_equipment"):
+                            cur.update({"pcp_speed": ss["pcp_equipment"]["speed"],
+                                        "pcp_wear": ss["pcp_equipment"]["wear"]})
+                        if SRP_ON and ss.get("srp_equipment"):
+                            cur.update({k_: ss["srp_equipment"][k_] for k_ in SRP_VARS})
                         if ESP_ON and ss.get("esp_equipment"):
                             cur["esp_freq"] = ss["esp_equipment"]["freq"]
                             cur["esp_stages"] = ss["esp_equipment"]["stages"]
@@ -5806,6 +7610,34 @@ with tabs[5]:
                         except ValueError:
                             return ipr_curve
                     esp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for_esp, var_defs)
+                elif JET_ON:
+                    def ipr_for_jet(ch):
+                        try:
+                            return rebuild_ipr(ch)
+                        except ValueError:
+                            return ipr_curve
+                    jet_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for_jet, var_defs)
+                elif HSP_ON:
+                    def ipr_for_hsp(ch):
+                        try:
+                            return rebuild_ipr(ch)
+                        except ValueError:
+                            return ipr_curve
+                    hsp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for_hsp, var_defs)
+                elif PCP_ON:
+                    def ipr_for_pcp(ch):
+                        try:
+                            return rebuild_ipr(ch)
+                        except ValueError:
+                            return ipr_curve
+                    pcp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for_pcp, var_defs)
+                elif SRP_ON:
+                    def ipr_for_srp(ch):
+                        try:
+                            return rebuild_ipr(ch)
+                        except ValueError:
+                            return ipr_curve
+                    srp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for_srp, var_defs)
                 else:
                     sig = (kind, tuple(sorted(base.items())), corr, p1, p2, method, tuple(user_rates or []), lhi,
                            tuple((k_, tuple(v_)) for k_, v_ in sens.items()), fluid_note, ipr_curve.pr,
@@ -5840,7 +7672,7 @@ with tabs[5]:
                                 try:
                                     return rebuild_ipr(ch)
                                 except ValueError:
-                                    if set(ch) <= {"wc"}:          # no recipe: keep the IPR tab curve
+                                    if set(ch) <= {"wc", "gor"}:   # no recipe: keep the IPR tab curve
                                         return ipr_curve
                                     raise
                             with st.spinner(f"Calculating {len(combos)} case(s)..."):
@@ -5978,10 +7810,17 @@ with tabs[5]:
                 quicklook_mode(right, fluid, eqd, o, corr, p1, p2, gl_setup, ipr_curve)
             elif mode == CALC_MODES[1]:
                 traverse_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
-                              ss.get("esp_equipment") if ESP_ON else None, gl_setup)
+                              ss.get("esp_equipment") if ESP_ON else None, gl_setup,
+                              ss.get("jet_equipment") if JET_ON else None,
+                              ss.get("pcp_equipment") if PCP_ON else None,
+                              ss.get("hsp_equipment") if HSP_ON else None)
             else:
                 vfp_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
-                         ss.get("esp_equipment") if ESP_ON else None, gl_setup)
+                         ss.get("esp_equipment") if ESP_ON else None, gl_setup,
+                         ss.get("jet_equipment") if JET_ON else None,
+                         ss.get("pcp_equipment") if PCP_ON else None,
+                         ss.get("hsp_equipment") if HSP_ON else None,
+                         ss.get("srp_equipment") if SRP_ON else None)
 
 
 # ================================================================ tab 7: design (continuous gas lift)
@@ -6888,10 +8727,198 @@ def igl_tab(o, eqd, ipr_curve):
                            "liquid at a higher GLR; 150-170 psi gives the lowest GLR.")
 
 
+def ct_design_plot(res):
+    """Design | Coiled tubing gas lift - Plot: load fluid, kick-off and operating gas pressures, flowing gradient."""
+    pr = res.profile
+    fig, ax = plt.subplots(figsize=(7.0, 6.0))
+    tv = pr["True vertical depth (ft)"]
+    ax.plot(pr["Flowing tubing pressure (psia)"], tv, color=wplt.SERIES[0], lw=1.6, label="Flowing gradient (design)")
+    ax.plot(pr["Lift-gas pressure, operating (psia)"], tv, color=wplt.SERIES[1], lw=1.4, label="Lift gas, operating")
+    ax.plot(pr["Lift-gas pressure, kick-off (psia)"], tv, color=wplt.SERIES[3], lw=1.0, ls="--",
+            label="Lift gas, kick-off")
+    ax.plot(pr["Load fluid (psia)"], tv, color=wplt.SERIES[2], lw=1.2, ls=":", label="Load fluid")
+    ax.axhline(res.kickoff_tvd, color=wplt.SERIES[3], lw=0.8, alpha=0.6)
+    ax.axhline(res.max_tvd, color=wplt.SERIES[1], lw=0.8, alpha=0.6)
+    ax.annotate(f"Kick-off {res.kickoff_md:,.0f} ft MD", (ax.get_xlim()[0], res.kickoff_tvd), fontsize=8,
+                xytext=(4, -10), textcoords="offset points")
+    ax.annotate(f"Maximum operating depth {res.max_md:,.0f} ft MD", (ax.get_xlim()[0], res.max_tvd), fontsize=8,
+                xytext=(4, -10), textcoords="offset points")
+    ax.set_xlim(left=0, right=max(float(pr["Lift-gas pressure, kick-off (psia)"].max()),
+                                  float(pr["Lift-gas pressure, operating (psia)"].max())) * 1.1)
+    ax.invert_yaxis()
+    ax.set_xlabel("Pressure (psia)")
+    ax.set_ylabel("True vertical depth (ft)")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=8, loc="lower left")
+    ax.set_title("Coiled tubing gas lift design", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def ct_design_tab(o, eqd, ipr_curve):
+    """Design | Coiled Tubing Gas Lift - after PROSPER (User Guide 2.13.5, Tutorial 25)."""
+    st.caption("Coiled tubing gas lift design after PROSPER Design | Coiled Tubing Gas Lift: the lift gas goes down a "
+               "coiled tubing and the well produces up the coiled tubing - tubing annulus. No unloading valves: the "
+               "design rate (entered, or from the performance curve), the deepest operating injection depth, the "
+               "orifice at the coiled tubing end (Thornhill-Craver) and the depth the kick-off pressure unloads the "
+               "load fluid to.")
+    gmd, gt = eqd["geothermal"]
+    fluid, fluid_note = vlp_fluid(o, "oil", max(float(ipr_curve.pr), 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                  float(np.max(gt)) + 10)
+    if fluid is None:
+        st.warning(fluid_note)
+        return
+    top_, secs_, pts_ = eqd["downhole"]
+    tub = secs_[secs_["Type"] == "Tubing"]
+    bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+    left, right = st.columns([1, 1.55], gap="large")
+    with left:
+        st.markdown("**Options**")
+        c = st.columns(2)
+        design_rate = sel(c[0], "Design rate method", list(wgl.DESIGN_RATE), "ct_rate_mode", wgl.DESIGN_RATE[1])
+        orif = sel(c[1], "Orifice sizing on", list(wgl.ORIFICE_SIZING), "ct_orif",
+                   help="Calculated dP at orifice: the whole 64th below the size that passes the design gas at the "
+                        "calculated dP, and the gas it passes (PROSPER). Min dP: the size above, passing the design "
+                        "gas at a smaller dP.")
+        c = st.columns(2)
+        check_ipr = flag(c[0].checkbox, "Check rate conformance with IPR", "ct_chk_ipr", True)
+        use_ipr_unl = flag(c[1].checkbox, "Use IPR for unloading", "ct_ipr_unl", True)
+        st.markdown("**Input parameters**")
+        c = st.columns(2)
+        q_design = None
+        if design_rate == wgl.DESIGN_RATE[0]:
+            q_design = num(c[0], "Design liquid rate (STB/d)", "ct_q", 1000.0, 1.0, 1e6)
+        q_max = num(c[1] if q_design is not None else c[0], "Maximum liquid rate (STB/d)", "ct_qmax",
+                    float(round(ipr_curve.aof)), 1.0, 1e6)
+        c = st.columns(2)
+        qgi_max = num(c[0], "Maximum gas available (MMscf/d)", "ct_qgi", 5.0, 0.001, 100.0, None, "%.4f")
+        qgi_unl = num(c[1], "Maximum gas during unloading (MMscf/d)", "ct_qgi_unl", float(qgi_max), 0.001, 100.0,
+                      None, "%.4f")
+        c = st.columns(2)
+        top_p = num(c[0], "Flowing top node pressure (psia)", "ct_pwh", float(val("sys_whp", 200.0)), 14.7, 1e4)
+        top_pu = num(c[1], "Unloading top node pressure (psia)", "ct_pwh_unl", float(top_p), 14.7, 1e4)
+        c = st.columns(2)
+        p_inj = num(c[0], "Operating injection pressure (psia)", "ct_pinj", 1214.7, 50.0, 2e4,
+                    help="Gas pressure available at the coiled tubing head.")
+        p_ko = num(c[1], "Kick-off injection pressure (psia)", "ct_pko", float(p_inj), 50.0, 2e4)
+        c = st.columns(2)
+        dp_valve = num(c[0], "Desired dP across valve (psi)", "ct_dpv", 50.0, 1.0, 2000.0)
+        max_md = num(c[1], "Maximum depth of injection (ft MD)", "ct_maxmd", float(round(bottom_tub - 30.0)), 100.0,
+                     float(secs_["MD bottom (ft)"].max()), help="Above the production packer.")
+        c = st.columns(3)
+        wc = num(c[0], "Water cut (%)", "ct_wc", float(val("sys_wc", 0.0)), 0.0, 99.0)
+        gs = num(c[1], "Static gradient of load fluid (psi/ft)", "ct_gs", 0.46, 0.1, 1.0, None, "%.3f")
+        gor = num(c[2], "Total GOR (scf/STB)", "ct_gor", float(val("sys_gor", 300.0)), 0.0, 1e6)
+        econ = wgl.Economics()
+        if design_rate == wgl.DESIGN_RATE[2]:
+            st.markdown("**Economics**")
+            c = st.columns(4)
+            econ = wgl.Economics(num(c[0], "Oil price ($/STB)", "ct_po", 70.0, 0.0, 1e4),
+                                 num(c[1], "Gas price ($/Mscf)", "ct_pg", 3.0, 0.0, 1e4),
+                                 num(c[2], "Water cost ($/STB)", "ct_cw", 1.0, 0.0, 1e4),
+                                 num(c[3], "Lift gas cost ($/Mscf)", "ct_cg", 0.5, 0.0, 1e4))
+        lg = wgl.LiftGas(float(val("ctq_sg", 0.7)), float(val("ctq_co2", 0.0)), float(val("ctq_n2", 0.0)),
+                         float(val("ctq_h2s", 0.0)))
+        ct = wct.CoiledTubing(float(val("ctq_id", 0.8)), float(val("ctq_wall", 0.2)), float(val("ctq_ein", 0.0006)),
+                              float(val("ctq_eout", 0.0006)), val("ctq_fric", wct.FRICTION[0]) == wct.FRICTION[1])
+        st.caption(f"Lift gas and coiled tubing from the Equipment tab (Coiled tubing data): gravity {lg.sg:g}, "
+                   f"ID {ct.id_in:g} in, OD {ct.od_in:g} in, "
+                   + ("friction loss in the coiled tubing." if ct.friction else "no friction loss in the coiled tubing."))
+        st.markdown("**Tubing correlation**")
+        ms = ss.get("vlp_matches", {}).get("ms", {})
+        sel_c = ss.get("vlp_selected")
+        corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+        corr = sel(st, "Vertical lift correlation", corr_opts, "ct_corr",
+                   sel_c if sel_c in corr_opts else "hagedorn_brown", format_func=VLP_LABELS.get)
+        m_fit = ms.get(corr)
+        use_fit = flag(st.toggle, "Use matched parameters", "ct_use_fit", disabled=m_fit is None)
+        c2 = st.columns(2)
+        if m_fit is not None and use_fit:
+            p1, p2 = float(m_fit.p1), float(m_fit.p2)
+            c2[0].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True, key="ct_p1_show")
+            c2[1].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True, key="ct_p2_show")
+        else:
+            p1 = num(c2[0], "Parameter 1 (gravity)", f"ct_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
+            p2 = num(c2[1], "Parameter 2 (friction)", f"ct_p2_{corr}", 1.0, 0.01, 10.0, None, "%.4f")
+        u = float(val("eq_u", eqd.get("u_geo", 8.0)))
+        st.caption(f"PVT: {fluid_note}. IPR: {ss.get('ipr_meta', {}).get('model', '')} (Pr {ipr_curve.pr:,.0f} psia). "
+                   f"U = {u:.4g} BTU/h/ft2/F.")
+        go = st.button("Design", type="primary", key="ct_go")
+    inp = wct.CTDesignInput(design_rate=design_rate, q_design=q_design or 1000.0, q_liquid_max=q_max, qgi_max=qgi_max,
+                            qgi_unload_max=qgi_unl, top_p=top_p, top_p_unload=top_pu, p_inj=p_inj, p_ko=p_ko,
+                            dp_valve=dp_valve, max_md=max_md, gor=gor, wc=wc / 100.0, load_grad=gs,
+                            check_ipr=check_ipr, use_ipr_unloading=use_ipr_unl, orifice_sizing=orif, economics=econ)
+    try:
+        ipr_curve = rebuild_ipr({"wc": wc / 100.0})
+    except ValueError:
+        pass
+    sig = (repr(inp), repr(lg), repr(ct), corr, p1, p2, u, fluid_note, float(ipr_curve.pr), float(ipr_curve.aof))
+    with right:
+        if go:
+            path = vlp_path(eqd, "tubing", (max_md,))
+            msg = st.empty()
+            try:
+                with st.spinner("Designing..."):
+                    res = wct.design(path, fluid, ipr_curve, lg, ct, inp, corr, p1, p2, u, eqd["heat_capacities"],
+                                     progress=lambda m: msg.caption(m))
+                ss["ct_res"] = {"sig": sig, "res": res, "err": None}
+            except (ValueError, RuntimeError, ZeroDivisionError) as e:
+                ss["ct_res"] = {"sig": sig, "res": None, "err": str(e)}
+            msg.empty()
+        out = ss.get("ct_res")
+        if out is None:
+            st.info("Set the design inputs and press Design.")
+            return
+        if out["err"]:
+            st.error(f"Design failed: {out['err']}")
+            return
+        if out["sig"] != sig:
+            st.info("Inputs have changed since the last design - press Design to update.")
+        res = out["res"]
+        st.markdown("**Design results**")
+        summ = pd.DataFrame([
+            ("Design liquid rate", f"{res.q:,.2f}", "STB/d"),
+            ("Design oil rate", f"{res.q_oil:,.2f}", "STB/d"),
+            ("Design gas rate", f"{res.qgi_design:.4f}", "MMscf/d"),
+            ("Actual injected gas rate", f"{res.qgi_actual:.4f}", "MMscf/d"),
+            ("Actual injection pressure", f"{res.p_inj_actual:,.1f}", "psia"),
+            ("Orifice size", f"{res.port_64:g}", "64ths in"),
+            ("Kick-off injection depth", f"{res.kickoff_md:,.2f}", f"ft MD ({res.kickoff_tvd:,.1f} ft TVD)"),
+            ("Maximum operating depth", f"{res.max_md:,.2f}", f"ft MD ({res.max_tvd:,.1f} ft TVD)"),
+            ("Tubing pressure at the operating depth", f"{res.pt_inj:,.2f}", "psia"),
+            ("Lift-gas pressure at the operating depth", f"{res.pg_inj:,.2f}", "psia"),
+            ("Temperature at the operating depth", f"{res.t_inj:,.2f}", "°F"),
+        ], columns=["Result", "Value", "Units"])
+        st.dataframe(summ, hide_index=True, width="stretch")
+        for m_ in res.messages:
+            st.caption(m_)
+        st.caption("Transfer the design to the Equipment tab (Coiled tubing data: Transfer from the coiled tubing "
+                   "design) to use it in the Calculation tab.")
+        t1, t2, t3 = st.tabs(["Design plot", "Performance curve", "Design gradient"])
+        with t1:
+            st.pyplot(ct_design_plot(res), clear_figure=True)
+        with t2:
+            if res.perf is None:
+                st.info("No performance curve for a user-entered design rate (as in PROSPER).")
+            else:
+                from types import SimpleNamespace
+                res_ = SimpleNamespace(inp=res.inp, qgi=res.qgi_design, q=res.q)
+                st.pyplot(gl_perf_plot(res.perf, res_), clear_figure=True)
+                if np.isfinite(res.std_dev):
+                    st.caption(f"Standard deviation of the points about the fitted curve: {res.std_dev:.2f} STB/d.")
+                st.dataframe(res.perf.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+        with t3:
+            st.dataframe(res.profile.style.format(precision=2), hide_index=True, width="stretch")
+            st.download_button("Download (CSV)", res.profile.to_csv(index=False).encode(), "ct_design_gradient.csv")
+
+
 with tabs[6]:
     st.header("Design")
     design_kind = st.radio("Artificial lift", ["Gas lift (continuous)", "Gas lift (intermittent)",
-                                               "Electrical submersible pump"], horizontal=True,
+                                               "Gas lift (coiled tubing)",
+                                               "Electrical submersible pump", "Sucker rod pump", "Jet pump",
+                                               "Progressive cavity pump", "Hydraulic submersible pump"],
+                           horizontal=True,
                            key="design_kind", help="Further artificial lift designs (ESP, rod pump, ...) can be added "
                                                    "here.")
     o = ss.get("options")
@@ -6913,6 +8940,21 @@ with tabs[6]:
         st.info(blocker)
     elif design_kind == "Electrical submersible pump":
         esp_tab(o, eqd, ipr_curve)
+    elif design_kind == "Jet pump":
+        jet_design_tab(o, eqd, ipr_curve)
+    elif design_kind == "Progressive cavity pump":
+        pcp_design_tab(o, eqd, ipr_curve)
+    elif design_kind == "Hydraulic submersible pump":
+        hsp_design_tab(o, eqd, ipr_curve)
+    elif design_kind == "Sucker rod pump":
+        srp_mode = st.radio("Sucker rod pump", ["Design (new installation)", "System analysis (existing installation)"],
+                            horizontal=True, key="srp_page")
+        if srp_mode.startswith("Design"):
+            srp_tab(o, eqd, ipr_curve)
+        else:
+            srp_system_tab(o, eqd, ipr_curve)
+    elif design_kind == "Gas lift (coiled tubing)":
+        ct_design_tab(o, eqd, ipr_curve)
     elif design_kind == "Gas lift (intermittent)":
         igl_method = st.radio("Method", ["PROSPER (White et al. slug model)", "Brown (weighted-average BHP)"],
                               horizontal=True, key="igl_method")

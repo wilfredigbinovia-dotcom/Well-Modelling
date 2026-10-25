@@ -1,0 +1,14 @@
+cable,v_per_kft_amp,max_amps
+#1 Aluminium,0.33,95.0
+#1 Copper,0.26,115.0
+#10 Aluminium,3.32,50.0
+#10 Copper,2.08,50.0
+#12 Copper,3.32,50.0
+#2 Aluminium,0.53,70.0
+#2 Copper,0.33,95.0
+#4 Aluminium,0.84,55.0
+#4 Copper,0.53,70.0
+#6 Aluminium,1.32,50.0
+#6 Copper,0.84,55.0
+#8 Aluminium,2.08,50.0
+#8 Copper,1.32,50.0

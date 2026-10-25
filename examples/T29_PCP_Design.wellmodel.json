@@ -1,0 +1,622 @@
+{
+ "format": "wellmodel-project",
+ "version": 1,
+ "name": "T29_PCP_Design",
+ "saved": "2026-10-23T19:30:00+00:00",
+ "inputs": {
+  "pvt_rsb": 150.0,
+  "pvt_api": 17.0,
+  "pvt_gg": 0.58,
+  "pvt_sal": 75000.0,
+  "pvt_h2s": 0.0,
+  "pvt_co2": 0.0,
+  "pvt_n2": 0.0,
+  "pvt_impurity_corr": false,
+  "pvt_t": 120.0,
+  "pvt_pb": 2114.696,
+  "pvt_use_match": true,
+  "pvt_sel_pb": "al_marhoun",
+  "pvt_sel_visc": "de_ghetto",
+  "ipr_model_oil": "P.I. Entry",
+  "ipr_pr": 2214.696,
+  "ipr_j": 0.29004,
+  "ipr_wc": 80.0,
+  "ipr_t_from_pvt": true,
+  "eq_u": 8.0,
+  "eq_usur": 8.0,
+  "eq_tsur": 60.0,
+  "eq_cpo": 0.53,
+  "eq_cpg": 0.51,
+  "eq_cpw": 1.0,
+  "calc_mode": "System analysis (IPR + VLP)",
+  "sys_whp": 264.696,
+  "sys_wc": 80.0,
+  "sys_gor": 10.0,
+  "sys_corr": "pe2_style",
+  "sys_node": "Bottom node",
+  "sys_rate_method": "Automatic - Linear",
+  "sys_use_fit": false,
+  "sys_flags": "Yes",
+  "sys_lhi": "DisAllow",
+  "ipr_vogel": false,
+  "sys_p1_pe2_style": 1.03,
+  "sys_p2_pe2_style": 1.05,
+  "pcq_md": 1700.0,
+  "pcq_speed": 135.602,
+  "pcq_wear": 0.0,
+  "pcq_sep": 0.0,
+  "pcq_pump": "OilLift Technology Inc 3.5 in 120-600 (Max Head 2125 feet)",
+  "pcq_motor": "Centrilift 450 175HP 2285V 50A",
+  "pcq_cable": "#1 Copper",
+  "pcq_cable_len": 2200.0,
+  "pcd_md": 1700.0,
+  "pcd_od": 6.4,
+  "pcd_sep": 0.0,
+  "pcd_wear": 0.0,
+  "pcd_q": 450.0,
+  "pcd_wc": 80.0,
+  "pcd_gor": 150.0,
+  "pcd_top": 264.696,
+  "pcd_cable_len": 2200.0,
+  "pcd_vsurf": 9000.0,
+  "pcd_margin": 0.0,
+  "pcd_corr": "pe2_style",
+  "pcd_use_fit": false,
+  "pcd_p1_pe2_style": 1.03,
+  "pcd_p2_pe2_style": 1.05,
+  "pcd_pump": "OilLift Technology Inc 3.5 in 120-600 (Max Head 2125 feet)",
+  "pcd_motor": "Centrilift 450 175HP 2285V 50A",
+  "pcd_cable": "#1 Copper"
+ },
+ "widgets": {
+  "opt_fluid_type": "oil",
+  "opt_method": "black_oil",
+  "opt_well_type": "producer",
+  "opt_flow_type": "tubing",
+  "opt_completion": "cased_hole",
+  "opt_sand_control": "none",
+  "opt_artificial_lift": "pcp_motor",
+  "design_kind": "Progressive cavity pump",
+  "eq_filter_on": false,
+  "sys_sens_on": true,
+  "sys_vars": [
+   "wc",
+   "pcp_speed"
+  ],
+  "sys_how_wc": "Enter values",
+  "sys_vals_wc": "60, 65, 70, 75, 80",
+  "sys_how_pcp_speed": "Enter values",
+  "sys_vals_pcp_speed": "100, 150, 200, 250"
+ },
+ "tables": {
+  "pvt_table": {
+   "__df__": {
+    "columns": [
+     "Pressure",
+     "Gas Oil Ratio",
+     "Oil FVF",
+     "Oil Viscosity"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15
+    ],
+    "data": [
+     [
+      2114.696,
+      150.0,
+      1.06,
+      40.0
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Pressure": "float64",
+    "Gas Oil Ratio": "float64",
+    "Oil FVF": "float64",
+    "Oil Viscosity": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_survey": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "True Vertical Depth (ft)"
+    ],
+    "index": [
+     1,
+     2
+    ],
+    "data": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      2000.0,
+      2000.0
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "True Vertical Depth (ft)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_surface": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Fitting",
+     "Pipe Length (ft)",
+     "TVD of End Point (ft)",
+     "Pipe Inside Diameter (in)",
+     "Pipe Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Fitting": "object",
+    "Pipe Length (ft)": "float64",
+    "TVD of End Point (ft)": "float64",
+    "Pipe Inside Diameter (in)": "float64",
+    "Pipe Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_downhole": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Measured Depth (ft)",
+     "Tubing Inside Diameter (in)",
+     "Tubing Inside Roughness (in)",
+     "Tubing Outside Diameter (in)",
+     "Tubing Outside Roughness (in)",
+     "Casing Inside Diameter (in)",
+     "Casing Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5
+    ],
+    "data": [
+     [
+      null,
+      "Xmas Tree",
+      0.0,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      1750.0,
+      3.2,
+      0.0006,
+      3.5,
+      0.0006,
+      6.4,
+      0.0006,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "Casing",
+      2000.0,
+      null,
+      null,
+      null,
+      null,
+      6.4,
+      0.0006,
+      1.0,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "str",
+    "Type": "str",
+    "Measured Depth (ft)": "float64",
+    "Tubing Inside Diameter (in)": "float64",
+    "Tubing Inside Roughness (in)": "float64",
+    "Tubing Outside Diameter (in)": "float64",
+    "Tubing Outside Roughness (in)": "float64",
+    "Casing Inside Diameter (in)": "float64",
+    "Casing Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_geo": {
+   "__df__": {
+    "columns": [
+     "Formation Measured Depth (ft)",
+     "Formation Temperature (deg F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "data": [
+     [
+      0.0,
+      80.0
+     ],
+     [
+      2000.0,
+      120.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Formation Measured Depth (ft)": "float64",
+    "Formation Temperature (deg F)": "float64"
+   },
+   "index_name": "Point"
+  }
+ },
+ "extras": {
+  "pvt_matched": true
+ }
+}

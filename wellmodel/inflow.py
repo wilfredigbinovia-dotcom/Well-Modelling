@@ -105,10 +105,16 @@ def _curve_from_rate(model, fluid, pr, rate_fn, params, notes=None, tests=None, 
 
 
 # ============================================================ oil models
-def _pi_vogel_rate(pr, pb, j, wc=0.0):
+def _pi_vogel_rate(pr, pb, j, wc=0.0, vogel=True):
     """Liquid rate at pwf: straight-line PI above the bubble point, Vogel below. With water (wc > 0) the
     Petrobras composite form is used below the bubble point - oil follows Vogel, water a straight line - as
-    PROSPER does for P.I. Entry and Darcy (reproduces its AOF at 80 % water cut to 0.05 %)."""
+    PROSPER does for P.I. Entry and Darcy (reproduces its AOF at 80 % water cut to 0.05 %). vogel=False: PROSPER's
+    'Vogel below bubble point' switched off - a straight line at every pressure (the user's Tutorial 29 file: 21
+    solution-node pressures on one line within 0.2 psi)."""
+    if not vogel:
+        def fl(pwf):
+            return j * (pr - np.clip(pwf, 0, None))
+        return fl
     pb_eff = min(pb, pr)
     qb = j * max(pr - pb, 0.0)
     if wc and wc > 0 and pb_eff > 0:
@@ -128,8 +134,8 @@ def _pi_vogel_rate(pr, pb, j, wc=0.0):
     return f
 
 
-def pi_entry(pr, pb, j, wc=0.0):
-    f = _pi_vogel_rate(pr, pb, j, wc)
+def pi_entry(pr, pb, j, wc=0.0, vogel=True):
+    f = _pi_vogel_rate(pr, pb, j, wc, vogel)
     return _curve_from_rate("P.I. Entry", "oil", pr, f, {"PI (STB/d/psi)": j})
 
 
@@ -191,9 +197,9 @@ def darcy_pi(k, h, mu, bo, area_acres, ca, rw, skin):
     return k * h / (141.2 * mu * bo * (dietz_term(area_acres, ca, rw) + skin))
 
 
-def darcy(pr, pb, k, h, area_acres, ca, rw, skin, mu, bo, wc=0.0):
+def darcy(pr, pb, k, h, area_acres, ca, rw, skin, mu, bo, wc=0.0, vogel=True):
     j = darcy_pi(k, h, mu, bo, area_acres, ca, rw, skin)
-    c = pi_entry(pr, pb, j, wc)
+    c = pi_entry(pr, pb, j, wc, vogel)
     c.model = "Darcy"
     c.params.update({"Dietz term": dietz_term(area_acres, ca, rw)})
     return c

@@ -35,6 +35,10 @@ from .correlations import CORRELATIONS
 from .equipment import HeatCapacities
 
 RHO_AIR_SC = 0.0764          # lb/scf
+LIFT_GAS_Z = "prosper_lift"  # lift-gas Z: DPR on Standing's natural-gas pseudo-criticals - PROSPER's injection-string
+#                              densities (Tutorial 25 coiled tubing, 0.7 gravity, 2200-2650 psig, 160-209 F) within 0.03 %
+#                              (the produced gas's condensate-gas pseudo-criticals are 1.3 % light); with the annulus gas
+#                              10 F below the tubing temperature it gives PROSPER's Tutorial 23 / T33a casing pressures
 
 
 # ================================================================ lift gas and casing column
@@ -45,10 +49,12 @@ class LiftGas:
     n2: float = 0.0
     h2s: float = 0.0
     t_surface: float = 80.0   # injection gas temperature at the casing head, degF
+    z_corr: str = ""          # "" = LIFT_GAS_Z; "prosper_lift" = Standing natural-gas pseudo-criticals (coiled tubing)
 
     @property
     def inp(self) -> bo.PVTInputs:
-        return bo.PVTInputs(rsb=1.0, api=35.0, gas_sg=self.sg, h2s=self.h2s, co2=self.co2, n2=self.n2)
+        return bo.PVTInputs(rsb=1.0, api=35.0, gas_sg=self.sg, h2s=self.h2s, co2=self.co2, n2=self.n2,
+                            z_corr=self.z_corr or LIFT_GAS_Z)
 
     def density(self, p, t):
         return bo.gas_props(self.inp, p, t)[2]

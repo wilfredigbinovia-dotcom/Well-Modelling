@@ -24,6 +24,8 @@ from the manufacturer's published curves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -50,6 +52,15 @@ class Pump:
     eff_bep: float                # best efficiency, fraction
     eff: tuple = ()               # optional 60 Hz efficiency table (fraction) on the q table
     source: str = ""
+    power60: tuple = ()           # optional 60 Hz power per stage on water (hp) on the q table: the pump's power
+    #                               is then this x gravity (affinity: x r^3), not hydraulic power / efficiency
+
+    def power_stage(self, q, f=60.0):
+        """Power per stage on water (hp) from the power table (affinity laws); None without one."""
+        if len(self.power60) != len(self.q):
+            return None
+        r = f / 60.0
+        return np.interp(np.asarray(q, float) / r, self.q, self.power60) * r ** 3
 
     @property
     def q_runout(self):
@@ -149,14 +160,96 @@ def motor_like(name, hp, volts, amps, template="Centrilift 544 300HP 1675V 105A"
                  source=f"nameplate; load curves of {template}")
 
 
-# copper ESP cables: voltage drop per 1000 ft per amp at 77 F. #1 from PROSPER (0.26, 115 A); #2-#6 scaled from it by
-# the AWG conductor resistance ratios (1.26, 2.00, 3.19); ampacities indicative - check the manufacturer's rating
-CABLES = {
-    "#1 Copper": Cable("#1 Copper", 0.26, 115.0),
-    "#2 Copper": Cable("#2 Copper", 0.33, 95.0),
-    "#4 Copper": Cable("#4 Copper", 0.52, 70.0),
-    "#6 Copper": Cable("#6 Copper", 0.83, 55.0),
-}
+# ================================================================ PROSPER's equipment databases (user's exports)
+DATA = Path(__file__).parent / "data"
+HHP_DB = 135_773.0               # PROSPER database: efficiency = rate x head / (135,773 x hp) at SG 1
+
+
+@lru_cache(maxsize=1)
+def database_pumps() -> pd.DataFrame:
+    """PROSPER's ESP pump database (data/esp_pumps.csv): manufacturer, name, OD, base frequency, the number of stages
+    the coefficients are for, recommended range and the fifth-order head (ft) and power (hp) polynomials in the rate
+    (RB/d), highest power first. Most vendors' curves are protected in PROSPER and export without coefficients."""
+    return pd.read_csv(DATA / "esp_pumps.csv")
+
+
+def pump_from_coefficients(r, n_q=60):
+    """A Pump (60 Hz tables) from a database row with curve coefficients; None if the curve is unusable."""
+    hc = [float(r[f"h{k}"]) for k in range(1, 7)]
+    pc = [float(r[f"p{k}"]) for k in range(1, 7)]
+    if not np.all(np.isfinite(hc + pc)):
+        return None
+    st, f0 = max(float(r["stages"]), 1.0), float(r["hz"])
+    k = 60.0 / f0                                    # affinity laws to 60 Hz
+    q_hi = 3.0 * float(r["q_max"])
+    q = np.linspace(0.0, q_hi, 600)
+    h = np.polyval(hc, q) / st
+    neg = np.nonzero(h <= 0)[0]
+    q_run = float(q[neg[0]]) if len(neg) and neg[0] > 0 else 1.3 * float(r["q_max"])
+    q = np.linspace(0.0, q_run, n_q)
+    h = np.maximum(np.polyval(hc, q) / st, 0.0)
+    p = np.polyval(pc, q) / st
+    with np.errstate(divide="ignore", invalid="ignore"):
+        e = np.where(p > 0, q * h / (HHP_DB * p), 0.0)
+    e = np.clip(np.nan_to_num(e), 0.0, None)
+    rng = (q >= float(r["q_min"])) & (q <= float(r["q_max"]))
+    if not rng.any() or e[rng].max() > 0.95 or h[rng].min() <= 0:
+        return None                                  # inconsistent database curve (e.g. efficiency above 95 %)
+    name = f"{r['manufacturer']} {r['name']} ({float(r['od']):g} in)"
+    j = int(np.argmax(np.where(rng, e, 0.0)))
+    return Pump(name, float(r["od"]), float(r["q_min"]) * k, float(r["q_max"]) * k, tuple(q * k), tuple(h * k * k),
+                float(q[j] * k), float(e[j]), tuple(e),
+                source=f"PROSPER pump database ({f0:g} Hz curve, coefficients for {st:g} stage(s))")
+
+
+def _motor_from_row(r):
+    """ESP Motor (60 Hz equivalent nameplate) from a row of PROSPER's motor database: motors with coefficient tables
+    use their polynomials in the load fraction, the others the Centrilift 544 load curves (PROSPER's default)."""
+    f0 = float(r["hz"])
+    k = 60.0 / f0
+    name = f"{r['manufacturer']} {r['series']} {float(r['hp']):g}HP {float(r['volts']):g}V {float(r['amps']):g}A"
+    if f0 != 60.0:
+        name += f" ({f0:g} Hz)"
+    src = (f"PROSPER motor database: {float(r['hp']):g} hp, {float(r['volts']):g} V at {f0:g} Hz, "
+           f"{float(r['rpm']):g} rpm")
+    co = [str(r.get(c, "") or "") for c in ("c_amps", "c_speed", "c_eff", "c_pf")]
+    if all(c.strip() and c != "nan" for c in co):
+        ca, cs, ce, cp = (np.array([float(v) for v in c.split()]) for c in co)
+        load = np.arange(0.0, 136.0, 5.0)
+        x = load / 100.0
+        amps, eff, pf, rpm = (np.polyval(ca, x), np.polyval(ce, x), np.polyval(cp, x), np.polyval(cs, x) * k)
+        sane = (0.7 < np.polyval(ca, 1.0) < 1.3 and 0.4 < np.polyval(ce, 1.0) < 1.0 and 0.3 < np.polyval(cp, 1.0) <= 1.0)
+        if sane:
+            return Motor(name, float(r["hp"]) * k, float(r["volts"]) * k, float(r["amps"]), float(r["od"]),
+                         tuple(load), tuple(100 * amps), tuple(np.clip(100 * eff, 1, 99.9)),
+                         tuple(np.clip(100 * pf, 1, 100)), tuple(rpm), source=src + "; its load curves")
+        src += "; its coefficient table is inconsistent - Centrilift 544 load curves used"
+    m = motor_like(name, float(r["hp"]) * k, float(r["volts"]) * k, float(r["amps"]), od=float(r["od"]))
+    m.source = src if "inconsistent" in src else src + "; Centrilift 544 load curves (PROSPER's default)"
+    return m
+
+
+@lru_cache(maxsize=1)
+def _database():
+    pumps = {}
+    for _, r in database_pumps().iterrows():
+        p = pump_from_coefficients(r)
+        if p is not None:
+            pumps.setdefault(p.name, p)
+    motors = {}
+    for _, r in pd.read_csv(DATA / "motors.csv").iterrows():
+        m = _motor_from_row(r)
+        motors.setdefault(m.name, m)
+    cables = {str(r["cable"]): Cable(str(r["cable"]), float(r["v_per_kft_amp"]), float(r["max_amps"]))
+              for _, r in pd.read_csv(DATA / "cables.csv").iterrows()}
+    return pumps, motors, cables
+
+
+DB_PUMPS, DB_MOTORS, CABLES = _database()     # cables: PROSPER's list (V per 1000 ft per amp, maximum current)
+for _k, _v in DB_PUMPS.items():
+    PUMPS.setdefault(_k, _v)
+for _k, _v in DB_MOTORS.items():
+    MOTORS.setdefault(_k, _v)
 
 
 def pump_from_table(name, od, q_min, q_max, q, head, eff=None):
@@ -510,6 +603,9 @@ def operate(pump_hp, motor: Motor, cable: Cable, freq=60.0, cable_len=9000.0, t_
 
 
 # ================================================================ vectorised pump (traverse, lift curves)
+GROUP_MIDPOINT = True
+
+
 def pump_gain(fluid, pip, t, case, pump: Pump, n_stages, freq=60.0, wear=0.0, groups=20):
     """Discharge pressure (psia) for intake pressures pip (array), stage by stage in groups of stages, each at its
     in-situ rate and density. case arrays broadcast with pip. Returns (pdp, hydraulic hp, pump hp, average RB/d)."""
@@ -524,16 +620,25 @@ def pump_gain(fluid, pip, t, case, pump: Pump, n_stages, freq=60.0, wear=0.0, gr
     pw = np.zeros_like(p)
     qs = np.zeros_like(p)
     tt = np.broadcast_to(np.asarray(t, float), p.shape)
+    def group(pp):
+        s = fluid.state(pp, tt, case)
+        q_ = np.maximum((np.asarray(s["ql"], float) + np.asarray(s["qg"], float)) * 86400.0 / BBL_FT3, 1e-6)
+        rho_ = mass / (q_ * BBL_FT3)
+        return q_, rho_, np.maximum(pump.head_stage(q_, freq, wear), 0.0) * per * rho_ / 144.0
+
     for _ in range(ng):
-        s = fluid.state(p, tt, case)
-        q_loc = (np.asarray(s["ql"], float) + np.asarray(s["qg"], float)) * 86400.0 / BBL_FT3
-        q_loc = np.maximum(q_loc, 1e-6)
-        rho = mass / (q_loc * BBL_FT3)
-        h = np.maximum(pump.head_stage(q_loc, freq, wear), 0.0) * per
-        dp = h * rho / 144.0
-        e = np.maximum(pump.efficiency(q_loc, freq), 1e-6)
+        # midpoint (predictor-corrector) over the group: the fluid is compressed as it goes up the stages - the
+        # inlet state alone under-predicts the lift of the first gassy stages (PROSPER T26 lift curves, 80 Hz)
+        q0, r0, dp0 = group(p)
+        q_loc, rho, dp = group(np.maximum(p + 0.5 * dp0, 14.7)) if GROUP_MIDPOINT else (q0, r0, dp0)
+        h = dp * 144.0 / np.maximum(rho, 1e-9)
         hyd += q_loc * dp * DP_HP
-        pw += q_loc * dp * DP_HP / e
+        ps = pump.power_stage(q_loc, freq)
+        if ps is not None:              # catalogue power x gravity (HSP: PROSPER's pump power)
+            pw += ps * per * rho / 62.428
+        else:
+            e = np.maximum(pump.efficiency(q_loc, freq), 1e-6)
+            pw += q_loc * dp * DP_HP / e
         qs += q_loc
         p = p + dp
     return p, hyd, pw, qs / ng
