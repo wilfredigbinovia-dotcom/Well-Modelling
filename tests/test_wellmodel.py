@@ -4190,3 +4190,41 @@ def test_darcy_pi_reevaluated_at_system_gor_t29():
                                    float(tab["Oil FVF (RB/STB)"].iloc[0]), 500.0, 31.6, 0.354, 0.0))
     assert m10.bubble_point(120.0) < 600.0                     # below the flowing pressures: a straight line
     assert abs((pis[1] / pis[0]) / (0.29004 / 0.60335) - 1) < 0.035
+
+
+def test_gas_lift_equilibrium_curve_prosper_t23():
+    """PROSPER's gas lift equilibrium curve (Sensitivity on injection depth, fixed 5 MMscf/d, dP across valve 100
+    psi, maximum depth 8500 ft; user's Tutorial 23 run, 500 psig, 80 % water cut, GOR 800, PE2 1.03108 / 1.00278):
+    ten depths equally spaced from the top node (600 ft) to 8500 ft, the first two with no solution in both; liquid
+    rate within 2.5 %, valve tubing pressure within 15 psi, casing head pressure within 13 psi, valve temperature
+    within 1 F."""
+    import json, dataclasses
+    from types import SimpleNamespace
+    from wellmodel import gaslift_system as wgls
+    G = 14.696
+    oil = _t05_oil()
+    ip = json.load(open(Path(__file__).parent / "data" / "t23_ipr.json"))
+    curve = SimpleNamespace(q=np.array(ip["q"]), pwf=np.array(ip["pwf"]), pr=ip["pr"], aof=max(ip["q"]), fluid="oil")
+
+    def lift_for(s, extra):
+        path, secs = _t23_path(tuple(extra))
+        return path, dataclasses.replace(s, annulus=wgls.annulus_geometry(path, secs))
+    df, prof = wgls.equilibrium_curve(lift_for, oil, lambda ch: curve, {"whp": 500 + G, "u": 8.580277, "wc": 80.0,
+                                      "gor": 800.0}, wgls.GasLiftSetup(annulus_friction=True), "pe2_style", 1.03108,
+                                      1.00278, qgi=5.0, dp_valve=100.0, max_md=8500.0, top_md=600.0,
+                                      rate_method="Automatic - Linear")
+    assert list(df["Injection depth (ft MD)"]) == [600.0 + 790.0 * k for k in range(1, 11)]
+    assert df["Liquid rate (STB/d)"].iloc[:2].isna().all() and df["Note"].iloc[0].startswith("no solution")
+    prosper = [  # liquid, CHP, valve casing, valve tubing (psig), T (F)
+        (2345.16, 819.638, 862.001, 762.001, 143.323), (3301.42, 936.547, 1002.09, 902.09, 166.439),
+        (4101.34, 1057.56, 1152.14, 1052.14, 181.562), (4805.97, 1182.99, 1312.81, 1212.81, 192.019),
+        (5429.81, 1315.21, 1487.31, 1387.31, 199.329), (5941.53, 1459.6, 1682.71, 1582.71, 204.288),
+        (6364.14, 1615.07, 1898.34, 1798.34, 207.551), (6713.11, 1775.44, 2126.67, 2026.66, 209.382)]
+    for (_, r), (q, chp, pcv, pt, t) in zip(df.iloc[2:].iterrows(), prosper):
+        assert r["Liquid rate (STB/d)"] == pytest.approx(q, rel=0.025)
+        assert r["Valve tubing pressure (psia)"] - G == pytest.approx(pt, abs=15)
+        assert r["Valve casing pressure (psia)"] == pytest.approx(r["Valve tubing pressure (psia)"] + 100)
+        assert r["Casing head pressure (psia)"] - G == pytest.approx(chp, abs=13)
+        assert r["Valve tubing temperature (F)"] == pytest.approx(t, abs=1.0)
+        assert r["Gas rate (MMscf/d)"] == pytest.approx(r["Liquid rate (STB/d)"] * 0.2 * 800 / 1e6)
+    assert len(prof) == 8

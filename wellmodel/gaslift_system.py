@@ -656,3 +656,68 @@ def details(path, fluid, params, q, setup: GasLiftSetup, correlation, p1=1.0, p2
     if "_valves" in summ:
         det["_valves"] = summ["_valves"]
     return det, pd.DataFrame([top] + rows)
+
+
+# ---------------------------------------------------------------- equilibrium curve
+EQ_RATE_METHODS = ("Fixed injection rate", "Fixed GLR injected")
+EQ_COLUMNS = ("Point", "Liquid rate (STB/d)", "Oil rate (STB/d)", "Water rate (STB/d)", "Gas rate (MMscf/d)",
+              "Gas injection rate (MMscf/d)", "Injection depth (ft MD)", "Casing head pressure (psia)",
+              "Valve casing pressure (psia)", "Valve tubing pressure (psia)", "Valve tubing temperature (F)", "Note")
+
+
+def equilibrium_curve(lift_for, fluid, ipr_for, base: dict, setup: GasLiftSetup, correlation, p1=1.0, p2=1.0,
+                      hc: HeatCapacities | None = None, qgi=5.0, glr_inj=None, dp_valve=100.0, max_md=None,
+                      top_md=0.0, n=10, rate_method="Automatic - Linear", user_rates=None):
+    """PROSPER's gas lift equilibrium curve (Sensitivity on injection depth): n injection depths equally spaced from
+    the top node (top_md) to the maximum depth of injection; at each the system (IPR + VLP) is solved with the lift
+    gas (fixed rate qgi MMscf/d, or GLR injected glr_inj scf/STB) injected at that depth. Reported: the rates, the
+    tubing pressure and temperature at the injection point, the valve casing pressure = tubing + dP across the valve
+    and the casing head pressure that gives it (lift gas column with the annulus friction and temperature of the
+    well model). The curve is the locus of the valve tubing pressures against depth. lift_for(extra_md) -> (path,
+    setup with its annulus). base: whp (psia), u, wc (%), gor. Returns a DataFrame (EQ_COLUMNS) and the paths' tubing
+    pressure profiles {depth: (md, P)}. Validated on the user's Tutorial 23 run (5 MMscf/d, dP 100, to 8500 ft)."""
+    import dataclasses
+    from scipy.optimize import brentq
+    from . import system as SYS
+    if setup.coiled is not None:
+        raise ValueError("The equilibrium curve is for gas lift through the tubing-casing annulus.")
+    max_md = float(max_md if max_md is not None else setup.max_md)
+    depths = top_md + (max_md - top_md) * np.arange(1, n + 1) / n
+    wc = float(base.get("wc", 0.0)) / 100.0
+    gor = float(base.get("gor", 0.0))
+    rows, profiles = [], {}
+    for k, d in enumerate(depths):
+        s0 = dataclasses.replace(setup, method=METHODS[0], fixed_md=float(d), qgi=float(qgi), dp_valve=float(dp_valve),
+                                 rate_mode=RATE_MODES[1] if glr_inj is not None else RATE_MODES[0],
+                                 glr_inj=float(glr_inj) if glr_inj is not None else setup.glr_inj, valves=())
+        path, s = lift_for(s0, (float(d),))
+        res, _ = SYS.solve_cases(lambda tid: path, fluid, "oil", base, [{}], ipr_for, correlation, p1, p2, hc,
+                                 method=rate_method, user_rates=user_rates, lift=s)
+        r = res[0]
+        row = {"Point": f"Injection point {k + 1}", "Injection depth (ft MD)": float(d)}
+        if r.q is None or not np.isfinite(r.q) or r.q <= 0:
+            row["Note"] = "no solution - " + (getattr(r, "note", "") or "no IPR / VLP intersection")
+            rows.append(row)
+            continue
+        q = np.array([float(r.q)])
+        cols = s.row_inputs({}, q)
+        st_ = lift_traverse(path, fluid, base["whp"], {"q": q, "wc": wc, "gor": gor, **cols}, s, correlation, p1, p2,
+                            float(base.get("u", 8.0)), hc)
+        i = int(np.argmin(np.abs(path.md - d)))
+        pt = float(st_.inj_p[0]) if st_.inj_p is not None and np.isfinite(st_.inj_p[0]) else float(st_.P[0, i])
+        pcv = pt + float(dp_valve)
+        g = float(cols["_qgi"][0])
+        flow = _flow_single(path, np.array([g]), np.array([float(d)]))
+        f = lambda ps: float(casing_profile(path, s, np.array([ps]), st_.T, flow)[0, i]) - pcv
+        try:
+            chp = brentq(f, 14.7, max(pcv, 15.0) + 1.0, xtol=1e-4)
+        except ValueError:
+            chp = np.nan
+        row.update({"Liquid rate (STB/d)": q[0], "Oil rate (STB/d)": q[0] * (1 - wc), "Water rate (STB/d)": q[0] * wc,
+                    "Gas rate (MMscf/d)": q[0] * (1 - wc) * gor / 1e6, "Gas injection rate (MMscf/d)": g,
+                    "Casing head pressure (psia)": chp, "Valve casing pressure (psia)": pcv,
+                    "Valve tubing pressure (psia)": pt, "Valve tubing temperature (F)": float(st_.T[0, i]),
+                    "Note": ""})
+        rows.append(row)
+        profiles[float(d)] = (path.md.copy(), st_.P[0].copy())
+    return pd.DataFrame(rows, columns=list(EQ_COLUMNS)), profiles

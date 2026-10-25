@@ -5538,6 +5538,7 @@ def comp_panel():
 
 CALC_MODES = ["System analysis (IPR + VLP)", "Gradient traverse", "Lift curves (VFP tables)", "Choke performance"]
 QL_MODE = "Gas lift QuickLook"
+EQC_MODE = "Gas lift equilibrium curve"
 
 
 def _qunit(kind):
@@ -5985,6 +5986,117 @@ def ql_plot(res, path, valves_tab, gauges, inj_md):
     ax.set_title("Gas lift QuickLook (valves: o opening, x closing pressure)", fontsize=10)
     fig.tight_layout()
     return fig
+
+
+def eqc_plot(df, top_md, whp):
+    """PROSPER-style equilibrium curve: valve tubing pressures against depth (the curve), the casing pressure line
+    from each casing head pressure down to its valve, and the depth of each point."""
+    G = 14.696
+    fig, ax = plt.subplots(figsize=(9.5, 5.2))
+    ok = df[df["Liquid rate (STB/d)"].notna()]
+    if len(ok):
+        d = np.r_[top_md, ok["Injection depth (ft MD)"].to_numpy()]
+        p = np.r_[whp, ok["Valve tubing pressure (psia)"].to_numpy()] - G
+        ax.plot(p, d, "s-", color="#1f3fbf", lw=2, label="Equilibrium curve")
+        for _, r in ok.iterrows():
+            ax.plot([r["Casing head pressure (psia)"] - G, r["Valve casing pressure (psia)"] - G],
+                    [top_md, r["Injection depth (ft MD)"]], "s-", color="#d62728", lw=1.6, ms=5)
+            ax.axhline(r["Injection depth (ft MD)"], color="#9b59b6", ls="--", lw=0.8)
+            ax.annotate(f"{r['Injection depth (ft MD)']:,.0f} ft, Qinj {r['Gas injection rate (MMscf/d)']:.3g} "
+                        f"MMscf/d, QL {r['Liquid rate (STB/d)']:,.0f} STB/d",
+                        (1.0, r["Injection depth (ft MD)"]), xycoords=("axes fraction", "data"), ha="right",
+                        va="bottom", fontsize=7, color="#7d3c98")
+        ax.plot([], [], "s-", color="#d62728", label="Casing pressure (CHP to the valve)")
+    ax.invert_yaxis()
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
+    ax.set_xlabel("Pressure (psig)")
+    ax.set_ylabel("Measured depth (ft)")
+    ax.grid(ls=":", alpha=0.6)
+    ax.legend(loc="lower left", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def equilibrium_mode(col, fluid, eqd, o, base, corr, p1, p2, gl, ipr_curve):
+    """Gas lift equilibrium curve (PROSPER: Sensitivity on injection depth): the system solved with the lift gas
+    injected at depths from the top node to the maximum depth of injection."""
+    G = 14.696
+    with col:
+        st.caption("At each injection depth the system (IPR + VLP, bottom node) is solved with the lift gas injected "
+                   "there; the curve is the tubing pressure at the injection point against depth, and the casing "
+                   "head pressure is the one that gives tubing + dP across the valve at that depth (lift gas column, "
+                   "annulus friction and temperature from the Gas lift data). Validated on the user's PROSPER "
+                   "Tutorial 23 run: rates within 2.5 %, valve tubing pressures within 15 psi, casing head within "
+                   "13 psi.")
+        c = st.columns(3)
+        sel(c[0], "Equilibrium curve method", ["Sensitivity on injection depth"], "eqc_method")
+        rm = sel(c[1], "Injection rate method", list(wgls.EQ_RATE_METHODS), "eqc_rate_mode",
+                 help="Fixed injection rate (validated against PROSPER), or a fixed GLR injected (scf/STB of liquid).")
+        if rm == wgls.EQ_RATE_METHODS[0]:
+            qgi = num(c[2], "Gas injection rate (MMscf/d)", "eqc_qgi", float(gl.qgi), 0.001, 500.0, None, "%.5g")
+            glr = None
+        else:
+            glr = num(c[2], "GLR injected (scf/STB)", "eqc_glr", float(gl.glr_inj), 1.0, 1e5, None, "%.5g")
+            qgi = 0.0
+        c = st.columns(3)
+        sel(c[0], "Valve settings", ["dP across valve"], "eqc_vset")
+        dpv = num(c[1], "dP across valve (psi)", "eqc_dp", float(gl.dp_valve), 0.0, 5000.0)
+        top_, secs_, _ = eqd["downhole"]
+        tub = secs_[secs_["Type"] == "Tubing"]
+        deep = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
+        mx0 = float(gl.max_md) if np.isfinite(gl.max_md) and gl.max_md < 1e8 else deep
+        max_md = num(c[2], "Maximum depth of injection (ft MD)", "eqc_max", min(mx0, deep), 1.0, 60000.0)
+        c = st.columns(3)
+        npts = int(num(c[0], "Number of injection points", "eqc_n", 10.0, 2.0, 50.0, 1.0, "%.0f"))
+        method = sel(c[1], "Rate method", RATE_METHODS, "sys_rate_method")
+        user_rates = None
+        if method == "User selected":
+            user_rates = num_list(c[2], "Rates (STB/d)", "sys_rates", "100, 500, 1000, 2000, 3000")
+        go = st.button("Calculate equilibrium curve", type="primary")
+        sig = (repr(base), corr, p1, p2, rm, qgi, glr, dpv, max_md, npts, method, repr(user_rates), repr(gl),
+               id(ipr_curve))
+        if go:
+            if max_md > deep + 1e-6:
+                st.error(f"The maximum depth of injection is below the deepest tubing ({deep:,.0f} ft MD).")
+                return
+            def lift_for(s_, extra):
+                return gl_lift_for(eqd, o, s_, extra)
+            def ipr_for(ch):
+                if not ch:
+                    return ipr_curve
+                try:
+                    return rebuild_ipr(ch)
+                except ValueError:
+                    if set(ch) <= {"wc", "gor"}:
+                        return ipr_curve
+                    raise
+            top_md = float(vlp_path(eqd, o.flow_type, ()).md[0])
+            try:
+                with st.spinner(f"Solving {npts} injection depths..."):
+                    df, _ = wgls.equilibrium_curve(lift_for, fluid, ipr_for, base, gl, corr, p1, p2,
+                                                   eqd["heat_capacities"], qgi=qgi, glr_inj=glr, dp_valve=dpv,
+                                                   max_md=max_md, top_md=top_md, n=npts, rate_method=method,
+                                                   user_rates=user_rates)
+                ss["eqc_res"] = {"sig": sig, "df": df, "top_md": top_md, "whp": float(base["whp"])}
+            except (ValueError, TypeError, KeyError) as e:
+                st.error(f"Equilibrium curve failed: {e}")
+        out = ss.get("eqc_res")
+        if out is None:
+            st.info("Press Calculate equilibrium curve.")
+            return
+        if out["sig"] != sig:
+            st.info("Inputs have changed since the last calculation - press Calculate equilibrium curve to update.")
+        df = out["df"]
+        if df["Liquid rate (STB/d)"].isna().all():
+            st.warning("No solution at any injection depth: the well does not flow with this lift gas.")
+        st.pyplot(eqc_plot(df, out["top_md"], out["whp"]), clear_figure=True)
+        show = df.copy()
+        for c_ in ("Casing head pressure (psia)", "Valve casing pressure (psia)", "Valve tubing pressure (psia)"):
+            show[c_.replace("psia", "psig")] = show.pop(c_) - G
+        st.dataframe(show.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+        st.download_button("Download equilibrium curve (CSV)", df.to_csv(index=False).encode(),
+                           "equilibrium_curve.csv")
 
 
 def quicklook_mode(col, fluid, eqd, o, corr, p1, p2, gl, ipr_curve):
@@ -7292,13 +7404,15 @@ with tabs[5]:
     JET_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "jet")
     PCP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("pcp_motor", "pcp_rod"))
     HSP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "hsp")
-    _modes = CALC_MODES + ([QL_MODE] if GL_ON else [])
+    _modes = CALC_MODES + ([QL_MODE] if GL_ON else []) + \
+        ([EQC_MODE] if GL_ON and getattr(_o, "artificial_lift", "") == "gas_lift" else [])
     if val("calc_mode") not in _modes:
         put("calc_mode", CALC_MODES[0])
     mode = radio(st, "Calculation", _modes, "calc_mode", horizontal=True, label_visibility="collapsed")
     SYS = mode == CALC_MODES[0]
     CHOKE = mode == CALC_MODES[3]
     QLK = mode == QL_MODE
+    EQC = mode == EQC_MODE
     gl_setup = ss.get("gl_setup") if GL_ON else None
     st.subheader(mode)
     o = ss.get("options")
@@ -7314,7 +7428,7 @@ with tabs[5]:
                    else "Complete the Equipment Data tab first.")
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
         blocker = "Complete the Equipment Data tab first."
-    elif (SYS or QLK) and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
+    elif (SYS or QLK or EQC) and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
         blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
     elif SRP_ON and mode == CALC_MODES[1]:
         blocker = ("PROSPER has no gradient traverse for a sucker rod pump well: use System analysis (solution at the "
@@ -7329,7 +7443,7 @@ with tabs[5]:
         blocker = "Enter the sucker rod pump in the Equipment Data tab first."
     elif GL_ON and gl_setup is None:
         blocker = "Enter the gas lift data in the Equipment Data tab first."
-    elif GL_ON and not QLK and gl_setup.method in wgls.METHODS[2:] and not gl_setup.valves:
+    elif GL_ON and not (QLK or EQC) and gl_setup.method in wgls.METHODS[2:] and not gl_setup.valves:
         blocker = "Enter the gas lift valve depths in the Equipment Data tab (Gas lift data) first."
     if blocker:
         st.info(blocker)
@@ -7808,6 +7922,8 @@ with tabs[5]:
                                                "system_analysis.csv")
             elif QLK:
                 quicklook_mode(right, fluid, eqd, o, corr, p1, p2, gl_setup, ipr_curve)
+            elif EQC:
+                equilibrium_mode(right, fluid, eqd, o, base, corr, p1, p2, gl_setup, ipr_curve)
             elif mode == CALC_MODES[1]:
                 traverse_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
                               ss.get("esp_equipment") if ESP_ON else None, gl_setup,
