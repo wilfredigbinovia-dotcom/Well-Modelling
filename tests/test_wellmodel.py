@@ -5044,3 +5044,92 @@ def test_emulsion_viscosity_t46():
         assert np.abs(s["mu_l"] / d.mu_l.to_numpy()[1:-1] - 1).max() < 0.003, w
     proj = json.load(open(__file__.replace("tests/test_wellmodel.py", "examples/T46_Modelling_Emulsions.wellmodel.json")))
     assert proj["widgets"]["opt_emulsions"] == "emulsion" and proj["inputs"]["emul_p3"] == 3.77291
+
+
+def _t12_read(path):
+    """PROSPER MultiLateral report: (branch rates, PI, composite skin, {branch: segment array})."""
+    import re
+    txt = open(path).read()
+    seg = {}
+    for blk in txt.split("SEGMENT DETAILS")[1:]:
+        name = blk.split("\n")[1].strip(" .")
+        rows = []
+        for line in blk.splitlines()[9:]:
+            try:
+                v = [float(x) for x in line.split()]
+            except ValueError:
+                continue
+            if len(v) == 8:
+                rows.append(v)
+        seg[name] = np.array(rows)
+    m = re.search(r"Reservoir\s+([\d.]+)\s+(-?[\d.]+)\s+4900", txt)
+    br = {n: float(re.search(n + r"\s+([\d.]+)\s+([\d.]+)", txt).group(1)) for n in ("Branch 1", "Branch 2")}
+    return br, float(m.group(1)), float(m.group(2)), seg
+
+
+def test_multilateral_ipr_t12():
+    """PROSPER Tutorial 12 (Multilateral Well IPR), the user's file: Powderhall gas (T06 PVT, 0.58, 250 F, Pr 5300
+    psig), two branches from a junction at 5408 ft MD, 2 x 50 ft perforated each (skin 1), 25 md, kv 2.5 md, 55 ft,
+    390 acres. Infinite conductivity: 11 one-point runs at 5000 psig (kv 1-25, skin 0/1, 390/1000 acres, D 0 /
+    entered / calculated) within 1.3 % (2.8 %: skin 0 with the calculated D, PROSPER's non-Darcy iteration not
+    converged at low drawdown), the kv = kh rate profile along both branches within 2.5 %, the IPR curve within 0.5 %
+    below 4200 psig; finite conductivity: junction pressure within 1 psi and rate within 0.5 % at 5000 psig, the IPR
+    within 5 %."""
+    import dataclasses
+    from wellmodel import multilateral as ML, gaspvt as gp, project
+    G = 14.696
+    D = Path(__file__).parent / "data"
+    proj = project.loads(open(Path(__file__).parent.parent / "examples" / "T06_PVT_Matching_For_Gas_Well.wellmodel.json").read())
+    g = gp.GasPVTInputs(gas_sg=0.58, sep_p=200, cgr=1, cond_api=50, wgr=1, salinity_ppm=100000, co2=0.5, n2=2.0,
+                        t_res=250, p_res=5300)
+    g.match = gp.match_gas(g, [(166.0, proj["tables"]["pvt_gas_match"])])
+    base = ML.example_t12()
+    assert base.check() == []
+
+    def well(kv=2.5, skin=1.0, area=390.0, d=None):
+        brs = [dataclasses.replace(b, perfs=[ML.Perforation(p.md_top, p.md_bottom, skin, d) for p in b.perfs])
+               for b in base.branches]
+        return dataclasses.replace(base, branches=brs, res=dataclasses.replace(base.res, kv=kv, area=area))
+    mod0 = ML.MultilateralModel(well(), g, None, 1.0, 1.0)
+    assert mod0.D == pytest.approx(2.7862e-6 * 24.45, rel=0.01)          # PROSPER shows the calculated D / 24.45
+    de = 5.5724e-6
+    runs = [("t12_onepoint_infinite.prn", 2.5, 1, 390, None, 0.013), ("t12_inf_d0.prn", 2.5, 1, 390, 0.0, 0.013),
+            ("t12_inf_d5.5724e-6.prn", 2.5, 1, 390, de, 0.013), ("t12_inf_skin0.prn", 2.5, 0, 390, None, 0.03),
+            ("t12_inf_kv25.prn", 25, 1, 390, None, 0.013), ("t12_inf_kv25_s1_de.prn", 25, 1, 390, de, 0.013),
+            ("t12_inf_kv25_s0_de.prn", 25, 0, 390, de, 0.013), ("t12_inf_kv2.5_s0_de.prn", 2.5, 0, 390, de, 0.013),
+            ("t12_inf_kv1_s1_de.prn", 1, 1, 390, de, 0.013), ("t12_inf_kv10_s1_de.prn", 10, 1, 390, de, 0.013),
+            ("t12_inf_kv25_s1_a1000_de.prn", 25, 1, 1000, de, 0.013)]
+    for fn, kv, sk, area, d, tol in runs:
+        br, pi, comp, seg = _t12_read(D / fn)
+        mod = ML.MultilateralModel(well(kv, sk, area, d), g, None, 1.0, 1.0)
+        s, tab = mod.results(5000 + G, finite=False)
+        assert s["Total gas rate (MMscf/d)"] == pytest.approx(sum(br.values()), rel=tol), fn
+        if fn == "t12_inf_kv25_s1_de.prn":            # kv = kh: PROSPER's rate per foot along both branches
+            tot = sum(br.values())
+            for name in ("Branch 1", "Branch 2"):
+                t = tab[tab.Branch == name]
+                mid = 0.5 * (t["MD top (ft)"] + t["MD bottom (ft)"]).to_numpy()
+                ours = (t["Rate per ft (MMscf/d/ft)"] / s["Total gas rate (MMscf/d)"]).to_numpy()
+                pm = 0.5 * (seg[name][:, 0] + seg[name][:, 1])
+                ok = np.array([np.abs(mid - x).min() < 0.15 for x in pm])
+                theirs = seg[name][ok, 4] / tot
+                assert np.abs(np.interp(pm[ok], mid, ours) / theirs - 1).max() < 0.025, name
+    # infinite-conductivity IPR (D calculated)
+    ci = pd.read_csv(D / "t12_curve_infinite.csv")
+    for _, r in ci[ci.p <= 4200].iterrows():
+        assert mod0.rate_infinite(r.p + G) / 1000 == pytest.approx(r.q, rel=0.005)
+    # finite conductivity: the one-point run at 5000 psig and the IPR
+    br, pi, comp, seg = _t12_read(D / "t12_onepoint_finite.prn")
+    s, tab = mod0.results(5000 + G, finite=True)
+    assert s["Total gas rate (MMscf/d)"] == pytest.approx(23.545, rel=0.005)
+    assert s["Junction pressure (psia)"] - G == pytest.approx(5002.3, abs=1.0)
+    assert s["Branch 1 rate (MMscf/d)"] == pytest.approx(br["Branch 1"], rel=0.015)
+    assert s["Branch 2 rate (MMscf/d)"] == pytest.approx(br["Branch 2"], rel=0.02)
+    assert s["Composite skin"] == pytest.approx(comp, abs=0.1) and s["Layer PI (MMscf/d per 1e6 psi2/cp)"] == pytest.approx(pi, rel=0.01)
+    cf = pd.read_csv(D / "t12_curve_finite.csv")
+    for _, r in cf[cf.p.isin([4185.5, 2793.7, 1401.8, 566.7, 10.0])].iterrows():
+        assert mod0.solve_finite(r.p + G)["Q"] / 1000 == pytest.approx(r.q, rel=0.05), r.p
+    c = ML.ipr_curve(well(), g, 1.0, 1.0, finite=False, n=8)
+    assert c.aof / 1000 == pytest.approx(146.612, rel=0.01)
+    pj = project.loads(open(Path(__file__).parent.parent / "examples" / "T12_Multilateral_Well_IPR.wellmodel.json").read())
+    assert pj["inputs"]["ipr_model_gas"] == "Multilateral Well" and len(pj["tables"]["ipr_mlat_pf"]) == 4

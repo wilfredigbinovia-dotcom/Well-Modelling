@@ -49,6 +49,7 @@ from wellmodel import hsp_quicklook as whql
 from wellmodel import srp_cards as wsrpc
 from wellmodel import diluent as wdil
 from wellmodel import emulsion as wem
+from wellmodel import multilateral as wmlat
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -1766,7 +1767,7 @@ OIL_ADV = ["Hydraulically Fractured Well", "Horizontal Well - No Flow Boundaries
            "Horizontal Well - Constant Pressure Upper Boundary",
            "Horizontal Well - Transverse Vertical Fractures", "Horizontal Well - friction dP",
            "Dual Porosity", "Multi-layer", "Multi-layer with dP loss in wellbore", "Multiphase Pseudo Pressure"]
-GAS_ADV = OIL_ADV + ["Modified Isochronal"]
+GAS_ADV = OIL_ADV + ["Modified Isochronal", "Multilateral Well"]
 STILL_NOT = {
     "oil": ["SkinAide (ELF proprietary method)",
             "Thermally Induced Fracture (water injectors - injection IPRs come with injector support)"],
@@ -2255,6 +2256,144 @@ def ml_dp_example(gas):
     return pd.DataFrame(rows, columns=cols, index=pd.RangeIndex(1, len(rows) + 1, name="Layer"))
 
 
+# ---------------------------------------------------------------- multilateral well (PROSPER Tutorial 12)
+def _mlat_example_tables():
+    w = wmlat.example_t12()
+    t1 = pd.DataFrame({"MD (ft)": [st_[0] for st_ in w.t1_stations], "TVD (ft)": [st_[1] for st_ in w.t1_stations],
+                       "Azimuth (deg)": [st_[2] for st_ in w.t1_stations]})
+    br = pd.DataFrame({"Branch": [b.name for b in w.branches], "ID (in)": [b.id_in for b in w.branches],
+                       "Roughness (in)": [b.rough_in for b in w.branches]})
+    sv = pd.DataFrame([{"Branch": b.name, "MD (ft)": float(m), "TVD (ft)": float(t), "Azimuth (deg)": float(a)}
+                       for b in w.branches for (m, t, a) in b.stations])
+    pf = pd.DataFrame([{"Branch": b.name, "MD start (ft)": p.md_top, "MD end (ft)": p.md_bottom, "Skin": p.skin,
+                        "Non-Darcy D (1/(Mscf/d))": np.nan} for b in w.branches for p in b.perfs])
+    return {"ipr_mlat_t1": t1, "ipr_mlat_br": br, "ipr_mlat_sv": sv, "ipr_mlat_pf": pf}
+
+
+def _mlat_load_example():
+    for k_, v_ in _mlat_example_tables().items():
+        ss[k_] = v_
+    ss["_ver_mlat"] = ss.get("_ver_mlat", 0) + 1
+    for k_, v_ in {"ipr_mlat_tie_md": 5400.0, "ipr_mlat_tie_tvd": 4900.0, "ipr_mlat_t1_id": 2.8,
+                   "ipr_mlat_t1_rough": 0.0006, "ipr_k": 25.0, "ipr_h": 55.0, "ipr_area": 390.0, "ipr_mlat_top": 4900.0,
+                   "ipr_mlat_kv": 2.5, "ipr_phi": 0.18, "ipr_swc": 0.2, "ipr_ca": 31.6, "ipr_rw": 0.354}.items():
+        put(k_, v_)
+
+
+def _mlat_table(key, cfg=None):
+    if key not in ss:
+        ss[key] = _mlat_example_tables()[key]
+    return track(key, st.data_editor(ss[key], key=f"{key}_ed_{ss.get('_ver_mlat', 0)}", num_rows="dynamic",
+                                     width="stretch", column_config=cfg or {}))
+
+
+def multilateral_ui(o, pr, t_f, wgr, cgr):
+    """PROSPER Inflow Type = MultiLateral Well (Petroleum Experts reservoir model), dry and wet gas."""
+    st.caption("A network: the tie point (the bottom of the VLP - set it at the deepest equipment), a tubing T1 down "
+               "to the junction, and branches leaving the junction that produce from one reservoir layer through "
+               "their perforations. Each perforated survey section is split into 20 segments, each a line source in "
+               "the closed drainage box (centred on the tie point); the rate of every segment follows from one "
+               "linear solve, with finite conductivity the gravity and friction along T1 and the branches. "
+               "Calibrated on the user's PROSPER Tutorial 12 runs (see the README).")
+    st.button("Load Tutorial 12 well", key="ipr_mlat_ex", on_click=_mlat_load_example)
+    c = st.columns(4)
+    tie_md = num(c[0], "Tie point MD (ft)", "ipr_mlat_tie_md", 5400.0, 0.0, 4e4, 10.0)
+    tie_tvd = num(c[1], "Tie point TVD (ft)", "ipr_mlat_tie_tvd", 4900.0, 0.0, 4e4, 10.0)
+    t1_id = num(c[2], "T1 inside diameter (in)", "ipr_mlat_t1_id", 2.8, 0.5, 20.0, 0.1)
+    t1_r = num(c[3], "T1 roughness (in)", "ipr_mlat_t1_rough", 0.0006, 0.0, 0.1, None, "%.5f")
+    st.markdown("**T1 deviation survey** (tie point to the junction)")
+    t1 = _mlat_table("ipr_mlat_t1")
+    st.markdown("**Branches**")
+    br = _mlat_table("ipr_mlat_br")
+    names = [str(x) for x in br["Branch"].dropna()]
+    st.markdown("**Branch deviation surveys** (first point of each branch = the junction)")
+    sv = _mlat_table("ipr_mlat_sv", {"Branch": st.column_config.SelectboxColumn(options=names, required=True)})
+    st.markdown("**Perforations** (Non-Darcy D blank = calculated from k, the wellbore radius and the interval "
+                "length, as PROSPER's Calculate)")
+    pf = _mlat_table("ipr_mlat_pf", {"Branch": st.column_config.SelectboxColumn(options=names, required=True)})
+    st.markdown("**Reservoir (Petroleum Experts)**")
+    c = st.columns(4)
+    k = num(c[0], "Reservoir permeability (md)", "ipr_k", 25.0, 0.001, 1e5, 1.0)
+    h = num(c[1], "Reservoir thickness (ft)", "ipr_h", 55.0, 0.1, 1e4, 1.0)
+    area = num(c[2], "Drainage area (acres)", "ipr_area", 390.0, 0.1, 1e6, 10.0)
+    top = num(c[3], "Reservoir top depth (TVD, ft)", "ipr_mlat_top", 4900.0, 0.0, 4e4, 10.0)
+    c = st.columns(4)
+    kv = num(c[0], "Vertical permeability (md)", "ipr_mlat_kv", 2.5, 0.0001, 1e5, 0.1)
+    phi = num(c[1], "Reservoir porosity (fraction)", "ipr_phi", 0.18, 0.01, 0.5, 0.01)
+    swc = num(c[2], "Connate water saturation (fraction)", "ipr_swc", 0.2, 0.0, 0.9, 0.01)
+    ca = num(c[3], "Dietz shape factor", "ipr_ca", 31.6, 0.01, 100.0, 0.1)
+    c = st.columns(4)
+    rw = num(c[0], "Wellbore radius (ft)", "ipr_rw", 0.354, 0.05, 5.0, 0.001, "%.3f")
+    cond = sel(c[1], "Conductivity", ["Finite conductivity", "Infinite conductivity"], "ipr_mlat_cond")
+    f_ = lambda v, d=np.nan: float(v) if pd.notna(v) else d
+    branches = []
+    for _, b in br.iterrows():
+        if pd.isna(b.get("Branch")):
+            continue
+        nm = str(b["Branch"])
+        rows = sv[sv["Branch"] == nm].dropna(subset=["MD (ft)", "TVD (ft)"]).sort_values("MD (ft)")
+        stations = [(float(r_["MD (ft)"]), float(r_["TVD (ft)"]), f_(r_.get("Azimuth (deg)"), 0.0)) for _, r_ in rows.iterrows()]
+        perfs = [wmlat.Perforation(float(r_["MD start (ft)"]), float(r_["MD end (ft)"]), f_(r_.get("Skin"), 0.0),
+                                   (f_(r_.get("Non-Darcy D (1/(Mscf/d))")) if pd.notna(r_.get("Non-Darcy D (1/(Mscf/d))"))
+                                    else None))
+                 for _, r_ in pf[pf["Branch"] == nm].dropna(subset=["MD start (ft)", "MD end (ft)"]).iterrows()]
+        if len(stations) < 2:
+            raise ValueError(f"{nm}: enter at least two survey points.")
+        branches.append(wmlat.Branch(nm, stations, f_(b.get("ID (in)"), 2.8), f_(b.get("Roughness (in)"), 0.0006), perfs))
+    t1r = t1.dropna(subset=["MD (ft)", "TVD (ft)"]).sort_values("MD (ft)")
+    t1_st = [(float(r_["MD (ft)"]), float(r_["TVD (ft)"]), f_(r_.get("Azimuth (deg)"), 0.0)) for _, r_ in t1r.iterrows()]
+    if len(t1_st) < 2:
+        raise ValueError("T1: enter the tie point and the junction.")
+    if abs(t1_st[0][0] - tie_md) > 0.5 or abs(t1_st[0][1] - tie_tvd) > 0.5:
+        st.warning("The T1 survey should start at the tie point.")
+    for b in branches:
+        if abs(b.stations[0][0] - t1_st[-1][0]) > 0.5 or abs(b.stations[0][1] - t1_st[-1][1]) > 0.5:
+            st.warning(f"{b.name}: the survey should start at the junction ({t1_st[-1][0]:g} ft MD, "
+                       f"{t1_st[-1][1]:g} ft TVD).")
+    res = wmlat.Reservoir(float(pr), float(t_f), k, h, area, top, kv, phi, swc, ca, rw)
+    well = wmlat.MultilateralWell(tie_md, tie_tvd, t1_st, branches, res, t1_id, t1_r)
+    for m_ in well.check():
+        st.warning(m_)
+    gpvt = gas_pvt_inputs(o)
+    finite = cond == "Finite conductivity"
+    args_ = (well, gpvt, float(wgr or 0.0), float(cgr or 0.0), finite)
+    sig_ = repr((repr(well), repr(gpvt), wgr, cgr, finite))
+    hit = ss.get("_mlat_cache")
+    if hit is not None and hit[0] == sig_:
+        curve = hit[1]
+    else:
+        with st.spinner("Solving the multilateral network..."):
+            curve = wmlat.ipr_curve(*args_)
+        ss["_mlat_cache"] = (sig_, curve)
+    ss["ipr_recipe"] = (wmlat.ipr_curve, args_, {})
+    mod = curve.model_obj
+    st.markdown("**Results at one tie-point pressure**")
+    c = st.columns(4)
+    p1 = num(c[0], "Tie-point pressure (psia)", "ipr_mlat_p", min(5014.696, float(pr) - 100.0), 14.7, float(pr) - 0.1, 50.0)
+    summ, tab = mod.results(p1, finite=finite)
+    c[1].metric("Total gas rate (MMscf/d)", f"{summ['Total gas rate (MMscf/d)']:.3f}")
+    c[2].metric("Layer PI (MMscf/d per 10⁶ psi²/cp)", f"{summ['Layer PI (MMscf/d per 1e6 psi2/cp)']:.5f}")
+    c[3].metric("Composite skin", f"{summ['Composite skin']:.2f}")
+    st.dataframe(pd.DataFrame([{"Branch": b.name, "Rate (MMscf/d)": summ[f"{b.name} rate (MMscf/d)"],
+                                "Junction pressure (psia)": summ["Junction pressure (psia)"]} for b in branches]),
+                 hide_index=True, width="stretch")
+    fig, ax = plt.subplots(figsize=(8, 3.6))
+    for i, b in enumerate(branches):
+        d_ = tab[tab.Branch == b.name]
+        ax.plot(d_["Rate per ft (MMscf/d/ft)"], 0.5 * (d_["MD top (ft)"] + d_["MD bottom (ft)"]), "o", ms=3,
+                color=wplt.SERIES[i % len(wplt.SERIES)], label=b.name)
+    ax.invert_yaxis()
+    ax.set_xlabel("Rate per unit length (MMscf/d/ft)")
+    ax.set_ylabel("Measured depth (ft)")
+    ax.legend()
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    with st.expander("Segment details"):
+        st.dataframe(tab.style.format(precision=4), hide_index=True, width="stretch")
+        st.caption(f"Non-Darcy D used {mod.D:.4e} 1/(Mscf/d) (PROSPER shows a calculated D divided by about 24.45).")
+    return curve
+
+
 def multilayer_dp_ui(o, gas, t_f, pvt, gasp):
     """PROSPER System | Inflow Performance | MultiLayer - dP Loss in WellBore. Returns the IPR curve at TOP."""
     st.caption("Each perforated layer has its own pressure (at the layer bottom), inflow model and PVT "
@@ -2703,6 +2842,8 @@ with tabs[2]:
                                                    tdays, omega, lam, pvt["mu"], skin, **oil_kw)
                 elif model == "Multiphase Pseudo Pressure":
                     curve = mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr)
+                elif model == "Multilateral Well":
+                    curve = multilateral_ui(o, pr, t_f, wgr, cgr)
                 elif model == "Multi-layer with dP loss in wellbore":
                     curve = multilayer_dp_ui(o, gas, t_f, pvt, gasp)
                 elif model == "Multi-layer":
