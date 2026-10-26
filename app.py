@@ -51,6 +51,8 @@ from wellmodel import diluent as wdil
 from wellmodel import emulsion as wem
 from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
+from wellmodel import thermal as wth
+from wellmodel import enthalpy as web
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -449,6 +451,10 @@ CAPTIONS = {
                   "emulsion": "Oil-water emulsion viscosity against water cut (PROSPER Tutorial 46): data in PVT"},
     "water_vapour": {"none": "Water produced as liquid only",
                      "calculate": "Dry and wet gas: water vaporised in the gas condenses up the well"},
+    "temp_model": {"rough": "Temperature from the geothermal gradient and one U value (heat loss only)",
+                   "improved": "Energy balance with Joule-Thomson, gravity and U by depth (PROSPER Tutorial 41)",
+                   "enthalpy": "Energy balance with U calculated from the completion, casing record, lithology and "
+                               "producing time (PROSPER Tutorial 40)"},
     "artificial_lift": {"none": "Natural flow",
                         "gas_lift": "Continuous gas lift: Gas lift data in Equipment, Calculation (design in Design)",
                         "ct_gas_lift": "Lift gas down a coiled tubing, production up the annulus: Coiled tubing data in "
@@ -482,7 +488,7 @@ with tabs[0]:
                "and which calculations apply.")
     sel_opts = {}
     groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour", "emulsions"]),
-              ("Well", ["well_type", "flow_type", "artificial_lift"]),
+              ("Well", ["well_type", "flow_type", "artificial_lift", "temp_model"]),
               ("Completion", ["completion", "sand_control"])]
     cols = st.columns(3, gap="large")
     for col, (title, fields) in zip(cols, groups):
@@ -3132,6 +3138,13 @@ ss.setdefault("eq_surface", blank_grid(weq.SURFACE_COLUMNS, EQ_ROWS["surface"], 
 ss.setdefault("eq_downhole", blank_grid(weq.DOWNHOLE_COLUMNS, EQ_ROWS["downhole"], DH_TEXT))
 ss.setdefault("eq_geo", blank_grid(weq.GEO_COLUMNS, EQ_ROWS["geo"]))
 ss.setdefault("eq_long", pd.DataFrame({c: pd.Series(dtype=float) for c in weq.SURVEY_COLUMNS}))
+IHTC_COLUMNS = ["Measured Depth (ft)", "Heat Transfer Coefficient (BTU/h/ft2/F)"]
+DRILL_COLUMNS = ["Drilling Depth (ft)", "Hole Diameter (in)", "Casing Shoe Depth (ft)", "Casing Outside Diameter (in)",
+                 "Casing Weight (lb/ft)", "Top Cement Depth (ft)", "Casing Top Depth (ft)", "Mud Density (lb/gal)"]
+LITHO_COLUMNS = ["Formation Type", "Bottom Depth (ft)", "Porosity (fraction)", "In Situ Fluid"]
+ss.setdefault("eq_ihtc", blank_grid(IHTC_COLUMNS, 12))
+ss.setdefault("eq_drill", blank_grid(DRILL_COLUMNS, 8))
+ss.setdefault("eq_litho", blank_grid(LITHO_COLUMNS, 10, ("Formation Type", "In Situ Fluid")))
 
 
 def load_equipment_example():
@@ -4363,6 +4376,116 @@ def diluent_data_panel(o, top_md, secs):
     return setup
 
 
+def temperature_model_panel(o, secs, top_md, bottom_md):
+    """Data of the Improved Approximation (U by depth) or the Enthalpy Balance (completion, casing record,
+    lithology). Stores ss['thermal_setup'] and returns the issues for the status table."""
+    model = getattr(o, "temp_model", "rough") if o is not None else "rough"
+    if model == "rough":
+        ss.pop("thermal_setup", None)
+        return []
+    st.divider()
+    iss = []
+    if model == "improved":
+        st.markdown("**Improved approximation - heat transfer coefficient by depth**")
+        st.caption("PROSPER Tutorial 41: the energy balance with gravity, Joule-Thomson and heat loss to the geothermal "
+                   "gradient above. Each row's U applies over the interval ending at its measured depth (U referred to "
+                   "the flow ID, as the single U value of the Rough Approximation, which it replaces).")
+        cc = st.columns([1, 1.3])
+        with cc[0]:
+            ed = grid("ihtc", {c_: st.column_config.NumberColumn(c_, format="%g") for c_ in IHTC_COLUMNS},
+                      height=36 * 8)
+        d = ed.apply(pd.to_numeric, errors="coerce").dropna(how="all")
+        md_, u_ = d.iloc[:, 0].to_numpy(float), d.iloc[:, 1].to_numpy(float)
+        if not len(d):
+            iss.append(("error", "Enter at least one depth and heat transfer coefficient."))
+        elif np.isnan(md_).any() or np.isnan(u_).any() or (u_ <= 0).any():
+            iss.append(("error", "Every row needs a depth and a positive heat transfer coefficient."))
+        elif not np.all(np.diff(md_) > 0):
+            iss.append(("error", "Depths must increase down the table."))
+        elif bottom_md is not None and md_.max() < bottom_md - 1:
+            iss.append(("warning", f"The table stops at {md_.max():,.0f} ft; its last U is used down to "
+                                   f"{bottom_md:,.0f} ft."))
+        show_issues(iss)
+        if not any(l == "error" for l, _ in iss):
+            ss["thermal_setup"] = {"model": "improved", "md": md_, "u": u_}
+        else:
+            ss.pop("thermal_setup", None)
+        return iss
+    st.markdown("**Enthalpy balance - drilling, completion and lithology**")
+    st.caption("PROSPER Tutorial 40: U at every depth from forced convection, the annulus (free convection and "
+               "radiation in the completion fluid above the packer), casings, cement and mud, and transient "
+               "conduction into the formation layer for the producing time; the same energy balance as the Improved "
+               "Approximation. Calibrated on the user's T40 file - see the README.")
+    c = st.columns(4)
+    fluid_c = sel(c[0], "Completion fluid", list(web.COMPLETION_FLUIDS), "eb_cfluid")
+    dens = num(c[1], "Completion fluid density (lb/US gal)", "eb_cdens", 12.0, 6.0, 25.0)
+    packer = num(c[2], "Packer depth (ft MD)", "eb_packer", float(round(bottom_md or 10000.0)), 0.0, 60000.0)
+    days = num(c[3], "Days since production started", "eb_days", float(val("ipr_tdays", 50.0)), 0.001, 1e5)
+    c = st.columns(4)
+    kcem = num(c[0], "Cement conductivity (BTU/h/ft/F)", "eb_kcem", 0.5, 0.01, 10.0, None, "%.3g")
+    kcas = num(c[1], "Casing conductivity (BTU/h/ft/F)", "eb_kcas", 26.0, 0.1, 100.0, None, "%.3g")
+    st.markdown("Drilling details (one row per casing string)")
+    ed_d = grid("drill", {c_: st.column_config.NumberColumn(c_, format="%g") for c_ in DRILL_COLUMNS}, height=36 * 6)
+    st.markdown("Lithology (one row per formation layer, top down)")
+    ed_l = grid("litho", {"Formation Type": st.column_config.SelectboxColumn("Formation Type", options=list(web.ROCKS)),
+                          "Bottom Depth (ft)": st.column_config.NumberColumn("Bottom Depth (ft)", format="%g"),
+                          "Porosity (fraction)": st.column_config.NumberColumn("Porosity (fraction)", format="%g"),
+                          "In Situ Fluid": st.column_config.SelectboxColumn("In Situ Fluid", options=list(web.IN_SITU))},
+                height=36 * 6)
+    casings = []
+    for _, r in ed_d.iterrows():
+        v = [pd.to_numeric(r[c_], errors="coerce") for c_ in DRILL_COLUMNS]
+        if all(pd.isna(x) for x in v):
+            continue
+        if any(pd.isna(x) for x in v[:6]):
+            iss.append(("error", "Each drilling row needs drilling depth, hole diameter, shoe, OD, weight and top "
+                                 "of cement."))
+            continue
+        casings.append(web.Casing(*[float(x) for x in v[:6]], 0.0 if pd.isna(v[6]) else float(v[6]),
+                                  10.0 if pd.isna(v[7]) else float(v[7])))
+    litho = []
+    for _, r in ed_l.iterrows():
+        t_, b_ = r["Formation Type"], pd.to_numeric(r["Bottom Depth (ft)"], errors="coerce")
+        if not isinstance(t_, str) or not t_:
+            continue
+        if pd.isna(b_):
+            iss.append(("error", f"Lithology {t_}: enter the bottom depth."))
+            continue
+        ph = pd.to_numeric(r["Porosity (fraction)"], errors="coerce")
+        litho.append(web.Lithology(float(b_), t_, 0.0 if pd.isna(ph) else float(ph),
+                                   r["In Situ Fluid"] if isinstance(r["In Situ Fluid"], str) and r["In Situ Fluid"]
+                                   else "Water"))
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    tod = None
+    if tub is not None and len(tub) and "Tubing OD (in)" in tub and tub["Tubing OD (in)"].notna().any():
+        tod = float(tub["Tubing OD (in)"].dropna().iloc[-1])
+    tend = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else None
+    if tod is None:
+        iss.append(("info", "No tubing OD in the downhole equipment: tubing ID + 0.5 in is used for the annulus."))
+    data = web.EnthalpyData(casings, litho, packer, fluid_c, dens, days, kcem, kcas, tubing_od=tod, tubing_end=tend)
+    iss += data.check()
+    if litho and bottom_md is not None and max(l.bottom for l in litho) < bottom_md - 1:
+        iss.append(("warning", "The lithology stops above the bottom of the well; its last layer is used below."))
+    show_issues(iss)
+    if not any(l == "error" for l, _ in iss):
+        ss["thermal_setup"] = {"model": "enthalpy", "data": data}
+    else:
+        ss.pop("thermal_setup", None)
+    return iss
+
+
+def with_thermal(path):
+    """Attach the Improved Approximation / Enthalpy Balance model of the Equipment tab to a flow path."""
+    th = ss.get("thermal_setup")
+    o_ = ss.get("options")
+    if th is None or path is None or getattr(o_, "temp_model", "rough") == "rough":
+        return path
+    if th["model"] == "improved":
+        return dataclasses.replace(path, thermal={"model": "improved",
+                                                  "u_seg": wth.u_segments(path, th["md"], th["u"])})
+    return dataclasses.replace(path, thermal={"model": "enthalpy", "data": th["data"]})
+
+
 MPUMP_MODELS = ["OneSubsea H800/65 (FMPP500) - fitted", "Constant efficiency", "User coefficients"]
 
 
@@ -4784,6 +4907,7 @@ with tabs[3]:
             elif not survey_ok:
                 st.info("Enter a valid deviation survey to calculate formation TVD.")
         show_issues(iss)
+        status["Temperature model"] = temperature_model_panel(o, secs, top_md, bottom_md)
 
     # --------------------------------------------------- average heat capacities
     with sub[4]:
@@ -4932,7 +5056,7 @@ def vlp_path(eqd, flow_type, extra_md):
     top, secs, pts = eqd["downhole"]
     smd, stvd = eqd["survey"]
     gmd, gt = eqd["geothermal"]
-    return wvlp.build_flow_path(top, secs, pts, smd, stvd, gmd, gt, flow_type, extra_md)
+    return with_thermal(wvlp.build_flow_path(top, secs, pts, smd, stvd, gmd, gt, flow_type, extra_md))
 
 
 def rebuild_ipr(changes):
@@ -8766,8 +8890,8 @@ with tabs[5]:
                                     if tid is not None:
                                         s2.loc[s2["Type"] == "Tubing", "Flow ID (in)"] = float(tid)
                                     smd_, stvd_ = eqd["survey"]
-                                    path_cache[tid] = wvlp.build_flow_path(top_, s2, pts_, smd_, stvd_, gmd, gt, o.flow_type,
-                                                                           gl_extra)
+                                    path_cache[tid] = with_thermal(wvlp.build_flow_path(
+                                        top_, s2, pts_, smd_, stvd_, gmd, gt, o.flow_type, gl_extra))
                                 return path_cache[tid]
                             lift_ = None
                             if GL_ON:

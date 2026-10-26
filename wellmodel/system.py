@@ -403,6 +403,11 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
                                         "Total liquid (STB/d)": float(qq[-1] + qd[-1]),
                                         "Total water cut (%)": 100 * float((qq[-1] * case["wc"][-1] + qd[-1])
                                                                             / (qq[-1] + qd[-1]))}
+        elif path.thermal is not None:                 # temperature coupled to pressure: from the traverse
+            whp_ = np.append(r.pwh, r.pwh[-1]) if r.pwh is not None else float(r.params["whp"])
+            _, T_ = V.traverse(path, fluid, np.broadcast_to(np.asarray(whp_, float), qq.shape).copy(), case,
+                               correlation, p1, p2, float(r.params["u"]), hc)
+            tt = T_[:, 0]
         else:
             w, cp = fluid.mass_cp(case, hc)
             tt = V.temperature_profile(path, w, cp, float(r.params["u"]))[:, 0]

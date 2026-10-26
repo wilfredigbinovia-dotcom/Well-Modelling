@@ -5221,3 +5221,94 @@ def test_surface_multiphase_pump_t31():
 def q_increasing(res):
     q = [r.q for r in res]
     return all(b > a for a, b in zip(q, q[1:]))
+
+
+def _t40_path(casing_id):
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0018, "Tubing Outside Diameter (in)": 4.5},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.5},
+            {"Type": "Tubing", "Measured Depth (ft)": 11800, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0018, "Tubing Outside Diameter (in)": 4.5},
+            {"Type": "Casing", "Measured Depth (ft)": 12000, "Casing Inside Diameter (in)": casing_id,
+             "Casing Inside Roughness (in)": 0.0018}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    return wvlp.build_flow_path(top, secs, pts, [0, 12000], [0, 12000], [0, 12000], [70, 300])
+
+
+def _t38_retro():
+    from wellmodel import retrograde as RG
+    return wvlp.RetrogradeBOFluid(RG.RetroInputs(7431.94, 0.745, 1.0, 0.745, 43.56, 4596.83 + 14.696, 300.0,
+                                                 6000 + 14.696, 0.0, 20000, 0, 2.33, 0.31))
+
+
+def test_improved_approximation_temperature_t41():
+    """PROSPER Tutorial 41, the user's file (the T38 retrograde condensate well, black oil, PE5, wellhead 2500 psig;
+    Improved Approximation with U 2.63 to 4000 ft, 4.0 to 9312.5 ft, 2.0 below - the file's table): gradients at 10,
+    33.2 and 60 MMscf/d, at 33.2 MMscf/d with U = 0.001 (no heat loss) and on dry gas. The energy balance with
+    gravity, Joule-Thomson (real-gas, condensate and drop-out terms) and heat loss reproduces PROSPER's temperatures
+    within 5 F at every node at 10 and 33 MMscf/d, 3 F adiabatic, 2 F on dry gas, 7.5 F at 60 MMscf/d (PE5's
+    pressure is 3 % higher there, which moves the dew point up the well); the Rough Approximation was 25-70 F off
+    (no Joule-Thomson cooling). Bottom-hole pressures within 3.5 % (PE5)."""
+    import dataclasses
+    from wellmodel import thermal as TH
+    G = 14.696
+    df = pd.read_csv(Path(__file__).parent / "data" / "t40_t41_gradients.csv", dtype={"run": str})
+    path0 = _t40_path(6.4)
+    fl = _t38_retro()
+    gas = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=43.56, gas_sg=0.745, salinity_ppm=20000, co2=2.33, n2=0.31))
+    U = [2.63, 2.63, 4.0, 2.0]
+    for run, q, whp, uu, f_, case in (("1", 33.219, 2500, U, fl, {}), ("2A", 10.0, 2500, U, fl, {}),
+                                      ("2B", 60.0, 2400, U, fl, {}), ("3", 33.219, 2500, [0.001] * 4, fl, {}),
+                                      ("4", 33.219, 2500, [0.001] * 4, gas, {"cgr": 0.0})):
+        path = dataclasses.replace(path0, thermal={"model": "improved",
+                                                   "u_seg": TH.u_segments(path0, [0, 4000, 9312.5, 12000], uu)})
+        P, T = wvlp.traverse(path, f_, np.array([whp + G]), {"q": q, "wgr": 0.0, **case}, "pe5_style")
+        g = df[df.run == run]
+        t_err = np.interp(g.md, path.md, T[0]) - g.t
+        assert np.abs(t_err).max() < {"3": 3.0, "4": 2.0, "2B": 7.5}.get(run, 5.0), run
+        assert (P[0, -1] - G) / g.p.iloc[-1] - 1 == pytest.approx(0.0, abs=0.035), run
+    # the U table: each row's U over the interval ending at its depth
+    useg = TH.u_segments(path0, [0, 4000, 9312.5, 12000], U)
+    mid = 0.5 * (path0.md[1:] + path0.md[:-1])
+    assert (useg[mid < 3900] == 2.63).all() and (useg[(mid > 4100) & (mid < 9200)] == 4.0).all()
+    assert (useg[mid > 9500] == 2.0).all()
+    import json
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T41_Improved_Approximation.wellmodel.json"))
+    assert proj["widgets"]["opt_temp_model"] == "improved" and "eq_ihtc" in proj["tables"]
+
+
+def test_enthalpy_balance_temperature_t40():
+    """PROSPER Tutorial 40, the user's file (the same well with the Enthalpy Balance: three casing strings, CaBr2
+    12 lb/gal above the packer at 11,000 ft, shale / 12 % porosity water sandstone / shale, 35.3 MMscf/d at 2500
+    psig) at 5, 50 and 500 days since production started: the overall U from the completion, the casings and
+    cement and the transient formation conduction within 6 % of PROSPER's at every node outside the 7500-8000 ft
+    interval (15 % there), temperatures within 3 F at every node, bottom-hole pressure within 3 % (PE5)."""
+    import dataclasses
+    from wellmodel import enthalpy as EB
+    G = 14.696
+    df = pd.read_csv(Path(__file__).parent / "data" / "t40_t41_gradients.csv", dtype={"run": str})
+    path0 = _t40_path(5.87)
+    fl = _t38_retro()
+    cas = [EB.Casing(5000, 12, 5000, 11.5, 90.7, 0, 0, 11.7), EB.Casing(8000, 10.5, 8000, 8.5, 56.4, 5000, 0, 11.7),
+           EB.Casing(12000, 8.5, 12000, 7.2, 47.1, 7500, 0, 11.7)]
+    lit = [EB.Lithology(4000, "Shale"), EB.Lithology(9750, "Sandstone", 0.12, "Water"), EB.Lithology(12000, "Shale")]
+    assert cas[2].id == pytest.approx(5.848, abs=0.002)
+    for run, days in (("7A", 5.0), ("6", 50.0), ("7B", 500.0)):
+        data = EB.EnthalpyData(cas, lit, packer_md=11000, days=days, tubing_od=4.5, tubing_end=11800)
+        assert not data.check()
+        path = dataclasses.replace(path0, thermal={"model": "enthalpy", "data": data})
+        P, T = wvlp.traverse(path, fl, np.array([2500 + G]), {"q": 35.314, "wgr": 0.0}, "pe5_style")
+        g = df[df.run == run]
+        assert np.abs(np.interp(g.md, path.md, T[0]) - g.t).max() < 3.0, run
+        assert (P[0, -1] - G) / g.p.iloc[-1] - 1 == pytest.approx(0.0, abs=0.03), run
+        u = path.thermal["_u_last"][0]
+        mid = 0.5 * (path.md[1:] + path.md[:-1])
+        gu = g[g.u.notna() & (g.md < 11800)]
+        k = np.array([int(np.argmin(np.abs(mid - z))) for z in gu.md])
+        err = u[k] / gu.u.to_numpy() - 1
+        out = (gu.md.to_numpy() > 7500) & (gu.md.to_numpy() < 8000)
+        assert np.abs(err[~out]).max() < 0.06 and np.abs(err[out]).max() < 0.16, run
+    import json
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T40_Enthalpy_Balance.wellmodel.json"))
+    assert proj["widgets"]["opt_temp_model"] == "enthalpy" and {"eq_drill", "eq_litho"} <= set(proj["tables"])

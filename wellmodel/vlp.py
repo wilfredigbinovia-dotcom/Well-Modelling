@@ -59,6 +59,8 @@ class FlowPath:
     d_ht: np.ndarray               # heat-transfer diameter, ft
     restrictions: dict = field(default_factory=dict)   # node index -> restriction ID (in)
     fric_mult: np.ndarray | None = None   # per segment: multiplier on the correlation's friction (None = 1)
+    thermal: dict | None = None    # temperature model coupled to pressure: {"model": "improved", "u_seg": array}
+                                   # or {"model": "enthalpy", ...}; None = Rough Approximation (U from the caller)
 
     def node(self, md):
         i = int(np.argmin(np.abs(self.md - md)))
@@ -451,9 +453,10 @@ def temperature_profile(path: FlowPath, w_lbh, cp, u, t_bottom=None):
     n = len(path.md)
     T = np.empty((w.size, n))
     T[:, -1] = path.t_form[-1] if t_bottom is None else np.broadcast_to(np.asarray(t_bottom, float), w.shape)
+    u_seg = path.thermal.get("u_seg") if path.thermal is not None else None
     for i in range(n - 2, -1, -1):
         L = path.seg_len[i]
-        a = u * np.pi * path.d_ht[i] / np.maximum(w * cp, 1e-9)
+        a = (u if u_seg is None else u_seg[i]) * np.pi * path.d_ht[i] / np.maximum(w * cp, 1e-9)
         tfb, tft = path.t_form[i + 1], path.t_form[i]
         g = (tft - tfb) / L
         t0 = T[:, i + 1]
@@ -525,20 +528,43 @@ def traverse(path: FlowPath, fluid, whp, case, correlation="beggs_brill", p1=1.0
     if t_bottom is not None:
         w = np.broadcast_to(np.asarray(w, float), whp.shape)
     T = temperature_profile(path, w, cp, u, t_bottom)
-    n = len(path.md)
-    P = np.empty((whp.size, n))
-    p = np.maximum(whp, 14.7)
-    P[:, 0] = p
-    for i in range(n - 1):
-        L = path.seg_len[i]
-        g0, _ = _gradient(path, fluid, i, p, T[:, i], case, corr, p1, p2)
-        pp = np.maximum(p + g0 * L, 14.7)
-        g1, s1 = _gradient(path, fluid, i, pp, T[:, i + 1], case, corr, p1, p2)
-        p = np.maximum(p + 0.5 * (g0 + g1) * L, 14.7)
-        if (i + 1) in path.restrictions:
-            p = p + _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1])
-        P[:, i + 1] = p
+
+    def down(T):
+        n = len(path.md)
+        P = np.empty((whp.size, n))
+        p = np.maximum(whp, 14.7)
+        P[:, 0] = p
+        for i in range(n - 1):
+            L = path.seg_len[i]
+            g0, _ = _gradient(path, fluid, i, p, T[:, i], case, corr, p1, p2)
+            pp = np.maximum(p + g0 * L, 14.7)
+            g1, s1 = _gradient(path, fluid, i, pp, T[:, i + 1], case, corr, p1, p2)
+            p = np.maximum(p + 0.5 * (g0 + g1) * L, 14.7)
+            if (i + 1) in path.restrictions:
+                p = p + _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1])
+            P[:, i + 1] = p
+        return P
+    P = down(T)
+    if path.thermal is not None:                 # temperature coupled to pressure: alternate the two marches
+        for _ in range(THERMAL_ITERATIONS):
+            T = coupled_temperature(path, fluid, P, case, w, hc, t_bottom)
+            P = down(T)
     return P, T
+
+
+THERMAL_ITERATIONS = 3
+
+
+def coupled_temperature(path, fluid, P, case, w, hc, t_bottom=None):
+    """Temperature profile of a pressure-coupled temperature model (path.thermal) for the pressure profile P."""
+    from . import thermal as TH
+    th = path.thermal
+    if th["model"] == "improved":
+        return TH.improved_profile(path, fluid, P, case, w, hc, th["u_seg"], t_bottom)
+    if th["model"] == "enthalpy":
+        from . import enthalpy as EB
+        return EB.profile(path, fluid, P, case, w, hc, th, t_bottom)
+    raise ValueError(f"Unknown temperature model {th['model']!r}.")
 
 
 # ================================================================ test data
@@ -652,26 +678,35 @@ def traverse_up(path: FlowPath, fluid, p_bottom, case, correlation="beggs_brill"
     if t_bottom is not None:
         w = np.broadcast_to(np.asarray(w, float), pb.shape)
     T = temperature_profile(path, w, cp, u, t_bottom)
-    n = len(path.md)
-    P = np.full((pb.size, n), np.nan)
-    bad = ~np.isfinite(pb) | (pb <= 14.7)
-    p = np.where(bad, 1000.0, pb)
-    P[:, -1] = np.where(bad, np.nan, p)
-    for i in range(n - 2, -1, -1):
-        if (i + 1) in path.restrictions:            # restriction at node i+1: pressure above it is lower
-            dp = _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1])
-            p = p - _restriction_dp(fluid.state(np.maximum(p - dp, 14.7), T[:, i + 1], case),
-                                    path.restrictions[i + 1])
-            bad |= p < 14.7
-            p = np.where(bad, 1000.0, p)
-        L = path.seg_len[i]
-        g0, _ = _gradient(path, fluid, i, p, T[:, i + 1], case, corr, p1, p2)
-        pp = np.maximum(p - g0 * L, 14.7)
-        g1, _ = _gradient(path, fluid, i, pp, T[:, i], case, corr, p1, p2)
-        pn = p - 0.5 * (g0 + g1) * L
-        bad |= pn < 14.7
-        p = np.where(bad, 1000.0, pn)
-        P[:, i] = np.where(bad, np.nan, pn)
+
+    def up(T):
+        n = len(path.md)
+        P = np.full((pb.size, n), np.nan)
+        bad = ~np.isfinite(pb) | (pb <= 14.7)
+        p = np.where(bad, 1000.0, pb)
+        P[:, -1] = np.where(bad, np.nan, p)
+        for i in range(n - 2, -1, -1):
+            if (i + 1) in path.restrictions:            # restriction at node i+1: pressure above it is lower
+                dp = _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1])
+                p = p - _restriction_dp(fluid.state(np.maximum(p - dp, 14.7), T[:, i + 1], case),
+                                        path.restrictions[i + 1])
+                bad |= p < 14.7
+                p = np.where(bad, 1000.0, p)
+            L = path.seg_len[i]
+            g0, _ = _gradient(path, fluid, i, p, T[:, i + 1], case, corr, p1, p2)
+            pp = np.maximum(p - g0 * L, 14.7)
+            g1, _ = _gradient(path, fluid, i, pp, T[:, i], case, corr, p1, p2)
+            pn = p - 0.5 * (g0 + g1) * L
+            bad |= pn < 14.7
+            p = np.where(bad, 1000.0, pn)
+            P[:, i] = np.where(bad, np.nan, pn)
+        return P
+    P = up(T)
+    if path.thermal is not None:
+        w_ = np.broadcast_to(np.asarray(w, float), pb.shape)
+        for _ in range(THERMAL_ITERATIONS):
+            T = coupled_temperature(path, fluid, np.where(np.isfinite(P), P, 14.7), case, w_, hc, t_bottom)
+            P = up(T)
     return P, T
 
 

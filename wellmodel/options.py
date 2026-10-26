@@ -68,6 +68,12 @@ ARTIFICIAL_LIFT = {
     "mpump": "Multiphase pump (surface, OneSubsea H series)",
 }
 
+TEMP_MODELS = {
+    "rough": "Rough approximation",
+    "improved": "Improved approximation",
+    "enthalpy": "Enthalpy balance",
+}
+
 FIELDS = {  # field -> (display name, choices)
     "fluid_type": ("Fluid", FLUID_TYPES),
     "method": ("Method", METHODS),
@@ -79,6 +85,7 @@ FIELDS = {  # field -> (display name, choices)
     "completion": ("Completion", COMPLETIONS),
     "sand_control": ("Sand control", SAND_CONTROL),
     "artificial_lift": ("Artificial lift", ARTIFICIAL_LIFT),
+    "temp_model": ("Temperature model", TEMP_MODELS),
 }
 
 # What the calculation engine models today. Anything else is accepted as a
@@ -93,6 +100,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
     "emulsions": {"none", "emulsion"},
+    "temp_model": {"rough", "improved", "enthalpy"},
 }
 # Completion and sand control change near-wellbore pressure drop. Until they
 # are modelled explicitly, that drop is absorbed in the PI fitted to tests.
@@ -121,6 +129,7 @@ class WellOptions:
     completion: str = "cased_hole"
     sand_control: str = "none"
     artificial_lift: str = "none"
+    temp_model: str = "rough"
 
     def __post_init__(self):
         for f, (name, choices) in FIELDS.items():
@@ -257,6 +266,14 @@ class WellOptions:
         if self.artificial_lift == "mpump" and self.well_type != "producer":
             add("error", ["artificial_lift", "well_type"],
                 "The surface multiphase pump boosts a producing well's flowline: choose a producer.")
+        if self.temp_model != "rough" and self.well_type != "producer":
+            add("error", ["temp_model", "well_type"],
+                "The Improved Approximation and Enthalpy Balance temperature models are built for producers; injectors "
+                "use the Rough Approximation.")
+        if self.temp_model != "rough" and self.artificial_lift != "none":
+            add("warning", ["temp_model", "artificial_lift"],
+                "With artificial lift the coupled temperature model applies to the plain tubing traverses only; the "
+                "lift calculations keep their own (Rough Approximation) temperatures.")
         if self.water_vapour == "calculate" and not (self.fluid_type == "dry_wet_gas" and self.method == "black_oil"):
             add("warning", ["water_vapour", "fluid_type", "method"],
                 "Condensed water vapour is calculated for dry and wet gas with the black-oil method only; it is "
@@ -373,6 +390,13 @@ class WellOptions:
             eq += ["Diluent injection data: injection depth, diluent rate (or % of the water) and salinity"
                    + ("; lift gas gravity and impurities, GLR injected and gas lift valve depth"
                       if self.artificial_lift == "diluent_gl" else "")]
+        if self.temp_model == "improved":
+            eq += ["Improved approximation: heat transfer coefficient by depth interval (MD, U), with the "
+                   "geothermal gradient"]
+        if self.temp_model == "enthalpy":
+            eq += ["Enthalpy balance: drilling and casing record (hole sizes, casing OD and weight, shoes, tops of "
+                   "cement, mud density), completion fluid and its density, packer depth, tubing OD, lithology "
+                   "(formation type, porosity, in-situ fluid by depth), days since production started"]
         if self.artificial_lift == "mpump":
             eq += ["Surface equipment with a Pump row at the pump's place in the flowline (manifold first), the "
                    "power available to the pump, its wear factor and efficiency curve (OneSubsea H800/65 by default)"]
