@@ -5023,5 +5023,21 @@ def test_emulsion_viscosity_t46():
                                              {"q": np.full(ok.sum(), 1500.0), "wc": np.full(ok.sum(), w / 100),
                                               "gor": np.full(ok.sum(), 40.0)})
         assert np.abs(s["mu_l"] / d.mu_l.to_numpy()[ok] - 1).max() < 0.001, w
+    # water-continuous side (WC 85 / 90 / 95 %): log-linear from the plateau at 80 % to the water viscosity at 100 %
+    # - exact with PROSPER's water viscosity (0.33061 cp at 10,000 ppm and 200 F, its PVT table); ours is 0.320 cp,
+    # so the liquid viscosity is 0.6-2.4 % low; pressures within 0.2 %
+    c3 = {"q": np.full(3, 1500.0), "wc": np.array([0.85, 0.9, 0.95]), "gor": np.full(3, 40.0)}
+    Pw, _ = wvlp.traverse(path, wvlp.BlackOilFluid(m, em), np.full(3, 514.696), c3, "pe2_style", 1, 1, 8.0)
+    for i, w in enumerate((85, 90, 95)):
+        d = g[g.wc == w]
+        pm = np.interp(d.md, path.md, Pw[i]) - 14.696
+        assert np.abs(pm[1:] / d.p.to_numpy()[1:] - 1).max() < 0.003, w
+        b = d[d.md == 4900.0].iloc[0]
+        mo = wvlp.BlackOilFluid(m)._props(np.array([b.p + 14.696]), np.array([b.t]), np.array([40.0]))[2]
+        assert float(em.viscosity(w / 100, mo, 0.33061)[0]) == pytest.approx(b.mu_l, rel=0.002), w
+        s = wvlp.BlackOilFluid(m, em).state(d.p.to_numpy()[1:-1] + 14.696, d.t.to_numpy()[1:-1],
+                                             {"q": np.full(len(d) - 2, 1500.0), "wc": np.full(len(d) - 2, w / 100),
+                                              "gor": np.full(len(d) - 2, 40.0)})
+        assert np.abs(s["mu_l"] / d.mu_l.to_numpy()[1:-1] - 1).max() < 0.03, w
     proj = json.load(open(__file__.replace("tests/test_wellmodel.py", "examples/T46_Modelling_Emulsions.wellmodel.json")))
     assert proj["widgets"]["opt_emulsions"] == "emulsion" and proj["inputs"]["emul_p3"] == 3.77291

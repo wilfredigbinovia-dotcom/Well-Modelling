@@ -4,8 +4,8 @@ PROSPER's emulsion model scales the oil viscosity by a polynomial in water cut (
 
     oil-continuous   WC <= WC_min      mu = mu_o (P1 + P2 WC + P3 WC^2 + P4 WC^3 + P5 WC^4)
     plateau          WC_min..WC_max    mu = the value at WC_min ("minimum water cut for maximum viscosity")
-    water-continuous WC > WC_max       log-linear from the plateau to the water viscosity at WC = 1 (assumed:
-                                       PROSPER's match uses only the oil-continuous points)
+    water-continuous WC > WC_max       log-linear from the plateau to the water viscosity at WC = 1 (PROSPER's
+                                       gradients at WC 85 / 90 / 95 %: exact with its water viscosity)
 
 The parameters are matched to measured emulsion viscosities (at one pressure and temperature) by least squares on
 the oil-continuous points with P1 fixed at 1, relative to the oil viscosity at the measurement conditions. Tutorial
