@@ -5273,6 +5273,32 @@ def test_improved_approximation_temperature_t41():
     mid = 0.5 * (path0.md[1:] + path0.md[:-1])
     assert (useg[mid < 3900] == 2.63).all() and (useg[(mid > 4100) & (mid < 9200)] == 4.0).all()
     assert (useg[mid > 9500] == 2.0).all()
+    # system analysis (the file's: wellhead 2500 psig, Petroleum Experts IPR k 25 md, skin 5, 50 days, Swc 0.2):
+    # PROSPER's M(P) uses the gas phase of its black-oil condensate model and no liquid kr reduction for a
+    # retrograde condensate - IPR within 10 psi; the solution within 4 % of PROSPER's 34.35 MMscf/d
+    from types import SimpleNamespace
+    from wellmodel import inflow as ipr, system as SYS
+    sysr = pd.read_csv(Path(__file__).parent / "data" / "t41_system.csv")
+    ri = fl.rinp
+
+    def mu_z(p):
+        r_ = __import__("wellmodel.retrograde", fromlist=["props"]).props(ri, np.atleast_1d(np.asarray(p, float)), 300.0)
+        return r_["mu_g"], r_["z"]
+    pr = 6000 + G
+    psi = ipr.pseudo_pressure_fn(mu_z, pr, n=600, gauge=True)
+    mr, zr = (float(v[0]) for v in mu_z(np.array([pr])))
+    curve = ipr.petex_gas(pr, 300.0, 25, 100, 340, 31.6, 0.354, 100, 50, 0.25, 0.2, 5, psi, mr, 1 / pr, 0.745,
+                          None, "total", z_r=zr)
+    assert curve.params["Non-Darcy flow factor D (1/(Mscf/d))"] == pytest.approx(2.2378e-5, rel=0.03)
+    sub = sysr[sysr.q < 120]
+    o_ = np.argsort(curve.q)
+    assert np.abs(np.interp(sub.q.to_numpy() * 1000, curve.q[o_], curve.pwf[o_]) - G - sub.ipr.to_numpy()).max() < 10.0
+    path = dataclasses.replace(path0, thermal={"model": "improved",
+                                               "u_seg": TH.u_segments(path0, [0, 4000, 9312.5, 12000], U)})
+    res, _ = SYS.solve_cases(lambda tid: path, fl, "gas", {"whp": 2500 + G, "u": 2.0, "wgr": 0.0, "sep_gor": 7431.94},
+                             [{}], lambda ch: curve, "pe5_style")
+    assert res[0].q == pytest.approx(34.35, rel=0.04)
+    assert res[0].wht_q == pytest.approx(192.8, abs=3.0)
     import json
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T41_Improved_Approximation.wellmodel.json"))
     assert proj["widgets"]["opt_temp_model"] == "improved" and "eq_ihtc" in proj["tables"]

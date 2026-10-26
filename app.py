@@ -1756,6 +1756,15 @@ def gas_pvt_fn(opts_now, t_f):
             return np.array([o.viscosity for o in out]), np.array([o.z for o in out])
         return mu_z, float(f.z @ f.mw / 28.9625), (f"Equation of state ({ss.get('prp_name', 'PRP file')}): reservoir "
                                                    "fluid above the dew point, equilibrium gas below it")
+    if retro_bo_on(opts_now):
+        ri = retro_inputs()
+
+        def mu_z(p):
+            # PROSPER's M(P) for the black-oil retrograde condensate: the gas (vapour) phase of its condensate model
+            # (Tutorial 41: viscosity and Z in its system table reproduced, M(P) within 0.4 %)
+            r_ = wrg.props(ri, np.atleast_1d(np.asarray(p, float)), float(t_f))
+            return np.asarray(r_["mu_g"], float), np.asarray(r_["z"], float)
+        return mu_z, float(ri.gas_sg), "Black-oil retrograde condensate: gas phase of the condensate model"
     gi = gas_pvt_inputs(opts_now)
     sg = float(gi.wellstream_sg())
 
@@ -2718,7 +2727,12 @@ with tabs[2]:
                                            .separator_train()["gas_gravity"])
                         else:
                             sg_sep = gas_pvt_inputs(o).gas_sg
+                        # retrograde condensate above the dew point: the condensate is in the reservoir gas - PROSPER
+                        # applies no liquid relative-permeability reduction (T41, Pr 6000 psig: D 2.2378e-5, krg at
+                        # Swc only); below it the dropped-out liquid reduces krg (T47, Pr 1750 psig)
                         cgr_k = cgr if cgr else (float(retro_inputs().cgr) if retro_bo_on(o) else 0.0)
+                        if retro_bo_on(o) and pr >= float(retro_inputs().p_dew):
+                            cgr_k = 0.0
                         curve = ipr.petex_gas(pr, t_f, r["k"], r["h"], r["area"], r["ca"], r["rw"], r["hp"], tdays,
                                               phi, swc, skin, psi_g, gasp["mu_r"], float(cg_), float(sg_sep), d_ent,
                                               "gas" if perm == "Gas permeability" else "total", wgr=float(wgr or 0.0),
