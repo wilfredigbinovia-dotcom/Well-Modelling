@@ -18,7 +18,7 @@
   "pvt_impurity_corr": false,
   "ipr_devpp": "Cinco (2) / Martin-Bronz",
   "sys_corr": "pe2_style",
-  "ipr_pr": 4214.696,
+  "ipr_pr": 4814.696,
   "pvt_t": 210.0,
   "sys_whp": 264.696,
   "sys_rate_method": "Automatic - Geometric",
@@ -120,7 +120,7 @@
   "glq_pc": 1524.696,
   "glq_dpv": 100.0,
   "dil_md": 9000.0,
-  "dil_how": "Percent of the water",
+  "dil_how": "Percent of the liquid",
   "dil_pct": 30.0,
   "dil_rate": 5000.0,
   "dil_sal": 20000.0,
@@ -130,8 +130,8 @@
   "dil_h2s": 0.0,
   "dil_glr": 50.0,
   "dil_vmd": 7500.0,
-  "dil_pct_basis": "produced water",
-  "dil_glr_basis": "total liquid"
+  "dil_pct_basis": "produced liquid",
+  "dil_glr_basis": "produced liquid"
  },
  "widgets": {
   "eq_filter_on": true,

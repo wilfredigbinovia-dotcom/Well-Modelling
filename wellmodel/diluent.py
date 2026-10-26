@@ -15,10 +15,12 @@ The lift gas adds GOR on the produced oil above the valve (gaslift.lifted_case).
 the mass of each stream from where it enters (entering at the flowing temperature).
 
 Rates (Tutorial 30 sensitivity variables):
-  diluent rate    STB/d, or "Salt Diluent Rate Percent" - a percentage of the water: the basis (produced water, or
-                  the total water leaving the well, produced + diluent) is DILUENT_PCT_BASIS;
-  lift gas        GLR injected (scf/STB) x the liquid rate: the basis (produced liquid, or produced + diluent) is
-                  GLR_BASIS.
+  diluent rate    STB/d, or "Salt Diluent Rate Percent" - PROSPER: a percentage of the produced liquid rate (the user's
+                  Tutorial 30 runs: diluent = pct x liquid in all 50 cases); other bases: produced water, total water;
+  lift gas        GLR injected (scf/STB) x the produced liquid rate (PROSPER: 50 scf/STB x 10,116 STB/d = 0.506
+                  MMscf/d in its gradient); or x produced + diluent liquid.
+The water salinity PROSPER reports is the rate-weighted blend (136,757 ppm for 20 % diluent at 20,000 ppm in
+180,000 ppm water) - the same water as the separate stream here.
 """
 from __future__ import annotations
 
@@ -33,8 +35,8 @@ from .correlations import CORRELATIONS
 from .equipment import HeatCapacities
 
 RB = 5.614583
-DILUENT_PCT_BASIS = "produced water"     # or "total water" (produced + diluent)
-GLR_BASIS = "total liquid"               # or "produced liquid"
+DILUENT_PCT_BASIS = "produced liquid"    # PROSPER; or "produced water", "total water" (produced + diluent)
+GLR_BASIS = "produced liquid"            # PROSPER; or "total liquid" (produced + diluent)
 
 
 def _water_inp(salinity):
@@ -86,7 +88,7 @@ class DiluentFluid:
 class DiluentSetup:
     dil_md: float = 9000.0             # diluent injection depth, ft MD
     rate: float = 5000.0               # diluent rate, STB/d (used when pct is None)
-    pct: float | None = None           # diluent rate, % of the water (DILUENT_PCT_BASIS)
+    pct: float | None = None           # diluent rate, % (DILUENT_PCT_BASIS: PROSPER's - of the produced liquid)
     salinity: float = 20000.0          # ppm
     gas_lift: bool = True
     gas: GL.LiftGas = field(default_factory=GL.LiftGas)
@@ -107,7 +109,8 @@ class DiluentSetup:
         pct = params.get("dil_pct", self.pct if "dil_rate" not in params else None)
         if pct is not None:
             x = float(pct) / 100.0
-            qd = qw * x / max(1 - x, 1e-6) if self.pct_basis == "total water" else qw * x
+            qd = (q * x if self.pct_basis == "produced liquid" else
+                  qw * x / max(1 - x, 1e-6) if self.pct_basis == "total water" else qw * x)
         else:
             qd = np.full(q.shape, float(params.get("dil_rate", self.rate)))
         glr = float(params.get("glr_dil", self.glr_inj)) if self.gas_lift else 0.0

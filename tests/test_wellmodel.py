@@ -4915,11 +4915,13 @@ def test_petex_gas_rel_perm_with_liquid_t47():
 
 
 def test_diluent_injection_with_gas_lift_t30():
-    """PROSPER Tutorial 30 (diluent injection with gas lift in the T19 / T23 Logie well: 180,000 ppm formation water,
-    20,000 ppm diluent water down the annulus into the tubing at 9000 ft, 0.7 gravity lift gas at 7500 ft, 54 % water
-    cut, GOR 800, 250 psig, PE2 1.03 / 1.01). The diluent is its own water stream (without it the fluid is the base
-    one); the three zones - produced, + diluent, + lift gas; more diluent lowers the oil rate, lift gas raises it to an
-    optimum GLR, as the tutorial's sensitivity plot (optimum 850-950 scf/STB). Not yet against PROSPER's numbers."""
+    """PROSPER Tutorial 30, the user's file (diluent injection with gas lift in the T19 / T23 Logie well: 180,000 ppm
+    formation water, 20,000 ppm diluent water down the annulus into the tubing at 9000 ft, 0.7 gravity lift gas at 7500
+    ft, Pr 4800 psig in the file, 54 % water cut, GOR 800, 250 psig, PE2 1.03 / 1.01; 50 cases: diluent 20-40 % x GLR
+    0-1500). PROSPER's definitions: diluent = percentage x produced liquid, lift gas = GLR x produced liquid (in all 50
+    cases). VLP within 4 % above 1000 STB/d (unlifted within 1 %), wellhead temperature within 0.2 F; with PROSPER's
+    IPR the 50 solution rates within 1 % and bottom-hole pressures within 1 %; optimum GLR 900 scf/STB at every
+    diluent percentage, as PROSPER (the tutorial: 850-950)."""
     import dataclasses, json
     from types import SimpleNamespace
     from wellmodel import diluent as DL, system as SYS
@@ -4933,32 +4935,34 @@ def test_diluent_injection_with_gas_lift_t30():
     c0 = {"q": np.array([5000.0]), "wc": np.array([0.54]), "gor": np.array([800.0])}
     s0, s1 = df.state(np.array([2000.0]), np.array([180.0]), c0), fl.state(np.array([2000.0]), np.array([180.0]), c0)
     assert all(np.allclose(s0[k], s1[k]) for k in s1)
-    s2 = df.state(np.array([2000.0]), np.array([180.0]), {**c0, "q_dil": np.array([1000.0])})
-    rho_d = float(np.ravel(wbo.water_props(wbo.PVTInputs(rsb=1, api=35, gas_sg=0.7, salinity_ppm=20000),
-                                           np.array([2000.0]), np.array([180.0]))[1])[0])
-    assert s2["ql"][0] > s1["ql"][0] and s1["rho_l"][0] < s2["rho_l"][0] < rho_d   # liquid mixed towards the diluent
-    setup = DL.DiluentSetup(pct=30.0, glr_inj=0.0)
-    qd, qg = setup.rates(np.array([8000.0]), 0.54)
-    assert qd[0] == pytest.approx(0.3 * 8000 * 0.54) and qg[0] == 0.0
-    setup_t = dataclasses.replace(setup, pct_basis="total water", glr_inj=900.0)
-    qd, qg = setup_t.rates(np.array([8000.0]), 0.54)
-    assert qd[0] / (qd[0] + 8000 * 0.54) == pytest.approx(0.3) and qg[0] == pytest.approx(900 * (8000 + qd[0]) / 1e6)
-    case = {"q": np.full(2, 8000.0), "wc": np.full(2, 0.54), "gor": np.full(2, 800.0)}
-    P0, _ = wvlp.traverse(path, fl, np.full(2, 250 + G), case, "pe2_style", 1.03, 1.01, 8.580277)
-    P, _ = DL.traverse(path, fl, np.full(2, 250 + G), case, setup, "pe2_style", 1.03, 1.01, 8.580277,
-                       q_dil=np.array([0.0, 1300.0]), qgi=np.zeros(2))
-    assert abs(P[0, -1] - P0[0, -1]) < 0.5 and P[1, -1] > P0[1, -1] + 100        # diluent only: heavier column
-    pr, J = 4200 + G, 4.0
-    pw = np.linspace(pr, 14.7, 60)
-    curve = SimpleNamespace(q=J * (pr - pw), pwf=pw, pr=pr, aof=J * (pr - 14.7), fluid="oil", model="PI")
+    setup = DL.DiluentSetup(pct=30.0, glr_inj=900.0)
+    qd, qg = setup.rates(np.array([10116.1]), 0.54)
+    assert qd[0] == pytest.approx(3034.8, abs=0.1) and qg[0] == pytest.approx(9.104, abs=0.001)   # PROSPER case 27
+    sysr = pd.read_csv(Path(__file__).parent / "data" / "t30_system.csv")
+    assert np.allclose(sysr.qdil, sysr.q * sysr.pct / 100, rtol=1e-3) and np.allclose(sysr.qgi, sysr.q * sysr.glr / 1e6,
+                                                                                         rtol=2e-3, atol=2e-3)
+    vt = pd.read_csv(Path(__file__).parent / "data" / "t30_vlp_ipr.csv")
+    v = vt[(vt.q > 1000) & (vt.q < 16000)]
+    n = len(v)
+    P, T = DL.traverse(path, fl, np.full(n, 250 + G), {"q": v.q.to_numpy(), "wc": np.full(n, 0.54),
+                       "gor": np.full(n, 800.0)}, setup, "pe2_style", 1.03, 1.01, 8.580277, q_dil=v.qdil.to_numpy(),
+                       qgi=v.qgi.to_numpy())
+    err = (P[:, -1] - G) / v.vlp.to_numpy() - 1
+    assert np.abs(err).max() < 0.04 and np.abs(err[v.glr.to_numpy() == 0]).max() < 0.01
+    assert np.allclose(T[:, 0], v.tht.to_numpy(), atol=0.2)
     base = {"whp": 250 + G, "u": 8.580277, "wc": 54.0, "gor": 800.0}
-    cases = [{"dil_pct": p, "glr_dil": g} for p in (20, 40) for g in (0, 300, 900, 1500)]
-    res, _ = SYS.solve_cases(lambda tid: path, fl, "oil", base, cases, lambda ch: curve, "pe2_style", 1.03, 1.01,
-                             diluent=DL.DiluentSetup())
-    q = np.array([r.q for r in res]).reshape(2, 4)
-    assert np.all(q[0] > q[1])                                   # more diluent, less liquid
-    assert np.all(np.argmax(q, axis=1) == 2)                     # optimum at 900 of 0 / 300 / 900 / 1500
-    assert res[2].details["diluent"]["Lift gas rate (MMscf/d)"] == pytest.approx(
-        900 * res[2].details["diluent"]["Total liquid (STB/d)"] / 1e6)
+    sub = sysr[sysr.pct.isin([20.0, 30.0, 40.0]) & sysr.glr.isin([0.0, 300.0, 900.0, 1500.0])]
+    for _, r in sub.iterrows():
+        ip = vt[vt.case == r.case].sort_values("q")
+        curve = SimpleNamespace(q=np.r_[0.0, ip.q.to_numpy()], pwf=np.r_[4800.0, ip.ipr.to_numpy()] + G, pr=4800 + G,
+                                aof=float(ip.q.max()), fluid="oil", model="PROSPER table")
+        res, _ = SYS.solve_cases(lambda tid: path, fl, "oil", base, [{"dil_pct": r.pct, "glr_dil": r.glr}],
+                                 lambda ch, c=curve: c, "pe2_style", 1.03, 1.01, diluent=DL.DiluentSetup())
+        assert res[0].q == pytest.approx(r.q, rel=0.01), (r.pct, r.glr)
+        assert res[0].pwf - G == pytest.approx(r.bhp, rel=0.01), (r.pct, r.glr)
+        if r.glr > 0:
+            assert res[0].details["diluent"]["Lift gas rate (MMscf/d)"] == pytest.approx(r.glr * res[0].q / 1e6)
+    opt = sysr.loc[sysr.groupby("pct").q.idxmax()]
+    assert (opt.glr == 900.0).all()
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T30_Diluent_Injection_With_Gas_Lift.wellmodel.json"))
-    assert proj["widgets"]["opt_artificial_lift"] == "diluent_gl" and proj["inputs"]["dil_sal"] == 20000.0
+    assert proj["widgets"]["opt_artificial_lift"] == "diluent_gl" and proj["inputs"]["dil_pct_basis"] == "produced liquid"

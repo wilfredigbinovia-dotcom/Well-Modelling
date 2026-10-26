@@ -4097,7 +4097,7 @@ def _gl_transfer_design():
     put("glq_sg", float(val("gl_sg", 0.7)))
 
 
-DIL_VARS = {"dil_pct": "Salt diluent rate percent (%)", "dil_rate": "Diluent injection rate (STB/d)",
+DIL_VARS = {"dil_pct": "Salt diluent rate percent (% of the produced liquid)", "dil_rate": "Diluent injection rate (STB/d)",
             "glr_dil": "GLR injected (scf/STB)"}
 
 
@@ -4112,14 +4112,14 @@ def diluent_data_panel(o, top_md, secs):
     bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
     c = st.columns(4)
     dmd = num(c[0], "Diluent injection depth (ft MD)", "dil_md", float(round(bottom)), float(top_md) + 10, 60000.0)
-    how = sel(c[1], "Diluent rate input", ["Rate (STB/d)", "Percent of the water"], "dil_how",
+    how = sel(c[1], "Diluent rate input", ["Rate (STB/d)", "Percent of the liquid"], "dil_how",
               help="PROSPER's 'Salt Diluent Rate Percent' sensitivity variable gives the diluent as a percentage of "
-                   "the water.")
+                   "the produced liquid rate.")
     if how == "Rate (STB/d)":
         rate = num(c[2], "Diluent injection rate (STB/d)", "dil_rate", 5000.0, 0.0, 1e6)
         pct = None
     else:
-        pct = num(c[2], "Diluent rate (% of the water)", "dil_pct", 30.0, 0.0, 99.0)
+        pct = num(c[2], "Diluent rate (% of the produced liquid)", "dil_pct", 30.0, 0.0, 500.0)
         rate = float(val("dil_rate", 5000.0))
     sal = num(c[3], "Diluent water salinity (ppm)", "dil_sal", 20000.0, 0.0, 400000.0,
               help="PVT | Diluent Properties: diluent type water.")
@@ -4136,11 +4136,12 @@ def diluent_data_panel(o, top_md, secs):
         if vmd > dmd:
             st.warning("The gas lift valve is below the diluent injection depth.")
     c = st.columns(2)
-    pb = sel(c[0], "Percent basis", ["produced water", "total water"], "dil_pct_basis",
-             help="Diluent % of the produced water, or of the total water leaving the well (produced + diluent).")
-    gb = sel(c[1], "GLR basis", ["total liquid", "produced liquid"], "dil_glr_basis", disabled=not gl,
-             help="Lift gas = GLR injected x the total liquid in the tubing (produced + diluent), or x the produced "
-                  "liquid.")
+    pb = sel(c[0], "Percent basis", ["produced liquid", "produced water", "total water"], "dil_pct_basis",
+             help="PROSPER: the diluent is the percentage of the produced liquid rate. Alternatives: of the produced "
+                  "water, or of the total water leaving the well (produced + diluent).")
+    gb = sel(c[1], "GLR basis", ["produced liquid", "total liquid"], "dil_glr_basis", disabled=not gl,
+             help="PROSPER: lift gas = GLR injected x the produced liquid rate. Alternative: x the total liquid in the "
+                  "tubing (produced + diluent).")
     if dmd > bottom + 1.0:
         st.warning(f"The diluent injection depth is below the end of the tubing ({bottom:,.0f} ft MD).")
     setup = wdil.DiluentSetup(dil_md=dmd, rate=rate, pct=pct, salinity=sal, gas_lift=gl, gas=gas, glr_inj=glr,
