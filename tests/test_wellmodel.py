@@ -5024,8 +5024,11 @@ def test_emulsion_viscosity_t46():
                                               "gor": np.full(ok.sum(), 40.0)})
         assert np.abs(s["mu_l"] / d.mu_l.to_numpy()[ok] - 1).max() < 0.001, w
     # water-continuous side (WC 85 / 90 / 95 %): log-linear from the plateau at 80 % to the water viscosity at 100 %
-    # - exact with PROSPER's water viscosity (0.33061 cp at 10,000 ppm and 200 F, its PVT table); ours is 0.320 cp,
-    # so the liquid viscosity is 0.6-2.4 % low; pressures within 0.2 %
+    # - exact with PROSPER's water viscosity (0.33061 cp at 10,000 ppm and 200 F, its PVT table, now reproduced);
+    # liquid viscosity within 0.3 %, pressures within 0.2 %
+    # PROSPER's water viscosity at low salinity (Tutorial 46 PVT tables, 0 and 10,000 ppm, independent of pressure)
+    for t_, s_, v_ in ((30, 0, 1.80595), (120, 0, 0.62448), (202.5, 0, 0.31893), (75, 1, 1.03122), (200, 1, 0.33061)):
+        assert float(wbo._prosper_water(s_, 1000.0, t_)[2]) == pytest.approx(v_, rel=1e-4)
     c3 = {"q": np.full(3, 1500.0), "wc": np.array([0.85, 0.9, 0.95]), "gor": np.full(3, 40.0)}
     Pw, _ = wvlp.traverse(path, wvlp.BlackOilFluid(m, em), np.full(3, 514.696), c3, "pe2_style", 1, 1, 8.0)
     for i, w in enumerate((85, 90, 95)):
@@ -5038,6 +5041,6 @@ def test_emulsion_viscosity_t46():
         s = wvlp.BlackOilFluid(m, em).state(d.p.to_numpy()[1:-1] + 14.696, d.t.to_numpy()[1:-1],
                                              {"q": np.full(len(d) - 2, 1500.0), "wc": np.full(len(d) - 2, w / 100),
                                               "gor": np.full(len(d) - 2, 40.0)})
-        assert np.abs(s["mu_l"] / d.mu_l.to_numpy()[1:-1] - 1).max() < 0.03, w
+        assert np.abs(s["mu_l"] / d.mu_l.to_numpy()[1:-1] - 1).max() < 0.003, w
     proj = json.load(open(__file__.replace("tests/test_wellmodel.py", "examples/T46_Modelling_Emulsions.wellmodel.json")))
     assert proj["widgets"]["opt_emulsions"] == "emulsion" and proj["inputs"]["emul_p3"] == 3.77291

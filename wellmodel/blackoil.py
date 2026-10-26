@@ -462,7 +462,8 @@ def gas_props(inp: PVTInputs, p, t):
 #   viscosity a function of temperature and salinity only.
 # Tabulated against temperature and interpolated (monotone cubic); outside 30-210 F, Bw0 follows McCain's thermal
 # expansion from the end value, the pressure slope is held and viscosity keeps its salinity ratio to Van Wingen's
-# fresh-water curve. Salinity: quadratic in ln(viscosity) through fresh water (Van Wingen), 10 and 20 wt %.
+# fresh-water curve. Salinity: cubic in ln(viscosity) through PROSPER's fresh water, 1, 10 and 20 wt % (Tutorial 46
+# tables at 0 and 10,000 ppm: fresh water 0.3248 cp at 200 F, not Van Wingen's 0.3128).
 _PW_T = np.array([30, 39.4737, 48.9474, 58.4211, 60, 67.8947, 77.3684, 86.8421, 90, 96.3158, 105.789, 115.263, 120,
                   124.737, 134.211, 143.684, 150, 153.158, 162.632, 166, 172.105, 180, 181.579, 191.053, 200.526, 210.0])
 _PW_BW0 = np.array([0.99995, 0.99995, 0.99860, 0.99939, 0.99955, 1.00044, 1.00172, 1.00324, 1.00379, 1.00497, 1.00692,
@@ -471,6 +472,9 @@ _PW_BW0 = np.array([0.99995, 0.99995, 0.99860, 0.99939, 0.99955, 1.00044, 1.0017
 _PW_SLOPE = np.array([3.18333, 3.14500, 3.09167, 3.04667, 3.04000, 3.00833, 2.97333, 2.94833, 2.94000, 2.92667,
                       2.91500, 2.91000, 2.91000, 2.91500, 2.92833, 2.94833, 2.96667, 2.97667, 3.00833, 3.02333,
                       3.05000, 3.08833, 3.09667, 3.14667, 3.20500, 3.27000]) * 1e-6          # 1/psi
+_PW_T0 = np.arange(30.0, 210.01, 7.5)                    # Tutorial 46 PVT tables: fresh water and 10,000 ppm
+_PW_MU0 = np.array([1.80595, 1.6835, 1.50503, 1.35311, 1.22275, 1.1101, 1.0121, 0.92633, 0.85087, 0.78412, 0.72482, 0.6719, 0.62448, 0.58184, 0.54335, 0.5085, 0.47685, 0.44801, 0.42168, 0.39757, 0.37543, 0.35506, 0.33628, 0.31893, 0.30287])
+_PW_MU1 = np.array([1.84099, 1.71608, 1.53402, 1.37905, 1.24608, 1.13118, 1.03122, 0.94376, 0.8668, 0.79873, 0.73826, 0.6843, 0.63595, 0.59247, 0.55323, 0.5177, 0.48543, 0.45612, 0.42935, 0.40483, 0.38232, 0.36161, 0.34252, 0.32488, 0.30854])
 _PW_T10 = np.array([30.0, 60.0, 90.0, 120.0, 150.0, 166.0, 180.0, 210.0])
 _PW_MU10 = np.array([2.15637, 1.45605, 1.01015, 0.73914, 0.56268, 0.49445, 0.44436, 0.35957])
 _PW_T20 = np.array([30, 39.4737, 48.9474, 58.4211, 60, 67.8947, 77.3684, 86.8421, 90, 96.3158, 105.789, 115.263, 120,
@@ -511,12 +515,17 @@ def _prosper_water(s_wt, p, t):
     slope = _pchip(_PW_T, _PW_SLOPE, tc, 'slope')
     bw = bw0 - slope * np.maximum(p_ - 14.696, 0.0)
     rho_sc = 62.43 + 0.39014 * s_wt + 3.998e-3 * s_wt * s_wt
-    d10 = _pchip(_PW_T10, np.log(_PW_MU10) - _ln_vw(_PW_T10), tc, 'mu10')               # ln(mu / mu_fresh) at 10 wt %
-    d20 = _pchip(_PW_T20, np.log(_PW_MU20) - _ln_vw(_PW_T20), np.clip(tc, _PW_T20[0], _PW_T20[-1]), 'mu20')
-    c2 = (d20 - 2 * d10) / 200.0                                              # quadratic in S through 0, 10, 20
-    c1 = d10 / 10.0 - 10.0 * c2
+    d0 = _pchip(_PW_T0, np.log(_PW_MU0) - _ln_vw(_PW_T0), tc, 'mu0')                  # PROSPER fresh water vs Van Wingen
+    d1 = _pchip(_PW_T0, np.log(_PW_MU1 / _PW_MU0), tc, 'mu1')                            # ln(mu / mu_fresh) at 1 wt %
+    d10 = _pchip(_PW_T10, np.log(_PW_MU10), tc, 'mu10') - _pchip(_PW_T0, np.log(_PW_MU0), tc, 'lmu0')   # at 10 wt %
+    d20 = _pchip(_PW_T20, np.log(_PW_MU20), np.clip(tc, _PW_T20[0], _PW_T20[-1]), 'mu20') \
+        - _pchip(_PW_T0, np.log(_PW_MU0), np.clip(tc, _PW_T20[0], _PW_T20[-1]), 'lmu0b')   # at 20 wt %
     s = np.clip(s_wt, 0.0, 30.0)
-    mu = np.exp(_ln_vw(t_) + c1 * s + c2 * s * s)
+    # cubic in S through 0, 1, 10 and 20 wt % (Lagrange form, zero at S = 0)
+    l1 = s * (s - 10) * (s - 20) / (1 * (1 - 10) * (1 - 20))
+    l10 = s * (s - 1) * (s - 20) / (10 * (10 - 1) * (10 - 20))
+    l20 = s * (s - 1) * (s - 10) / (20 * (20 - 1) * (20 - 10))
+    mu = np.exp(_ln_vw(t_) + d0 + d1 * l1 + d10 * l10 + d20 * l20)
     return bw, rho_sc / bw, mu
 
 
