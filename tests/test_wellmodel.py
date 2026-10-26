@@ -4973,7 +4973,7 @@ def test_emulsion_viscosity_t46():
     at 500 psig and 200 F. Emulsion data at 2000 psig, 200 F (5-55 % WC oil-continuous, plateau 60-80 %): PROSPER's
     match P1 1, P2 0.69799, P3 3.77291, std dev 3.21611 - a polynomial in water cut times the oil viscosity. The
     gradient (1500 STB/d, 500 psig wellhead, PE2) is unchanged at WC 0 and rises with water cut with the emulsion,
-    falls without it."""
+    falls without it. Against the user's PROSPER gradients with the emulsion: bottom-hole pressure within 0.5 %."""
     import json
     from wellmodel import emulsion as EM
     inp = wbo.PVTInputs(rsb=40, api=11, gas_sg=0.83, salinity_ppm=10000)
@@ -5008,5 +5008,20 @@ def test_emulsion_viscosity_t46():
     P1 = wvlp.traverse(path, wvlp.BlackOilFluid(m, em), np.full(4, 514.696), case, "pe2_style", 1, 1, 8.0)[0][:, -1]
     assert P1[0] == pytest.approx(P0[0]) and np.all(np.diff(P0) < 0) and np.all(np.diff(P1) > 0)
     assert np.all(np.diff(P1 - P0) > 0)
+    # the user's PROSPER gradients with the emulsion (WC 0 / 25 / 50 / 75 %): the emulsion water cut is the stock-tank
+    # one; liquid viscosity within 0.1 %, pressures within 0.6 %, temperatures within 0.1 F
+    g = pd.read_csv(Path(__file__).parent / "data" / "t46_gradients.csv")
+    Pe, Te = wvlp.traverse(path, wvlp.BlackOilFluid(m, em), np.full(4, 514.696), case, "pe2_style", 1, 1, 8.0)
+    for i, w in enumerate((0, 25, 50, 75)):
+        d = g[g.wc == w]
+        pm = np.interp(d.md, path.md, Pe[i]) - 14.696
+        tm = np.interp(d.md, path.md, Te[i])
+        assert np.abs(pm[1:] / d.p.to_numpy()[1:] - 1).max() < 0.006, w
+        assert np.abs(tm - d.t.to_numpy()).max() < 0.1, w
+        ok = d.mu_l.notna().to_numpy()
+        s = wvlp.BlackOilFluid(m, em).state(d.p.to_numpy()[ok] + 14.696, d.t.to_numpy()[ok],
+                                             {"q": np.full(ok.sum(), 1500.0), "wc": np.full(ok.sum(), w / 100),
+                                              "gor": np.full(ok.sum(), 40.0)})
+        assert np.abs(s["mu_l"] / d.mu_l.to_numpy()[ok] - 1).max() < 0.001, w
     proj = json.load(open(__file__.replace("tests/test_wellmodel.py", "examples/T46_Modelling_Emulsions.wellmodel.json")))
     assert proj["widgets"]["opt_emulsions"] == "emulsion" and proj["inputs"]["emul_p3"] == 3.77291

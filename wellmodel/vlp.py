@@ -183,7 +183,7 @@ def _water_sg(inp):
     return float(rho / 62.428)
 
 
-EMULSION_WC = "in situ"        # water cut for the emulsion viscosity: "in situ" (volume fraction) or "stock tank"
+EMULSION_WC = "stock tank"     # water cut for the emulsion viscosity: "in situ" (volume fraction) or "stock tank"
 
 
 class BlackOilFluid:

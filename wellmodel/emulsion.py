@@ -14,7 +14,8 @@ deviation of 3.21611 cp (RMS over the points) - reproduced here to 0.2 % (0.6991
 PROSPER's oil viscosity at 2000 psig is 100.015 cp).
 
 The emulsion viscosity replaces the volume-weighted oil-water liquid viscosity in the tubing (and pipe) when the
-emulsion occurs there; at WC 0 it is the oil viscosity, so the gradients are unchanged.
+emulsion occurs there, at the stock-tank water cut (PROSPER's gradient viscosities at WC 25 / 50 / 75 % within 0.05 %);
+at WC 0 it is the oil viscosity, so the gradients are unchanged.
 """
 from __future__ import annotations
 
