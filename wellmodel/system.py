@@ -20,6 +20,7 @@ from . import complementary as CX
 from . import surface as SF
 from . import vlp as V
 from . import gaslift_system as GLS
+from . import diluent as DL
 from .correlations import CORRELATIONS, NEEDS_GLR, no_slip
 from .equipment import HeatCapacities
 
@@ -213,7 +214,7 @@ def _roots(rates, diff):
 
 def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, correlation, p1=1.0, p2=1.0,
                 hc: HeatCapacities | None = None, method="Automatic - Geometric", n=25, user_rates=None,
-                allow_left=False, surface: SurfaceSetup | None = None, node="bottom", lift=None):
+                allow_left=False, surface: SurfaceSetup | None = None, node="bottom", lift=None, diluent=None):
     """Solve every case. path_for(tubing_id) -> FlowPath; ipr_for(changes) -> IPR curve (changes: pr, j, skin).
     base holds whp, u, wc/gor (oil, wc in %) or wgr/sep_gor (gas); each case overrides some of them.
     With surface equipment, whp is the manifold pressure and 'choke' (64ths) may be sensitised.
@@ -226,8 +227,22 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
     if lift is not None and kind == "gas" and lift.method != GLS.METHODS[0]:
         raise ValueError("Gas lifted gas wells: fixed depth of injection only.")
 
+    if diluent is not None and (node == "top" or kind != "oil" or lift is not None):
+        raise ValueError("Diluent injection: oil producers, bottom node, without separate gas lift data.")
+
+    def dil_rates(plist, qlist):
+        qd, qg = [], []
+        for p_, q_ in zip(plist, qlist):
+            a, b = diluent.rates(q_, float({**base, **p_}.get("wc", 0.0)) / 100.0, p_)
+            qd.append(a)
+            qg.append(b)
+        return np.concatenate(qd), np.concatenate(qg)
+
     def trav(path, whp, case, plist, qlist, u):
         """Tubing traverse; with gas lift, the lift columns of each case are added from its params."""
+        if diluent is not None:
+            qd, qg = dil_rates(plist, qlist)
+            return DL.traverse(path, fluid, whp, case, diluent, correlation, p1, p2, u, hc, qd, qg)
         if lift is None:
             return V.traverse(path, fluid, whp, case, correlation, p1, p2, u, hc)
         cols = {}
@@ -367,6 +382,16 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
                         f"Gas lift injection limit: the VLP jumps at this rate (lifted bottom-node pressure "
                         f"{st_.P[-1, -1]:,.0f} psia, IPR {r.pwf:,.0f} psia) - at higher rates the casing pressure "
                         "cannot keep the injection going, so the well cannot reach a steady lifted rate above it.")
+        elif diluent is not None:
+            qd, qg = dil_rates([r.params], [qq])
+            _, T_ = DL.traverse(path, fluid, float(r.params["whp"]), case, diluent, correlation, p1, p2,
+                                float(r.params["u"]), hc, qd, qg)
+            tt = T_[:, 0]
+            if r.q is not None:
+                r.details["diluent"] = {"Diluent rate (STB/d)": float(qd[-1]), "Lift gas rate (MMscf/d)": float(qg[-1]),
+                                        "Total liquid (STB/d)": float(qq[-1] + qd[-1]),
+                                        "Total water cut (%)": 100 * float((qq[-1] * case["wc"][-1] + qd[-1])
+                                                                            / (qq[-1] + qd[-1]))}
         else:
             w, cp = fluid.mass_cp(case, hc)
             tt = V.temperature_profile(path, w, cp, float(r.params["u"]))[:, 0]

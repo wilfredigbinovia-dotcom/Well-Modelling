@@ -58,6 +58,8 @@ ARTIFICIAL_LIFT = {
     "pcp_motor": "Progressive cavity pump (downhole motor drive)",
     "pcp_rod": "Progressive cavity pump (sucker rod drive)",
     "hsp": "Hydraulic submersible pump (turbine driven, power fluid down the annulus)",
+    "diluent_gl": "Diluent injection - annular injection with gas lift",
+    "diluent": "Diluent injection - annular injection",
 }
 
 FIELDS = {  # field -> (display name, choices)
@@ -79,7 +81,8 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "method": {"black_oil", "eos"},
     "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer", "water_injector", "gas_injector"},
-    "artificial_lift": {"none", "gas_lift", "ct_gas_lift", "esp", "srp", "jet", "pcp_motor", "pcp_rod", "hsp"},
+    "artificial_lift": {"none", "gas_lift", "ct_gas_lift", "esp", "srp", "jet", "pcp_motor", "pcp_rod", "hsp",
+                        "diluent_gl", "diluent"},
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
 }
@@ -227,6 +230,13 @@ class WellOptions:
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
                     "Gas lift injects down the annulus and produces up the tubing: choose Tubing flow.")
+        if self.artificial_lift in ("diluent", "diluent_gl"):
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "Diluent injection is modelled for oil (and water) producers.")
+            if self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "The diluent goes down the annulus and the well produces up the tubing: choose Tubing flow.")
         if self.artificial_lift == "ct_gas_lift":
             if self.well_type != "producer" or self.fluid_type != "oil":
                 add("error", ["artificial_lift", "fluid_type", "well_type"],
@@ -335,6 +345,10 @@ class WellOptions:
             eq += ["Coiled tubing data: lift gas gravity and impurities, coiled tubing ID, wall thickness and "
                    "roughness, method (specified or optimum injection depth), coiled tubing depth, injection pressure "
                    "and dP across the valve (or transfer them from the coiled tubing gas lift design)"]
+        if self.artificial_lift in ("diluent", "diluent_gl"):
+            eq += ["Diluent injection data: injection depth, diluent rate (or % of the water) and salinity"
+                   + ("; lift gas gravity and impurities, GLR injected and gas lift valve depth"
+                      if self.artificial_lift == "diluent_gl" else "")]
         if self.artificial_lift == "esp":
             eq += ["ESP: pump depth (the tubing ends at the pump; casing ID below it), pump, motor and cable "
                    "(or run the ESP design), number of stages, operating frequency, cable length, gas separator "

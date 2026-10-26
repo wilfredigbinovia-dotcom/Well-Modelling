@@ -47,6 +47,7 @@ from wellmodel import quicklook as wql
 from wellmodel import esp_quicklook as weql
 from wellmodel import hsp_quicklook as whql
 from wellmodel import srp_cards as wsrpc
+from wellmodel import diluent as wdil
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -457,7 +458,11 @@ CAPTIONS = {
                         "pcp_rod": "Positive-displacement pump turned by a rod string from surface (production up "
                                    "the rod-tubing annulus): Equipment, Calculation (design in Design)",
                         "hsp": "Centrifugal pump driven by a turbine on power fluid down the annulus, exhausting into "
-                               "the tubing: Equipment, Calculation (design in Design)"},
+                               "the tubing: Equipment, Calculation (design in Design)",
+                        "diluent_gl": "Diluent water down the annulus into the tubing, with lift gas at a valve above "
+                                      "it (PROSPER Tutorial 30): Equipment, Calculation (system analysis)",
+                        "diluent": "Diluent water down the annulus into the tubing: Equipment, Calculation (system "
+                                   "analysis)"},
 }
 STATUS_ICON = {wopt.MODELLED_NOW: "✅ Modelled", wopt.LUMPED_IN_PI: "↪️ Absorbed in matched PI",
                wopt.PVT_ONLY: "🧪 PVT only - flow calculations not built yet",
@@ -4092,6 +4097,58 @@ def _gl_transfer_design():
     put("glq_sg", float(val("gl_sg", 0.7)))
 
 
+DIL_VARS = {"dil_pct": "Salt diluent rate percent (%)", "dil_rate": "Diluent injection rate (STB/d)",
+            "glr_dil": "GLR injected (scf/STB)"}
+
+
+def diluent_data_panel(o, top_md, secs):
+    """System | Diluent Injection (PROSPER; Tutorial 30): diluent water down the annulus, optionally with gas lift."""
+    gl = getattr(o, "artificial_lift", "") == "diluent_gl"
+    st.subheader("Diluent injection" + (" with gas lift" if gl else ""))
+    st.caption("Water of its own salinity is injected down the tubing-casing annulus and enters the tubing at the "
+               "diluent injection depth" + ("; lift gas enters at the gas lift valve depth above it" if gl else "")
+               + ". Used by the system analysis (the rate and GLR can be sensitivity variables).")
+    tub = secs[secs["Type"] == "Tubing"] if secs is not None and len(secs) else None
+    bottom = float(tub["MD bottom (ft)"].max()) if tub is not None and len(tub) else 5000.0
+    c = st.columns(4)
+    dmd = num(c[0], "Diluent injection depth (ft MD)", "dil_md", float(round(bottom)), float(top_md) + 10, 60000.0)
+    how = sel(c[1], "Diluent rate input", ["Rate (STB/d)", "Percent of the water"], "dil_how",
+              help="PROSPER's 'Salt Diluent Rate Percent' sensitivity variable gives the diluent as a percentage of "
+                   "the water.")
+    if how == "Rate (STB/d)":
+        rate = num(c[2], "Diluent injection rate (STB/d)", "dil_rate", 5000.0, 0.0, 1e6)
+        pct = None
+    else:
+        pct = num(c[2], "Diluent rate (% of the water)", "dil_pct", 30.0, 0.0, 99.0)
+        rate = float(val("dil_rate", 5000.0))
+    sal = num(c[3], "Diluent water salinity (ppm)", "dil_sal", 20000.0, 0.0, 400000.0,
+              help="PVT | Diluent Properties: diluent type water.")
+    gas = wgl.LiftGas()
+    glr, vmd = 0.0, dmd
+    if gl:
+        c = st.columns(4)
+        gas = wgl.LiftGas(num(c[0], "Injected gas gravity", "dil_gsg", 0.7, 0.55, 2.0, None, "%.3f"),
+                          num(c[2], "CO2 (%)", "dil_co2", 0.0, 0.0, 100.0), num(c[3], "N2 (%)", "dil_n2", 0.0, 0.0, 100.0),
+                          num(c[1], "H2S (%)", "dil_h2s", 0.0, 0.0, 100.0))
+        c = st.columns(4)
+        glr = num(c[0], "GLR injected (scf/STB)", "dil_glr", 50.0, 0.0, 1e5)
+        vmd = num(c[1], "Gas lift valve depth (ft MD)", "dil_vmd", min(7500.0, dmd), float(top_md) + 10, 60000.0)
+        if vmd > dmd:
+            st.warning("The gas lift valve is below the diluent injection depth.")
+    c = st.columns(2)
+    pb = sel(c[0], "Percent basis", ["produced water", "total water"], "dil_pct_basis",
+             help="Diluent % of the produced water, or of the total water leaving the well (produced + diluent).")
+    gb = sel(c[1], "GLR basis", ["total liquid", "produced liquid"], "dil_glr_basis", disabled=not gl,
+             help="Lift gas = GLR injected x the total liquid in the tubing (produced + diluent), or x the produced "
+                  "liquid.")
+    if dmd > bottom + 1.0:
+        st.warning(f"The diluent injection depth is below the end of the tubing ({bottom:,.0f} ft MD).")
+    setup = wdil.DiluentSetup(dil_md=dmd, rate=rate, pct=pct, salinity=sal, gas_lift=gl, gas=gas, glr_inj=glr,
+                              valve_md=vmd, pct_basis=pb, glr_basis=gb)
+    ss["diluent_setup"] = setup
+    return setup
+
+
 def gaslift_data_panel(o, top_md, secs):
     """System | Gas Lift Data: the installed continuous gas lift used by the Calculation tab."""
     st.subheader("Gas lift data (continuous)")
@@ -4536,6 +4593,11 @@ with tabs[3]:
         hsp_equipment_panel(top_md, secs)
     else:
         ss.pop("hsp_equipment", None)
+    if o is not None and getattr(o, "artificial_lift", "none") in ("diluent", "diluent_gl"):
+        st.divider()
+        diluent_data_panel(o, top_md, secs)
+    else:
+        ss.pop("diluent_setup", None)
     if o is not None and getattr(o, "artificial_lift", "none") == "gas_lift":
         st.divider()
         gaslift_data_panel(o, top_md, secs)
@@ -8037,6 +8099,7 @@ with tabs[5]:
     JET_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "jet")
     PCP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("pcp_motor", "pcp_rod"))
     HSP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "hsp")
+    DIL_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("diluent", "diluent_gl"))
     _modes = CALC_MODES + ([QL_MODE] if GL_ON else []) + ([ESPQL_MODE] if ESP_ON else []) + ([HSPQL_MODE] if HSP_ON else []) + \
         ([EQC_MODE] if GL_ON and getattr(_o, "artificial_lift", "") == "gas_lift" else [])
     if val("calc_mode") not in _modes:
@@ -8078,6 +8141,11 @@ with tabs[5]:
         blocker = "Enter the sucker rod pump in the Equipment Data tab first."
     elif GL_ON and gl_setup is None:
         blocker = "Enter the gas lift data in the Equipment Data tab first."
+    elif DIL_ON and not ss.get("diluent_setup"):
+        blocker = "Enter the diluent injection data in the Equipment Data tab first."
+    elif DIL_ON and mode != CALC_MODES[0] and not CHOKE:
+        blocker = ("Diluent injection is modelled in the system analysis (with the diluent rate, its percentage and "
+                   "the GLR injected as sensitivity variables).")
     elif GL_ON and not (QLK or EQC) and gl_setup.method in wgls.METHODS[2:] and not gl_setup.valves:
         blocker = "Enter the gas lift valve depths in the Equipment Data tab (Gas lift data) first."
     if blocker:
@@ -8225,13 +8293,13 @@ with tabs[5]:
                     if m_fit is None:
                         st.caption("Not matched - run Match VLP in the VLP tab to calibrate this correlation.")
                 if SYS:
-                    node_lab = sel(st, "Solution node", ["Bottom node", "Top node"], "sys_node", disabled=GL_ON,
+                    node_lab = sel(st, "Solution node", ["Bottom node", "Top node"], "sys_node", disabled=GL_ON or DIL_ON,
                                    help="Bottom node: IPR against VLP at the bottom of the downhole equipment - the "
                                         "solution pressure is the flowing bottom-hole pressure. Top node: inflow (IPR, "
                                         "tubing" + (", surface equipment" if use_surface else "") + ") against the "
                                         "top-node pressure at the " + ("manifold" if use_surface else "wellhead") +
                                         ". The solution rate is the same at either node; only the curves change.")
-                    node = "top" if node_lab == "Top node" and not GL_ON else "bottom"
+                    node = "top" if node_lab == "Top node" and not (GL_ON or DIL_ON) else "bottom"
                     if GL_ON:
                         st.caption(f"Gas lift ({gl_setup.method.lower()}): solved at the bottom node.")
                     method = sel(st, "Rate method", RATE_METHODS, "sys_rate_method")
@@ -8287,6 +8355,9 @@ with tabs[5]:
                         var_defs.update(SRP_VARS)
                     if GL_ON:
                         var_defs.update(wgls.variables_for(gl_setup))
+                    if DIL_ON:
+                        var_defs.update(DIL_VARS if ss["diluent_setup"].gas_lift else
+                                        {k_: v_ for k_, v_ in DIL_VARS.items() if k_ != "glr_dil"})
                     sens = {}
                     if sens_on:
                         chosen = st.multiselect("Variables (up to 3)", list(var_defs), format_func=var_defs.get,
@@ -8297,6 +8368,11 @@ with tabs[5]:
                         if GL_ON:
                             cur.update({"qgi": gl_setup.qgi, "glr_inj": gl_setup.glr_inj, "pcs": gl_setup.p_casing,
                                         "dp_valve": gl_setup.dp_valve, "inj_md": gl_setup.fixed_md})
+                        if DIL_ON:
+                            ds_ = ss["diluent_setup"]
+                            cur.update({"dil_pct": ds_.pct, "dil_rate": ds_.rate, "glr_dil": ds_.glr_inj})
+                            if "dil_pct" in chosen and "dil_rate" in chosen:
+                                st.error("Choose either the diluent rate or its percentage, not both.")
                         if GL_ON and "qgi" in chosen and "glr_inj" in chosen:
                             st.error("Choose either the gas lift gas injection rate or the GLR injected, not both.")
                         if JET_ON and ss.get("jet_equipment"):
@@ -8397,6 +8473,8 @@ with tabs[5]:
                             path_cache = {}
 
                             gl_extra = gl_setup.extra_md() if GL_ON else []
+                            if DIL_ON:
+                                gl_extra = list(gl_extra) + ss["diluent_setup"].extra_md()
                             if GL_ON and "inj_md" in sens:
                                 gl_extra = list(gl_extra) + list(sens["inj_md"])
 
@@ -8428,7 +8506,8 @@ with tabs[5]:
                                 res, paths_ = wsys.solve_cases(path_for, fluid, kind, base, combos, ipr_for, corr, p1, p2,
                                                                eqd["heat_capacities"], method, 25, user_rates,
                                                                allow_left=(lhi == "Allow"), surface=surface, node=node,
-                                                               lift=lift_)
+                                                               lift=lift_,
+                                                               diluent=ss["diluent_setup"] if DIL_ON else None)
                             for r_, c_ in zip(res, combos):
                                 r_.case_label = c_
                             ss["sys_res"] = {"sig": sig, "res": res, "paths": paths_, "vars": list(sens), "kind": kind,
@@ -8452,6 +8531,8 @@ with tabs[5]:
                                     if r_.pwh_q is not None:
                                         d_["Wellhead pressure (psia)"] = r_.pwh_q
                                     d_.update({"Wellhead temperature (°F)": r_.wht_q, "Stable": "Yes" if r_.stable else "No"})
+                                    if r_.details.get("diluent"):
+                                        d_.update(r_.details["diluent"])
                                     gl_ = r_.details.get("gas_lift")
                                     if gl_:
                                         d_.update({k_: v_ for k_, v_ in gl_.items() if not k_.startswith("_")
