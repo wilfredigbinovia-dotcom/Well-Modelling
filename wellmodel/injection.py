@@ -156,28 +156,84 @@ def _grad(fluid, path, i, p, t, q, p1, p2):
     return p1 * rho * path.sin_t[i] * fluid.grav, p2 * fric, v, rho, mu
 
 
+def enthalpy_down(path, fluid, P, q, u_seg, t_inj):
+    """Improved Approximation for an injector with an enthalpy-capable fluid (co2.CO2InjectionFluid): the energy
+    balance h(i+1) = h(i) + L sin(theta)/J + Q marched down from the injection temperature, T from h at the node
+    pressure (so Joule-Thomson and heat capacity come from the fluid's enthalpy). Q = U pi d L (Te - T) over the
+    segment, integrated exponentially - w cp (Te - T) (1 - exp(-a)), a = U pi d L / (w cp) - so it stays bounded
+    at low rates where the fluid reaches the formation temperature within a segment."""
+    J = 778.17
+    q = np.atleast_1d(np.asarray(q, float))
+    w = np.maximum(fluid.mass_lbh(q), 1e-9)
+    n = len(path.md)
+    T = np.empty((q.size, n))
+    T[:, 0] = t_inj
+    h = fluid.enthalpy(P[:, 0], T[:, 0])
+    for i in range(n - 1):
+        L = path.seg_len[i]
+        te = 0.5 * (path.t_form[i] + path.t_form[i + 1])
+        cp = np.maximum(fluid.cp(P[:, i], T[:, i]), 1e-6)
+        a = np.asarray(u_seg)[..., i] * np.pi * path.d_ht[i] * L / (w * cp)
+        h = h + L * path.sin_t[i] / J + cp * (te - T[:, i]) * -np.expm1(-a)
+        T[:, i + 1] = fluid.temperature(P[:, i + 1], h, T[:, i])
+    return T
+
+
 def traverse(path: InjectionPath, fluid: WaterFluid, whp, q, u=8.0, t_inj=60.0, hc: HeatCapacities | None = None,
-             p1=1.0, p2=1.0):
+             p1=1.0, p2=1.0, thermal=None):
     """Pressure and temperature (cases x nodes) from the wellhead down, for injection rates q (STB/d) at wellhead
-    pressure whp (psia). Returns (P, T)."""
+    pressure whp (psia). Returns (P, T). thermal: None (Rough Approximation with u) or {"model": "improved",
+    "u_seg": per-segment U} - with an enthalpy-capable fluid the temperature then follows its enthalpy balance
+    (alternated with the pressure march), otherwise the per-segment U replaces u."""
     hc = hc or HeatCapacities()
     q = np.atleast_1d(np.asarray(q, float))
     whp = np.broadcast_to(np.asarray(whp, float), q.shape).astype(float)
-    T = temperature_down(path, fluid.mass_lbh(q), getattr(hc, fluid.cp_key), u, t_inj)
+    u_seg = thermal.get("u_seg") if thermal else None
+    coupled = u_seg is not None and getattr(fluid, "has_enthalpy", False)
+    if u_seg is not None and not coupled:
+        T = _temperature_down_seg(path, fluid.mass_lbh(q), getattr(hc, fluid.cp_key), u_seg, t_inj)
+    else:
+        T = temperature_down(path, fluid.mass_lbh(q), getattr(hc, fluid.cp_key), u, t_inj)
+
+    def down(T):
+        n = len(path.md)
+        P = np.empty((q.size, n))
+        p = np.maximum(whp, 14.7)
+        P[:, 0] = p
+        for i in range(n - 1):
+            L = path.seg_len[i]
+            e0, f0, *_ = _grad(fluid, path, i, p, T[:, i], q, p1, p2)
+            pp = np.maximum(p + (e0 - f0) * L, 14.7)
+            e1, f1, *_ = _grad(fluid, path, i, pp, T[:, i + 1], q, p1, p2)
+            p = np.maximum(p + 0.5 * ((e0 - f0) + (e1 - f1)) * L, 14.7)
+            if (i + 1) in path.restrictions:                 # injection: pressure below the restriction is lower
+                p = np.maximum(p - _restriction_dp(fluid, p, T[:, i + 1], q, path.restrictions[i + 1]), 14.7)
+            P[:, i + 1] = p
+        return P
+    P = down(T)
+    if coupled:
+        for _ in range(3):
+            T = enthalpy_down(path, fluid, P, q, u_seg, t_inj)
+            P = down(T)
+    return P, T
+
+
+def _temperature_down_seg(path, w_lbh, cp, u_seg, t_inj):
+    """temperature_down with U per segment."""
+    w = np.atleast_1d(np.asarray(w_lbh, float))
     n = len(path.md)
-    P = np.empty((q.size, n))
-    p = np.maximum(whp, 14.7)
-    P[:, 0] = p
+    T = np.empty((w.size, n))
+    T[:, 0] = t_inj
     for i in range(n - 1):
         L = path.seg_len[i]
-        e0, f0, *_ = _grad(fluid, path, i, p, T[:, i], q, p1, p2)
-        pp = np.maximum(p + (e0 - f0) * L, 14.7)
-        e1, f1, *_ = _grad(fluid, path, i, pp, T[:, i + 1], q, p1, p2)
-        p = np.maximum(p + 0.5 * ((e0 - f0) + (e1 - f1)) * L, 14.7)
-        if (i + 1) in path.restrictions:                 # injection: pressure below the restriction is lower
-            p = np.maximum(p - _restriction_dp(fluid, p, T[:, i + 1], q, path.restrictions[i + 1]), 14.7)
-        P[:, i + 1] = p
-    return P, T
+        a = np.asarray(u_seg)[..., i] * np.pi * path.d_ht[i] / np.maximum(w * cp, 1e-9)
+        tf0, tf1 = path.t_form[i], path.t_form[i + 1]
+        g = (tf1 - tf0) / L
+        t0 = T[:, i]
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            tn = tf0 + g * L - g / a + (t0 - tf0 + g / a) * np.exp(-a * L)
+        T[:, i + 1] = np.where(a * L < 1e-9, t0, tn)
+    return T
 
 
 # ======================================================================= injectivity
@@ -283,15 +339,25 @@ def petex_gas_injection(pr, t_res, k, h, area_acres, ca, rw, hp, t_days, phi, sw
                         d_entered=None, perm="total"):
     """Petroleum Experts gas IPR (inflow.petex_gas, validated on PROSPER Tutorial 02) for injection."""
     from . import inflow as winf
-    inp = fluid.inp
     p_hi = max(4 * pr, 15000.0)
-    grid = np.linspace(14.696, p_hi, 3000)
-    mg = fluid.gp.pseudo_pressure(inp, grid, t_res)
-    m_fn = lambda p: np.interp(p, grid, mg)
-    z3 = fluid.gp.gas_props(inp, np.array([pr - 5, pr, pr + 5]), np.full(3, float(t_res)))[0]
-    mu_r = float(fluid.gp.gas_props(inp, np.array([pr]), np.array([float(t_res)]))[3][0])
+    if hasattr(fluid, "mu_z"):          # compositional (EOS / CO2) stream: PROSPER's gauge M(P) of its properties
+        grid = np.linspace(14.696, p_hi, 3000)
+        mu_g, z_g = fluid.mu_z(grid, t_res)
+        integ = 2 * (grid - 14.696) / (mu_g * z_g)
+        mg = np.concatenate([[0.0], np.cumsum(0.5 * (integ[1:] + integ[:-1]) * np.diff(grid))])
+        m_fn = lambda p: np.interp(p, grid, mg)
+        mu3, z3 = fluid.mu_z(np.array([pr - 5, pr, pr + 5]), t_res)
+        mu_r, sg = float(mu3[1]), float(fluid.sg)
+    else:
+        inp = fluid.inp
+        grid = np.linspace(14.696, p_hi, 3000)
+        mg = fluid.gp.pseudo_pressure(inp, grid, t_res)
+        m_fn = lambda p: np.interp(p, grid, mg)
+        z3 = fluid.gp.gas_props(inp, np.array([pr - 5, pr, pr + 5]), np.full(3, float(t_res)))[0]
+        mu_r = float(fluid.gp.gas_props(inp, np.array([pr]), np.array([float(t_res)]))[3][0])
+        sg = inp.gas_sg
     cg = 1 / pr - (z3[2] - z3[0]) / 10 / z3[1]
-    cv = winf.petex_gas(pr, t_res, k, h, area_acres, ca, rw, hp, t_days, phi, swc, skin, m_fn, mu_r, cg, inp.gas_sg,
+    cv = winf.petex_gas(pr, t_res, k, h, area_acres, ca, rw, hp, t_days, phi, swc, skin, m_fn, mu_r, cg, sg,
                         d_entered, perm)
     a, b = cv.params["a (laminar)"], cv.params["b (turbulent)"]
     x = cv.params["Drainage term X"]
@@ -317,8 +383,8 @@ class InjectionResult:
     ipr_p: np.ndarray
 
 
-def vlp_curve(path, fluid, whp, rates, u=8.0, t_inj=60.0, hc=None, p1=1.0, p2=1.0, with_t=False):
-    P, T = traverse(path, fluid, whp, rates, u, t_inj, hc, p1, p2)
+def vlp_curve(path, fluid, whp, rates, u=8.0, t_inj=60.0, hc=None, p1=1.0, p2=1.0, with_t=False, thermal=None):
+    P, T = traverse(path, fluid, whp, rates, u, t_inj, hc, p1, p2, thermal)
     return (P[:, -1], T[:, -1]) if with_t else P[:, -1]
 
 
@@ -327,18 +393,19 @@ def _ipr_p(ipr, q, t):
     return ipr.pwf(q, t) if getattr(ipr, "sandface_temperature", False) else ipr.pwf(q)
 
 
-def solve(path, fluid, whp, ipr: InjectionIPR, u=8.0, t_inj=60.0, hc=None, p1=1.0, p2=1.0, n=20, q_max=None):
+def solve(path, fluid, whp, ipr: InjectionIPR, u=8.0, t_inj=60.0, hc=None, p1=1.0, p2=1.0, n=20, q_max=None,
+          thermal=None):
     """Injection rate where the tubing (VLP) and reservoir (IPR) bottom-hole pressures meet. None if the well
     cannot inject (the static column is below the reservoir pressure)."""
     if q_max is None:                             # rate grid as PROSPER: up to where friction wins clearly
         q_max = 4000.0 if fluid.kind == "water" else 10.0
         for _ in range(12):
-            v_, t_ = vlp_curve(path, fluid, whp, [q_max], u, t_inj, hc, p1, p2, with_t=True)
+            v_, t_ = vlp_curve(path, fluid, whp, [q_max], u, t_inj, hc, p1, p2, with_t=True, thermal=thermal)
             if v_[0] < _ipr_p(ipr, np.array([q_max]), t_)[0]:
                 break
             q_max *= 2
     rates = np.linspace(q_max / (n * 50), q_max, n)
-    vp, tb = vlp_curve(path, fluid, whp, rates, u, t_inj, hc, p1, p2, with_t=True)
+    vp, tb = vlp_curve(path, fluid, whp, rates, u, t_inj, hc, p1, p2, with_t=True, thermal=thermal)
     ip = _ipr_p(ipr, rates, tb)
     d = vp - ip
     if d[0] <= 0:
@@ -347,10 +414,10 @@ def solve(path, fluid, whp, ipr: InjectionIPR, u=8.0, t_inj=60.0, hc=None, p1=1.
     if k is None:
         return None, rates, vp, ip
     def f(x):
-        v_, t_ = vlp_curve(path, fluid, whp, [x], u, t_inj, hc, p1, p2, with_t=True)
+        v_, t_ = vlp_curve(path, fluid, whp, [x], u, t_inj, hc, p1, p2, with_t=True, thermal=thermal)
         return v_[0] - _ipr_p(ipr, np.array([x]), t_)[0]
     q = brentq(f, rates[k - 1], rates[k], xtol=1e-3)
-    P, T = traverse(path, fluid, whp, [q], u, t_inj, hc, p1, p2)
+    P, T = traverse(path, fluid, whp, [q], u, t_inj, hc, p1, p2, thermal)
     return InjectionResult(q, float(P[0, -1]), float(whp), P[0], T[0], rates, vp, ip), rates, vp, ip
 
 

@@ -266,10 +266,15 @@ class WellOptions:
         if self.artificial_lift == "mpump" and self.well_type != "producer":
             add("error", ["artificial_lift", "well_type"],
                 "The surface multiphase pump boosts a producing well's flowline: choose a producer.")
-        if self.temp_model != "rough" and self.well_type != "producer":
+        if self.temp_model == "enthalpy" and self.well_type != "producer":
             add("error", ["temp_model", "well_type"],
-                "The Improved Approximation and Enthalpy Balance temperature models are built for producers; injectors "
-                "use the Rough Approximation.")
+                "The Enthalpy Balance temperature model is built for producers; injectors use the Rough or the "
+                "Improved Approximation.")
+        if self.temp_model == "improved" and self.well_type != "producer":
+            add("info", ["temp_model", "well_type"],
+                "Injector with the Improved Approximation: an equation-of-state gas with the PRP file's CO2 correction "
+                "gets the full energy balance (gravity, Joule-Thomson, heat loss; PROSPER Tutorial 39); other "
+                "injected fluids use the U table with the average heat capacities.")
         if self.temp_model != "rough" and self.artificial_lift != "none":
             add("warning", ["temp_model", "artificial_lift"],
                 "With artificial lift the coupled temperature model applies to the plain tubing traverses only; the "

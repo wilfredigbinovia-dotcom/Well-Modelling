@@ -53,6 +53,7 @@ from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
 from wellmodel import enthalpy as web
+from wellmodel import co2 as wco2
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -832,8 +833,9 @@ def render_eos(opts_now):
     else:
         m[1].metric("GOR (scf/STB)", f"{sep['gor']:,.0f}")
         m[2].metric("Bo at Psat (RB/STB)", f"{sep.get('bo', np.nan):.4f}")
-    m[3].metric("Stock-tank liquid (°API)", f"{sep['api']:.1f}" if np.isfinite(sep["api"]) else "—")
-    m[4].metric("Separator gas gravity", f"{sep['gas_gravity']:.3f}")
+    has_liq = np.isfinite(sep["api"]) and 0 < sep["api"] < 200 and sep.get("stb_per_lbmol", 1.0) > 1e-9
+    m[3].metric("Stock-tank liquid (°API)", f"{sep['api']:.1f}" if has_liq else "—")
+    m[4].metric("Separator gas gravity", f"{sep['gas_gravity']:.3f}" if np.isfinite(sep["gas_gravity"]) else "—")
     st.caption(f"Reservoir fluid at {res['p_res']:,.0f} psia: density {sep.get('res_density', np.nan):.2f} lb/ft3, "
                f"viscosity {sep.get('res_viscosity', np.nan):.4f} cp. Surface values from flashing the "
                f"reservoir fluid through the file's {len(prp.separators) or 1}-stage separator train.")
@@ -892,8 +894,19 @@ def gas_match_tables():
     return [(float(t), g) for t, g in df.groupby("Temperature (deg F)")]
 
 
+@st.cache_resource(show_spinner="Building the CO2 property table (Span-Wagner corrected EOS)...")
+def co2_injection_fluid(text: str, name: str):
+    """Compositional injected stream from the PRP file (co2.CO2InjectionFluid; the CO2-corrected property table when
+    the file asks for PROSPER's CO2 correction)."""
+    return wco2.CO2InjectionFluid(wm_eos.EOSFluid(wm_eos.parse_prp(text, name)))
+
+
 def inj_gas_fluid():
-    """Injected gas for the gas-injector calculations (PVT tab inputs; impurities left out when 'as PROSPER')."""
+    """Injected gas for the gas-injector calculations: the PRP composition with the equation of state (Tutorial 39),
+    otherwise the PVT tab inputs (impurities left out when 'as PROSPER')."""
+    o_ = ss.get("options")
+    if o_ is not None and o_.method == "eos" and ss.get("prp_text"):
+        return co2_injection_fluid(ss["prp_text"], ss.get("prp_name", ""))
     return winj.GasFluid(gas_pvt_inputs(), impurities=not bool(val("inj_gas_prosper", False)))
 
 
@@ -954,10 +967,14 @@ def gas_vapour_on(o_=None):
 def injector_calc(o, mode, eqd):
     """Calculation tab for a water injector: system (tubing + injectivity) and gradient traverse."""
     try:
-        path = winj.from_flow_path(vlp_path(eqd, "tubing", ()))
+        fpath = with_thermal(vlp_path(eqd, "tubing", ()))
+        path = winj.from_flow_path(fpath)
     except ValueError as e:
         st.error(str(e))
         return
+    thermal = getattr(fpath, "thermal", None)
+    if thermal is not None and thermal.get("model") != "improved":
+        thermal = None
     gas_inj = o.well_type == "gas_injector"
     fl_ = inj_gas_fluid() if gas_inj else winj.WaterFluid(float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"])))
     ru = fl_.rate_unit.replace("/d", "/d")
@@ -967,8 +984,10 @@ def injector_calc(o, mode, eqd):
     what = "Gas" if gas_inj else "Water"
     p1, p2 = float(val("inj_p1", 1.0)), float(val("inj_p2", 1.0))
     st.caption(f"{what} injector: {what.lower()} at {t_inj:g} °F enters the wellhead and flows down the tubing "
-               f"(gravity raises the pressure, friction lowers it), exchanging heat with the formation (U = {u:g} "
-               "BTU/h/ft2/F). PVT from the PVT tab, injection temperature and U from the Equipment tab."
+               "(gravity raises the pressure, friction lowers it), exchanging heat with the formation "
+               + ((f"(Improved Approximation, U by depth{' - energy balance with the stream enthalpy' if getattr(fl_, 'has_enthalpy', False) else ''}). ")
+                  if thermal is not None else f"(U = {u:g} BTU/h/ft2/F). ")
+               + "PVT from the PVT tab, injection temperature and U from the Equipment tab."
                + (f" VLP match applied (VLP tab): gravity x {p1:.5g}, friction x {p2:.5g}."
                   if (p1, p2) != (1.0, 1.0) else ""))
     if gas_inj and ss.get("inj_ipr") is not None and getattr(ss["inj_ipr"], "fluid", "") != "gas_injection":
@@ -987,7 +1006,7 @@ def injector_calc(o, mode, eqd):
         rows, sols = [], {}
         with st.spinner("Solving..."):
             for w_ in whps:
-                res, rates, vp, ip = winj.solve(path, fl_, float(w_), ipr_inj, u, t_inj, hc, p1, p2)
+                res, rates, vp, ip = winj.solve(path, fl_, float(w_), ipr_inj, u, t_inj, hc, p1, p2, thermal=thermal)
                 sols[w_] = (res, rates, vp, ip)
                 rows.append({"Wellhead pressure (psia)": w_,
                              f"Injection rate ({ru})": res.q if res else np.nan,
@@ -1024,7 +1043,8 @@ def injector_calc(o, mode, eqd):
             fig.tight_layout()
             st.pyplot(fig, clear_figure=True)
         if getattr(ipr_inj, "sandface_temperature", False):
-            _, tb_ = winj.vlp_curve(path, fl_, float(pick), rates, u, t_inj, hc, p1, p2, with_t=True)
+            _, tb_ = winj.vlp_curve(path, fl_, float(pick), rates, u, t_inj, hc, p1, p2, with_t=True,
+                                    thermal=thermal)
             dps_ = ipr_inj.dp_skin(rates, tb_)
         else:
             tb_, dps_ = np.full(len(rates), np.nan), ipr_inj.dp_skin(rates)
@@ -1042,7 +1062,7 @@ def injector_calc(o, mode, eqd):
         whp = num(c[0], "Wellhead pressure (psia)", "grad_inj_whp", 1264.7, 14.7, 30000.0, 10.0)
         q = (num(c[1], "Gas injection rate (MMscf/d)", "grad_ginj_q", 7.5, 0.0, 1e4, 0.5) if gas_inj
              else num(c[1], "Injection rate (STB/d)", "grad_inj_q", 10000.0, 0.0, 1e6, 100.0))
-        P, T = winj.traverse(path, fl_, whp, [q], u, t_inj, hc, p1, p2)
+        P, T = winj.traverse(path, fl_, whp, [q], u, t_inj, hc, p1, p2, thermal)
         gt_ = winj.gradient_table(path, fl_, q, P[0], T[0], p_unit_gauge=False)
         cc = st.columns(2)
         for ax_i, (col_, lab_) in enumerate((("Pressure (psia)", "Pressure (psia)"), ("Temperature (°F)", "Temperature (°F)"))):

@@ -5338,3 +5338,66 @@ def test_enthalpy_balance_temperature_t40():
     import json
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T40_Enthalpy_Balance.wellmodel.json"))
     assert proj["widgets"]["opt_temp_model"] == "enthalpy" and {"eq_drill", "eq_litho"} <= set(proj["tables"])
+
+
+def test_compositional_co2_injector_t39():
+    """PROSPER Tutorial 39, the user's file: a CO2 injector (PR EOS with the PRP file's CO2 correction, LBC), tubing
+    3.992 in to 14,000 ft with a 3.8 in SSSV, Improved Approximation U = 3, injection at 75 F and 1250 psig,
+    Petroleum Experts gas injectivity (k 35 md, skin 12). The Span-Wagner-corrected stream density is PROSPER's to
+    1 %; the injectivity is its IPR column to 15 psi; the energy-balance VLP its VLP column to 2 % and its bottom
+    temperature to 1.5 F at 0.15-72 MMscf/d; the gradients at 24.683 / 10 MMscf/d (U = 3) and 27.79 MMscf/d
+    (U = 0.001) to 1 % and 1.5 F; the system solution 24.683 MMscf/d at 5565.39 psig to 4 % / 1 % (the VLP is flat
+    there, so 0.5 % in pressure is 2.5 % in rate)."""
+    pytest.importorskip("CoolProp")
+    import json
+    from wellmodel import co2 as wco2, eos as E, thermal as wth, injection as winj
+    root = Path(__file__).parent
+    proj = json.load(open(root.parent / "examples" / "T39_Compositional_CO2_Injector.wellmodel.json"))
+    f = E.EOSFluid(E.parse_prp(proj["extras"]["prp_text"], "T39_co2_EoS.prp"))
+    assert wco2.wants_reference(f)
+    fl = wco2.CO2InjectionFluid(f)
+    g = 14.696
+    grad = pd.read_csv(root / "data" / "t39_gradients.csv")
+    r3 = grad[(grad.run == "3") & grad.rho_m.notna()]
+    rho = fl.props(r3.p.to_numpy() + g, r3.t.to_numpy())[1]
+    err = rho / r3.rho_m.to_numpy() - 1
+    # PROSPER's own densities drop 4 % between the SSSV and ~2,000 ft (near CO2's critical point; a step in its
+    # interpolation, back to within 0.5 % below) - every node outside that band to 1 %, rms 0.4 %
+    band = (r3.md.to_numpy() > 1200) & (r3.md.to_numpy() < 2100)
+    assert np.max(np.abs(err[~band])) < 0.01
+    assert np.sqrt(np.mean(err[~band] ** 2)) < 0.004
+    assert np.max(np.abs(err[band])) < 0.05
+
+    ipr = winj.petex_gas_injection(4500 + g, 313, 35, 75, 450, 31.6, 0.354, 75, 50, 0.19, 0.2, 12, fl)
+    assert abs(ipr.params["Non-Darcy flow factor D (1/(Mscf/d))"] / 6.1518e-5 - 1) < 0.01
+    tab = pd.read_csv(root / "data" / "t39_vlp_ipr.csv")
+    assert np.max(np.abs(ipr.pwf(tab.q.to_numpy()) - g - tab.ipr.to_numpy())) < 15
+
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1200, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 4.5},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.8},
+            {"Type": "Tubing", "Measured Depth (ft)": 14000, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 4.5},
+            {"Type": "Casing", "Measured Depth (ft)": 14500, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = winj.from_flow_path(wvlp.build_flow_path(top, secs, pts, [0, 14500], [0, 14500], [0, 14500], [60, 313]))
+    th = lambda u: {"model": "improved", "u_seg": wth.u_segments(path, [14500], [u])}
+    whp = 1250 + g
+    P, T = winj.traverse(path, fl, whp, tab.q.to_numpy(), t_inj=75, thermal=th(3.0))
+    assert np.max(np.abs((P[:, -1] - g) / tab.vlp.to_numpy() - 1)) < 0.02
+    assert np.max(np.abs(T[:, -1] - tab.t_last.to_numpy())) < 1.5
+
+    for run, q, u in (("3", 24.683, 3.0), ("5a", 10.0, 3.0), ("5b", 27.79, 0.001)):
+        d = grad[grad.run == run]
+        P, T = winj.traverse(path, fl, whp, [q], t_inj=75, thermal=th(u))
+        pp = np.interp(d.md, path.md, P[0]) - g
+        tt = np.interp(d.md, path.md, T[0])
+        assert np.max(np.abs(pp / d.p.to_numpy() - 1)) < 0.01, run
+        assert np.max(np.abs(tt - d.t.to_numpy())) < 1.5, run
+
+    res, *_ = winj.solve(path, fl, whp, ipr, t_inj=75, thermal=th(3.0))
+    assert abs(res.q / 24.683 - 1) < 0.04
+    assert abs((res.pwf - g) / 5565.39 - 1) < 0.01
+    assert abs(res.T[-1] - 196.08) < 2.0
