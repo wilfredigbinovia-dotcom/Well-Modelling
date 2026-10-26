@@ -48,6 +48,7 @@ from wellmodel import esp_quicklook as weql
 from wellmodel import hsp_quicklook as whql
 from wellmodel import srp_cards as wsrpc
 from wellmodel import diluent as wdil
+from wellmodel import emulsion as wem
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -442,6 +443,8 @@ CAPTIONS = {
                      "wire_wrapped_screen": "Wire wrapped around a base pipe",
                      "slotted_liner": "Pipe with machined slots"},
     "separator": {"single_stage": "Surface rates at one separator stage"},
+    "emulsions": {"none": "Liquid viscosity: oil and water by volume",
+                  "emulsion": "Oil-water emulsion viscosity against water cut (PROSPER Tutorial 46): data in PVT"},
     "water_vapour": {"none": "Water produced as liquid only",
                      "calculate": "Dry and wet gas: water vaporised in the gas condenses up the well"},
     "artificial_lift": {"none": "Natural flow",
@@ -473,7 +476,7 @@ with tabs[0]:
     st.caption("Describe the well first. These choices decide what the setup tabs ask for "
                "and which calculations apply.")
     sel_opts = {}
-    groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour"]),
+    groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour", "emulsions"]),
               ("Well", ["well_type", "flow_type", "artificial_lift"]),
               ("Completion", ["completion", "sand_control"])]
     cols = st.columns(3, gap="large")
@@ -1456,6 +1459,65 @@ def retro_pvt_panel(opts_now):
         st.dataframe(tab.style.format(precision=5, na_rep="—"), hide_index=True, width="stretch", height=320)
         st.download_button("Download PVT table (CSV)", tab.to_csv(index=False).encode(), "retrograde_pvt.csv")
 
+# ---------------------------------------------------------------- emulsion viscosity (PROSPER Tutorial 46)
+EMUL_DEFAULT = pd.DataFrame({"Water cut (%)": [5.0, 10, 20, 30, 40, 50, 55, 85, 90],
+                             "Emulsion viscosity (cp)": [105.0, 115, 130, 150, 188, 234, 250, 53, 10.5]})
+
+
+def emulsion_panel(model):
+    """Emulsion data and match (PVT Input Data, Other Data - Emulsion). Stores ss["emulsion_model"]."""
+    st.subheader("Emulsion")
+    st.caption("PROSPER's emulsion viscosity: the oil viscosity times P1 + P2·WC + P3·WC² + P4·WC³ + P5·WC⁴ (WC as a "
+               "fraction) up to the minimum water cut for maximum viscosity, flat to the maximum water cut, then "
+               "falling to the water viscosity at 100 % (log-linear). Match P2-P5 to measured viscosities at one "
+               "pressure and temperature; the oil-continuous points are used.")
+    c = st.columns(4)
+    occ = sel(c[0], "Emulsion occurrence", list(wem.OCCURRENCE), "emul_occ", "tubing_pipe",
+              format_func=wem.OCCURRENCE.get)
+    t_e = num(c[1], "Experimental temperature (°F)", "emul_t", 200.0, 0.0, 600.0, 5.0)
+    p_e = num(c[2], "Experimental pressure (psig)", "emul_p", 2000.0, 0.0, 20000.0, 50.0)
+    c2 = st.columns(4)
+    wmin = num(c2[0], "Minimum water cut for maximum viscosity (%)", "emul_wcmin", 60.0, 0.0, 100.0, 1.0)
+    wmax = num(c2[1], "Maximum water cut for maximum viscosity (%)", "emul_wcmax", 80.0, 0.0, 100.0, 1.0)
+    npar = int(sel(c2[2], "Parameters to match", [2, 3, 4, 5], "emul_npar", 3,
+                   help="P1 is fixed at 1 (the oil viscosity at zero water cut); PROSPER's default matches P2, P3."))
+    key = "emul_table"
+    if key not in ss:
+        ss[key] = EMUL_DEFAULT.copy()
+    tbl = track(key, st.data_editor(ss[key], key=key + "_ed", num_rows="dynamic", width="stretch"))
+    mu_o = float(model.table(t_e, [p_e + 14.696])["Oil viscosity (cp)"].iloc[0])
+    st.markdown(f"Oil viscosity at {p_e:g} psig and {t_e:g} °F: **{mu_o:.4g} cp** (the match reference)")
+    wc_d = pd.to_numeric(tbl["Water cut (%)"], errors="coerce").to_numpy(float)
+    mu_d = pd.to_numeric(tbl["Emulsion viscosity (cp)"], errors="coerce").to_numpy(float)
+    if st.button("Match emulsion parameters", key="emul_match"):
+        m = wem.match(wc_d, mu_d, mu_o, wmin / 100.0, npar)
+        for i, v in enumerate(m.params):
+            put(f"emul_p{i + 1}", float(v))
+        ss["_v_emul_std"] = m.std
+        st.rerun()
+    c3 = st.columns(6)
+    pars = tuple(num(c3[i], f"P{i + 1}", f"emul_p{i + 1}", 1.0 if i == 0 else 0.0, None, None, None, "%.5f")
+                 for i in range(5))
+    std = val("emul_std", None)
+    if std is not None and np.isfinite(float(std)):
+        c3[5].metric("Std deviation (cp)", f"{float(std):.4f}")
+    em = wem.EmulsionModel(pars, wmin / 100.0, max(wmax, wmin) / 100.0, occ)
+    ss["emulsion_model"] = em
+    x = np.linspace(0, 1, 201)
+    mu_w = float(model.table(t_e, [p_e + 14.696])["Water viscosity (cp)"].iloc[0])
+    fig, ax = plt.subplots(figsize=(7, 3.4))
+    ax.plot(x * 100, em.viscosity(x, mu_o, mu_w), color=wplt.SERIES[0], lw=2, label="model")
+    ok = np.isfinite(wc_d) & np.isfinite(mu_d)
+    ax.scatter(wc_d[ok], mu_d[ok], s=30, color=wplt.INK, zorder=4, label="measured")
+    ax.set_xlabel("Water cut (%)")
+    ax.set_ylabel("Emulsion viscosity (cp)")
+    ax.legend()
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    if occ == "none":
+        st.info("Emulsion occurrence is No emulsion corrections: the liquid viscosity stays the volume-weighted "
+                "oil-water viscosity.")
+
 
 with tabs[1]:
     st.header("PVT Input Data")
@@ -1604,6 +1666,8 @@ with tabs[1]:
                          hide_index=True, width="stretch")
             st.download_button("Download calculated PVT (CSV)", calc.to_csv(index=False).encode(),
                                "calculated_pvt.csv")
+            if opts_now is not None and getattr(opts_now, "emulsions", "none") == "emulsion":
+                emulsion_panel(model)
 
 
 # =============================================================== tab 3: IPR
@@ -2336,6 +2400,10 @@ def vlp_fluid(o, kind, p_max, t_min, t_max):
         if model is None:
             return None, "Complete the PVT Input Data tab (black oil)."
         fam = f"{bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}"
+        em = ss.get("emulsion_model") if getattr(o, "emulsions", "none") == "emulsion" else None
+        if em is not None and em.in_tubing:
+            return wvlp.BlackOilFluid(model, em), (f"Black oil ({fam}{', matched' if model.params else ', not matched'}"
+                                                   f"), emulsion viscosity in the tubing")
         return wvlp.BlackOilFluid(model), f"Black oil ({fam}{', matched' if model.params else ', not matched'})"
     if retro_bo_on(o):
         ri = retro_inputs()

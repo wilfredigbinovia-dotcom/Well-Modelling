@@ -48,6 +48,11 @@ WATER_VAPOUR = {
     "calculate": "Calculate condensed water vapour",
 }
 
+EMULSIONS = {
+    "none": "No",
+    "emulsion": "Emulsion + pump viscosity correction",
+}
+
 ARTIFICIAL_LIFT = {
     "none": "None",
     "gas_lift": "Gas lift (continuous)",
@@ -67,6 +72,7 @@ FIELDS = {  # field -> (display name, choices)
     "method": ("Method", METHODS),
     "separator": ("Separator", SEPARATORS),
     "water_vapour": ("Water vapour", WATER_VAPOUR),
+    "emulsions": ("Emulsions", EMULSIONS),
     "flow_type": ("Flow type", FLOW_TYPES),
     "well_type": ("Well type", WELL_TYPES),
     "completion": ("Completion", COMPLETIONS),
@@ -85,6 +91,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
                         "diluent_gl", "diluent"},
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
+    "emulsions": {"none", "emulsion"},
 }
 # Completion and sand control change near-wellbore pressure drop. Until they
 # are modelled explicitly, that drop is absorbed in the PI fitted to tests.
@@ -107,6 +114,7 @@ class WellOptions:
     method: str = "black_oil"
     separator: str = "single_stage"
     water_vapour: str = "none"
+    emulsions: str = "none"
     flow_type: str = "tubing"
     well_type: str = "producer"
     completion: str = "cased_hole"
@@ -249,6 +257,15 @@ class WellOptions:
             add("warning", ["water_vapour", "fluid_type", "method"],
                 "Condensed water vapour is calculated for dry and wet gas with the black-oil method only; it is "
                 "ignored for this fluid.")
+        if self.emulsions == "emulsion":
+            if self.fluid_type != "oil" or self.method != "black_oil" or self.well_type != "producer":
+                add("warning", ["emulsions", "fluid_type", "method"],
+                    "The emulsion viscosity applies to oil (and water) producers with black-oil PVT; it is ignored "
+                    "for this fluid.")
+            else:
+                add("info", ["emulsions"],
+                    "Emulsion viscosity (PROSPER Tutorial 46): match it to measured emulsion viscosities in the PVT "
+                    "Input Data tab; it replaces the oil-water liquid viscosity where the emulsion occurs.")
         if self.uses_annulus and self.well_type == "producer" and self.fluid_type == "oil":
             add("info", ["flow_type"],
                 "Oil flowing up the annulus has a large flow area: expect higher liquid "
@@ -303,6 +320,9 @@ class WellOptions:
                 pvt += ["Oil gravity (°API), solution GOR and separator gas gravity",
                         "Water salinity, reservoir temperature",
                         "Optional lab data to tune correlations: bubble point, Bo, oil viscosity"]
+                if self.emulsions == "emulsion" and self.method == "black_oil":
+                    pvt.append("Emulsion viscosity against water cut (one pressure and temperature), the water "
+                               "cuts bounding the maximum viscosity, and where the emulsion occurs")
             elif self.fluid_type == "dry_wet_gas":
                 pvt += ["Separator gas gravity and impurities (H2S, CO2, N2)",
                         "Condensate-gas ratio and condensate gravity (wet gas)",

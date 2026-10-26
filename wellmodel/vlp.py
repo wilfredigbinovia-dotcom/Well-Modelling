@@ -183,13 +183,17 @@ def _water_sg(inp):
     return float(rho / 62.428)
 
 
+EMULSION_WC = "in situ"        # water cut for the emulsion viscosity: "in situ" (volume fraction) or "stock tank"
+
+
 class BlackOilFluid:
     """Oil well, matched black oil. Case keys: q (liquid STB/d), wc (fraction), gor (scf/STB, total)."""
     kind = "oil"
 
-    def __init__(self, model: bo.BlackOilModel):
+    def __init__(self, model: bo.BlackOilModel, emulsion=None):
         self.m = model
         self.inp = model.inp
+        self.emulsion = emulsion          # emulsion.EmulsionModel (tubing occurrence) or None
 
     def pb_at(self, t, gor):
         """Bubble point (psia) of the wellstream at temperature t and total GOR."""
@@ -229,8 +233,13 @@ class BlackOilFluid:
         q_g = qo * np.maximum(gor - rs, 0.0) * bg / 86400
         ql = q_o + q_w
         fo = np.where(ql > 1e-15, q_o / np.maximum(ql, 1e-15), 1 - wc)
+        em = getattr(self, "emulsion", None)
+        if em is not None and em.in_tubing:
+            mu_l = em.viscosity(wc if EMULSION_WC == "stock tank" else 1 - fo, mu_o, mu_w)
+        else:
+            mu_l = fo * mu_o + (1 - fo) * mu_w
         return dict(ql=ql, qg=q_g, rho_l=fo * rho_o + (1 - fo) * rho_w, rho_g=rho_g,
-                    mu_l=fo * mu_o + (1 - fo) * mu_w, mu_g=mu_g,
+                    mu_l=mu_l, mu_g=mu_g,
                     sig=sigma_liquid(sigma_oil_prosper(inp.api, t, rs), sigma_water_oilwell(rho_w, rho_g), wc))
 
     def mass_cp(self, case, hc: HeatCapacities):

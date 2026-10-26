@@ -4966,3 +4966,47 @@ def test_diluent_injection_with_gas_lift_t30():
     assert (opt.glr == 900.0).all()
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T30_Diluent_Injection_With_Gas_Lift.wellmodel.json"))
     assert proj["widgets"]["opt_artificial_lift"] == "diluent_gl" and proj["inputs"]["dil_pct_basis"] == "produced liquid"
+
+
+def test_emulsion_viscosity_t46():
+    """PROSPER Tutorial 46 (Modelling Emulsions): 11 API heavy oil, GOR 40, Vazquez-Beggs / Egbogah matched to 100 cp
+    at 500 psig and 200 F. Emulsion data at 2000 psig, 200 F (5-55 % WC oil-continuous, plateau 60-80 %): PROSPER's
+    match P1 1, P2 0.69799, P3 3.77291, std dev 3.21611 - a polynomial in water cut times the oil viscosity. The
+    gradient (1500 STB/d, 500 psig wellhead, PE2) is unchanged at WC 0 and rises with water cut with the emulsion,
+    falls without it."""
+    import json
+    from wellmodel import emulsion as EM
+    inp = wbo.PVTInputs(rsb=40, api=11, gas_sg=0.83, salinity_ppm=10000)
+    md = wbo.MatchData(200, 514.696, pd.DataFrame({"Pressure": [514.696], "Gas Oil Ratio": [40], "Oil FVF": [1.051],
+                                                   "Oil Viscosity": [100]}))
+    r = wbo.match_all(inp, md)
+    assert r.matches[("visc", "egbogah")].p1 == pytest.approx(0.98594, abs=2e-4)
+    assert r.matches[("visc", "egbogah")].p2 == pytest.approx(-1.44678, abs=2e-3)
+    m = wbo.BlackOilModel(inp, "vazquez_beggs", "egbogah",
+                          {k: r.matches[(k, "vazquez_beggs")] for k in ("pb", "rs", "bo")} | {"visc": r.matches[("visc", "egbogah")]})
+    mu_o = float(m.table(200, [2014.696])["Oil viscosity (cp)"].iloc[0])
+    assert mu_o == pytest.approx(100.0, rel=1e-3)
+    wc = [5, 10, 20, 30, 40, 50, 55, 85, 90]
+    mu = [105, 115, 130, 150, 188, 234, 250, 53, 10.5]
+    fit = EM.match(wc, mu, mu_o, 0.6, 3)
+    assert fit.n == 7 and fit.params[0] == 1.0
+    assert fit.params[1] == pytest.approx(0.69799, rel=0.005) and fit.params[2] == pytest.approx(3.77291, rel=0.002)
+    assert fit.std == pytest.approx(3.21611, rel=0.002)
+    em = EM.EmulsionModel((1, 0.69799, 3.77291, 0, 0), 0.6, 0.8)
+    v = em.viscosity(np.array([0, 0.55, 0.6, 0.7, 0.8, 1.0]), 100.0, 0.32)
+    assert v[0] == 100 and v[1] == pytest.approx(252.5, abs=0.1) and v[2] == pytest.approx(277.7, abs=0.1)
+    assert v[3] == v[2] == v[4] and v[5] == pytest.approx(0.32)
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 4800, "Tubing Inside Diameter (in)": 2.4,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 5000, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 5000], [0, 5000], [0, 5000], [80, 200])
+    case = {"q": np.full(4, 1500.0), "wc": np.array([0, 0.25, 0.5, 0.75]), "gor": np.full(4, 40.0)}
+    P0 = wvlp.traverse(path, wvlp.BlackOilFluid(m), np.full(4, 514.696), case, "pe2_style", 1, 1, 8.0)[0][:, -1]
+    P1 = wvlp.traverse(path, wvlp.BlackOilFluid(m, em), np.full(4, 514.696), case, "pe2_style", 1, 1, 8.0)[0][:, -1]
+    assert P1[0] == pytest.approx(P0[0]) and np.all(np.diff(P0) < 0) and np.all(np.diff(P1) > 0)
+    assert np.all(np.diff(P1 - P0) > 0)
+    proj = json.load(open(__file__.replace("tests/test_wellmodel.py", "examples/T46_Modelling_Emulsions.wellmodel.json")))
+    assert proj["widgets"]["opt_emulsions"] == "emulsion" and proj["inputs"]["emul_p3"] == 3.77291
