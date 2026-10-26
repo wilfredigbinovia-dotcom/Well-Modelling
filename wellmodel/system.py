@@ -551,6 +551,8 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         cv = CX.node_values(kind, vm, vsg, rho_ns, mu_ns, float(s["rho_l"][0]), float(s["rho_g"][0]),
                             float(s["sig"][0]), path.d_h[i] * 12, _free_gas(fluid, kind, s, case, pm, tm), comp_)
         cv.update(CX.path_values(path, i, fluid, kind, case, s, pm, tm, comp_))
+        if comp_.hydrate is not None:                    # PVT warnings: hydrate curve at the node below
+            cv["Hydrate Formation"] = CX.hydrate_flag(P[i + 1], T[i + 1], comp_.hydrate)
         comp_rows.append(cv)
         ve = cv["Erosional Velocity (ft/s)"]
         transit += L / max(vm, 1e-9)
@@ -565,6 +567,13 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
                      "Elevation gradient (psi/ft)": p1 * float(e[0]), "Friction gradient (psi/ft)": p2 * float(f[0]),
                      "Max. grain size diameter (in)": cv["Max. Grain Size Diameter (in)"],
                      "Liquid loading velocity (ft/s)": cv["Liquid Loading Velocity (ft/s)"],
+                     "Turner velocity flag": "Yes" if cv["Turner Velocity Flag"] else "No",
+                     "Erosional velocity flag": "Yes" if cv["Erosional Velocity Flag"] else "No",
+                     "PE5 stability ratio": cv["PE5 Stability Ratio"],
+                     "PE5 stability": ("Unstable" if cv["PE5 Stability Ratio"] < 1.0 else
+                                       ("Stable" if np.isfinite(cv["PE5 Stability Ratio"]) else "")),
+                     "Hydrates": ("Hydrates" if cv.get("Hydrate Formation") else
+                                  ("No hydrates" if "Hydrate Formation" in cv else "")),
                      "Erosion rate (mm/year)": cv["Erosion Rate (mm/year)"],
                      "Corrosion rate (0.001 in/yr)": cv["Corrosion Rate (0.001 in/yr)"]})
     regimes = {}

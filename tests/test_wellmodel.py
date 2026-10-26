@@ -5441,3 +5441,68 @@ def test_steam_injector_t42():
         low = (d.p < 2700) & d.x.notna() & (d.x > 0)
         assert np.max(np.abs(np.interp(d.md[low], r.md, 100 * r.x) - d.x[low])) < 5.0, h0
         assert np.all(np.abs(np.interp(d.md[low], r.md, r.holdup) - d.hl[low]) < 0.04 * d.hl[low] + 0.005), h0
+
+
+def _t43_run(q, whp, comp=None):
+    """The user's T43 file: the T41 well (T38 black-oil condensate, PE5, Improved Approximation with the file's U
+    1.4 / 2.5 / 1.2) at WGR 50 STB/MMscf."""
+    import dataclasses
+    from wellmodel import thermal as TH, system as SYS
+    path0 = _t40_path(6.4)
+    path = dataclasses.replace(path0, thermal={"model": "improved", "u_seg": TH.u_segments(
+        path0, [0, 4000, 9312.5, 12000], [1.4, 1.4, 2.5, 1.2])})
+    return SYS.solution_details(path, _t38_retro(), "gas", {"whp": whp + 14.696, "u": 2.0, "wgr": 50.0,
+                                                             "sep_gor": 7431.94}, q, "pe5_style", comp=comp)
+
+
+def test_flow_assurance_flags_t43():
+    """PROSPER Tutorial 43, the user's file: VLP flags at 1000 and 100 psig (50 rates). Turner (no-slip velocity below
+    the Turner velocity, PROSPER's oil-weighted gas-liquid interfacial tension), erosional velocity (API 14E, C 400)
+    and the PE5 stability flag (film-reversal criterion Ku < 1.637 D*^0.32, calibrated on these runs) agree with
+    PROSPER at every rate except the erosional flag at 45.6 and 65.7 MMscf/d at 100 psig (PROSPER's wellhead is
+    30-50 F colder there); the hydrate flag is "No hydrates" throughout with the Water 2 curve. VLP pressures within
+    5 % from 2.5 to 46 MMscf/d at 1000 psig (PE5's low-velocity drift, Tutorials 41/43); the maximum Turner velocity
+    within 4 %."""
+    from wellmodel import complementary as CX
+    data = pd.read_csv(Path(__file__).parent / "data" / "t43_vlp_flags.csv")
+    sub = data[((data.run == "2") & data.q.isin([1.5, 4.5, 10.5, 12.0])) | ((data.run == "3A") & data.q.isin(
+        [2.491, 3.584, 5.154, 15.34, 45.65, 94.449])) | ((data.run == "4") & data.q.isin([2.491, 3.584, 10.664, 15.34]))]
+    for _, r in sub.iterrows():
+        det, _, prof = _t43_run(r.q, r.whp)
+        assert det["Turner velocity flag"] == r.turner, (r.run, r.q)
+        assert det["PE5 stability flag"] == r.pe5, (r.run, r.q)
+        assert det["Erosional velocity flag"] == r.eros, (r.run, r.q)
+        if r.whp == 1000 and 2.4 < r.q < 46:
+            assert abs((det["Bottom node pressure (psia)"] - 14.696) / r.vlp - 1) < 0.05, (r.run, r.q)
+            assert abs(det["Max. Turner velocity (ft/s)"] / r.turner_max - 1) < 0.04, (r.run, r.q)
+    # node flags at 4 MMscf/d: PROSPER's tubing nodes stable, the 6.4 in casing at the bottom unstable - the tubing is
+    # at the threshold here (ratio within 1 % of 1), the casing far below it
+    det, _, prof = _t43_run(4.0, 1000)
+    tub = prof[(prof["MD (ft)"] > 0) & (prof["MD (ft)"] < 11800)]
+    assert tub["PE5 stability ratio"].min() > 0.99 and prof["PE5 stability ratio"].iloc[-1] < 0.5
+    # hydrate flag against a curve
+    w2 = ((137.075, 1291.9, 4028.83, 21657.5), (35, 62, 71, 95))
+    curve = (tuple(np.array(w2[0]) + 14.696), w2[1])
+    assert CX.hydrate_flag(1000 + 14.696, 55.0, curve) and not CX.hydrate_flag(1000 + 14.696, 70.0, curve)
+    det, _, prof = _t43_run(4.0, 1000, CX.CompOptions(hydrate=curve))
+    assert (prof["Hydrates"].iloc[1:] == "No hydrates").all()
+    assert det["Hydrates formation flag"] == "No hydrates"
+
+
+def test_hydrate_curve_salts_t43():
+    """PROSPER Tutorial 43, the user's file: hydrate formation curves of the T37/T43 condensate with two brines
+    (Water 1: NaCl 2.15, CaCl2 0.89, KBr 0.12 wt %; Water 2: 4.52 / 0.94 / 0.24) - van der Waals-Platteeuw with Munck
+    constants, PR fugacities, Pitzer water activity, reference properties refitted to these curves: within 4 % of
+    PROSPER's pressure at every point from 35 to 98 F (117 - 22,390 psig); more salt, higher pressure."""
+    from wellmodel import hydrate as H, eos as E
+    f = E.EOSFluid(E.parse_prp(open(Path(__file__).parent.parent / "examples" / "T37_Retrograde_Condensate_EoS.prp").read()))
+    w1 = {35: 116.893, 44: 237.539, 56: 610.187, 65: 1436.25, 71: 3207.75, 80: 7654.14, 89: 14170.1, 98: 22389.7}
+    w2 = {35: 137.075, 44: 276.27, 56: 723.153, 65: 1865.8, 71: 4028.83, 80: 9088.71, 89: 16076.3, 95: 21657.5}
+    m1 = H.HydrateModel(f, {"NaCl": 2.15, "CaCl2": 0.89, "KBr": 0.12})
+    m2 = H.HydrateModel(f, {"NaCl": 4.52, "CaCl2": 0.94, "KBr": 0.24})
+    for m, w in ((m1, w1), (m2, w2)):
+        for t, p in w.items():
+            assert abs((m.pressure(t) - 14.696) / p - 1) < 0.04, t
+    assert m2.ln_aw < m1.ln_aw < 0
+    assert H.HydrateModel(f).pressure(50) < m1.pressure(50) < m2.pressure(50)
+    assert abs(H.ln_water_activity({"NaCl": 5.52}) - np.log(0.9669)) < 0.002     # 1 molal NaCl, a_w 0.9669

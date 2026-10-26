@@ -55,6 +55,7 @@ from wellmodel import thermal as wth
 from wellmodel import enthalpy as web
 from wellmodel import co2 as wco2
 from wellmodel import steam as wsteam
+from wellmodel import hydrate as whyd
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -1664,6 +1665,119 @@ def emulsion_panel(model):
                 "oil-water viscosity.")
 
 
+HYD_COLUMNS = ["Pressure (psig)", "Temperature (°F)"]
+SALT_COLUMNS = ["Salt", "Weight %"]
+
+
+def _blank(cols, n, text=()):
+    df = pd.DataFrame({c: pd.Series([None] * n, dtype=object) if c in text else pd.Series([np.nan] * n, dtype=float)
+                       for c in cols})
+    df.index = pd.RangeIndex(1, n + 1, name="Point")
+    return df
+
+
+def _vtable(key, cols, n, column_config=None, text=()):
+    """A table editor kept in the project file (ss[key]); ss['_ver_'+key] bumps to reload it after a programmatic
+    change."""
+    if key not in ss:
+        ss[key] = _blank(cols, n, text)
+    return track(key, st.data_editor(ss[key], key=f"{key}_ed_{ss.get('_ver_' + key, 0)}", num_rows="fixed",
+                                     width="stretch", column_config=column_config or {}))
+
+
+def hydrate_curve_current():
+    """The hydrate formation curve of the PVT warnings ((psia...), (F...)) when the warning is on, else None."""
+    if not bool(val("pvt_hyd_on", False)):
+        return None
+    df = ss.get("_tables", {}).get("pvt_hydrate", ss.get("pvt_hydrate"))
+    return whyd.table_curve(df)
+
+
+@st.cache_data(show_spinner=False)
+def hydrate_curve_eos(text, name, salts, salinity, t0, t1, dt):
+    f = wm_eos.EOSFluid(wm_eos.parse_prp(text, name))
+    m = whyd.HydrateModel(f, dict(salts) if salts else None, None if salts else salinity)
+    return m.curve(np.arange(t0, t1 + 1e-9, dt)), m.ln_aw
+
+
+def hydrate_panel(opts_now):
+    """PROSPER PVT | Warnings - hydrate formation (Tutorial 43): a hydrate curve the calculations flag against
+    (gradient nodes, VLP rates, system solution), entered or calculated from the equation of state with the water's
+    salts as inhibitors."""
+    st.divider()
+    st.subheader("PVT warnings - hydrate formation")
+    st.caption("With the warning on, every gradient node whose temperature is at or below the hydrate temperature at "
+               "its pressure is flagged (gradient and VLP results, system solution). Enter the curve - e.g. from a "
+               "laboratory or an equation-of-state calculation - or calculate it below from the PRP composition.")
+    flag(st.checkbox, "Enable hydrate formation warning", "pvt_hyd_on", False)
+    cc = st.columns([1, 1.4])
+    with cc[0]:
+        hyd = _vtable("pvt_hydrate", HYD_COLUMNS, 25,
+                      {c_: st.column_config.NumberColumn(c_, format="%g") for c_ in HYD_COLUMNS})
+    cur = whyd.table_curve(hyd)
+    with cc[1]:
+        if cur is not None:
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(cur[1], np.asarray(cur[0]) - 14.696, color=wplt.SERIES[0], lw=1.8, marker="o", ms=3)
+            ax.fill_betweenx(np.asarray(cur[0]) - 14.696, min(cur[1]) - 5, cur[1], color=wplt.SERIES[0], alpha=0.08)
+            ax.set_xlabel("Temperature (°F)")
+            ax.set_ylabel("Pressure (psig)")
+            ax.set_title("Hydrate formation curve (hydrates to the left)", fontsize=10)
+            ax.grid(alpha=0.3, ls="--")
+            fig.tight_layout()
+            st.pyplot(fig, clear_figure=True)
+    if opts_now is None or opts_now.method != "eos":
+        st.caption("Black-oil PVT: enter the curve (as PROSPER: calculated externally, e.g. with an equation of "
+                   "state, and pasted here).")
+        return
+    if not ss.get("prp_text"):
+        st.info("Load a PRP file above to calculate the hydrate curve from the composition.")
+        return
+    with st.expander("Calculate the hydrate curve from the composition (salts as inhibitors)", expanded=False):
+        st.caption("van der Waals - Platteeuw hydrate model (Munck et al. Langmuir constants, structures I and II), "
+                   "fugacities from the PRP equation of state, water activity of the brine from Pitzer's model. "
+                   "Calibrated to PROSPER's curves of the user's Tutorial 43 file within 3.4 % in pressure.")
+        c = st.columns(4)
+        mode = sel(c[0], "Salt mode", ["Use water composition", "Use salinity (as NaCl)"], "hyd_salt_mode")
+        t0 = num(c[1], "First temperature (°F)", "hyd_t0", 35.0, 33.0, 120.0, 1.0)
+        t1 = num(c[2], "Last temperature (°F)", "hyd_t1", 95.0, 34.0, 130.0, 1.0)
+        dt = num(c[3], "Step (°F)", "hyd_dt", 3.0, 0.5, 20.0, 0.5)
+        salts, sal = (), None
+        if mode == "Use water composition":
+            ed = _vtable("hyd_salts", SALT_COLUMNS, 8,
+                         {"Salt": st.column_config.SelectboxColumn("Salt", options=list(whyd.SALTS)),
+                          "Weight %": st.column_config.NumberColumn("Weight %", format="%g")}, text=("Salt",))
+            rows = [(r["Salt"], float(r["Weight %"])) for _, r in ed.iterrows()
+                    if isinstance(r["Salt"], str) and r["Salt"] and pd.notna(pd.to_numeric(r["Weight %"], errors="coerce"))
+                    and float(r["Weight %"]) > 0]
+            salts = tuple(rows)
+            if salts:
+                st.caption(f"Total dissolved salts {whyd.salinity_of(dict(salts)):,.0f} ppm.")
+        else:
+            sal = num(st.columns(4)[0], "Water salinity (ppm, as NaCl)", "hyd_sal",
+                      float(val("pvt_sal", 20000.0)), 0.0, 300000.0, 1000.0, "%.0f")
+        if st.button("Calculate hydrate curve", key="hyd_go") and t1 > t0:
+            try:
+                with st.spinner("Flashing the composition along the hydrate curve..."):
+                    tab, lnaw = hydrate_curve_eos(ss["prp_text"], ss.get("prp_name", ""), salts, sal, t0, t1, dt)
+                ss["hyd_result"] = (tab, lnaw)
+            except ValueError as e:
+                st.error(str(e))
+        res = ss.get("hyd_result")
+        if res is not None:
+            tab, lnaw = res
+            st.markdown(f"Water activity {np.exp(lnaw):.4f}")
+            st.dataframe(tab.style.format(precision=2), hide_index=True, width="stretch")
+            if st.button("Use as the hydrate warning curve", key="hyd_use") and len(tab):
+                g = _blank(HYD_COLUMNS, max(25, len(tab)))
+                g.iloc[:len(tab), 0] = tab["Pressure (psig)"].to_numpy()
+                g.iloc[:len(tab), 1] = tab["Temperature (°F)"].to_numpy()
+                ss["pvt_hydrate"] = g
+                ss["_ver_pvt_hydrate"] = ss.get("_ver_pvt_hydrate", 0) + 1
+                put("pvt_hyd_on", True)
+                st.rerun()
+
+
 with tabs[1]:
     st.header("PVT Input Data")
     opts_now = ss.get("options")
@@ -1813,6 +1927,8 @@ with tabs[1]:
                                "calculated_pvt.csv")
             if opts_now is not None and getattr(opts_now, "emulsions", "none") == "emulsion":
                 emulsion_panel(model)
+    if opts_now is not None and opts_now.well_type == "producer":
+        hydrate_panel(opts_now)
 
 
 # =============================================================== tab 3: IPR
@@ -5274,7 +5390,7 @@ def comp_current():
                            deformation=str(val("comp_def", "Ductile")), particle_mm=float(val("comp_dp", 250.0)) / 1000,
                            geometry_factor=float(val("comp_gf", 2.0)), reducer_angle=float(val("comp_ang", 45.0)),
                            inhibited_rate=float(val("comp_irc", 0.0)), inhibitor_eff=float(val("comp_eff", 0.0)),
-                           alkalinity=float(val("comp_alk", 0.0)))
+                           alkalinity=float(val("comp_alk", 0.0)), hydrate=hydrate_curve_current())
 
 
 def ipr_for_test(curve, pr_test):
@@ -6735,6 +6851,108 @@ def gl_lift_for(eqd, o, gl, extra=()):
     """Flow path with the gas lift depths as nodes, and the lift setup with its annulus."""
     path = vlp_path(eqd, o.flow_type, tuple(gl.extra_md()) + tuple(extra))
     return path, dataclasses.replace(gl, annulus=wgls.annulus_geometry(path, eqd["downhole"][1]))
+
+
+VLPC_MODE = "VLP (tubing curves)"
+
+
+def vlp_curve_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface):
+    """PROSPER Calculation | VLP (tubing curves) with its flow-assurance flags (Tutorial 43): bottom-hole pressure
+    against rate, the minimum point of stability, and per rate the Turner, erosional-velocity, PE5 stability and
+    hydrate flags."""
+    hc = eqd["heat_capacities"]
+    with col:
+        st.markdown("**Rates**")
+        how = sel(st, "Rate method", ["Automatic - geometric", "User selected"], "vlpc_how")
+        if how == "User selected":
+            rates = num_list(st, f"Rates ({_qunit(kind)})", f"vlpc_rates_{kind}",
+                             "1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5" if kind == "gas" else "250, 500, 1000, 2000, 4000")
+        else:
+            c = st.columns(3)
+            lo = num(c[0], f"First rate ({_qunit(kind)})", f"vlpc_lo_{kind}", 0.136 if kind == "gas" else 50.0,
+                     1e-4, 1e6, None, "%.4g")
+            hi = num(c[1], f"Last rate ({_qunit(kind)})", f"vlpc_hi_{kind}", 135.854 if kind == "gas" else 20000.0,
+                     1e-3, 1e7, None, "%.5g")
+            n_ = int(num(c[2], "Number of rates", "vlpc_n", 20.0, 3.0, 40.0, 1.0, "%.0f"))
+            rates = list(np.geomspace(lo, hi, n_)) if hi > lo else []
+        rates = [float(r) for r in rates if r > 0][:40]
+        st.caption("Each rate is a full gradient traverse from the top node with the inputs on the left; the flags "
+                   "are raised if they apply at any node (Calculation options: Turner constant and erosional C "
+                   "factor; PVT tab: hydrate curve).")
+        go = st.button("Calculate VLP", type="primary", disabled=not rates, key="vlpc_go")
+    sig = (kind, tuple(sorted(base.items())), corr, p1, p2, tuple(np.round(rates, 6)), repr(surface),
+           repr(comp_current()))
+    if go:
+        try:
+            path = vlp_path(eqd, o.flow_type, ())
+            out = []
+            with st.spinner(f"Calculating {len(rates)} traverses..."):
+                for q in rates:
+                    det, reg, prof = wsys.solution_details(path, fluid, kind, base, q, corr, p1, p2, hc, surface,
+                                                          comp=comp_current())
+                    out.append((q, det))
+            ss["vlpc_res"] = {"sig": sig, "res": out}
+        except (ValueError, KeyError, TypeError) as e:
+            st.error(f"VLP calculation failed: {e}")
+    vr = ss.get("vlpc_res")
+    if not vr:
+        return
+    if vr["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate VLP to update.")
+    res = vr["res"]
+    q_ = np.array([q for q, _ in res])
+    p_ = np.array([d["Bottom node pressure (psia)"] for _, d in res])
+    k_min = int(np.argmin(p_))
+    rows = []
+    for (q, d), pv in zip(res, p_):
+        r = {f"Rate ({_qunit(kind)})": q}
+        r.update({k_: v_ for k_, v_ in wsys.surface_rates(kind, base, q).items() if not k_.startswith("Gas rate")
+                  or kind != "gas"})
+        r.update({"VLP pressure (psia)": pv, "Wellhead temperature (°F)": d["Wellhead temperature (°F)"],
+                  "dP friction (psi)": d["dP friction - production string (psi)"],
+                  "dP gravity (psi)": d["dP gravity - production string (psi)"],
+                  "Max. no-slip velocity (ft/s)": d["Max. no-slip velocity (ft/s)"],
+                  "Min. erosional velocity (ft/s)": d["Min. erosional velocity (ft/s)"],
+                  "Max. Turner velocity (ft/s)": d.get("Max. Turner velocity (ft/s)", np.nan),
+                  "Min. Turner velocity (ft/s)": d.get("Min. Turner velocity (ft/s)", np.nan),
+                  "Erosional velocity flag": d.get("Erosional velocity flag", ""),
+                  "Turner velocity flag": d.get("Turner velocity flag", ""),
+                  "PE5 stability flag": d.get("PE5 stability flag", ""),
+                  "Hydrates formation flag": d.get("Hydrates formation flag", "(no curve)"),
+                  "VLP shape": "Minimum" if q == q_[k_min] else ("Unstable (left of minimum)" if q < q_[k_min]
+                                                                 else "Stable")})
+        rows.append(r)
+    tab = pd.DataFrame(rows)
+    m = st.columns(4)
+    m[0].metric("Minimum point of stability", f"{q_[k_min]:,.4g} {_qunit(kind)}",
+                help="The VLP minimum: rates to the left are in the gravity-dominated (unstable) region.")
+    m[1].metric("VLP pressure at the minimum", f"{p_[k_min]:,.1f} psia")
+    tf = [q for q, d in res if d.get("Turner velocity flag") == "Yes"]
+    m[2].metric("Turner flag up to", f"{max(tf):,.4g} {_qunit(kind)}" if tf else "none")
+    us = [q for q, d in res if d.get("PE5 stability flag") == "Unstable"]
+    m[3].metric("PE5 unstable up to", f"{max(us):,.4g} {_qunit(kind)}" if us else "none")
+    if k_min in (0, len(q_) - 1):
+        st.caption("The minimum is at the end of the rate range - extend the range to locate it.")
+    fig, ax = plt.subplots(figsize=(9, 4.4))
+    ax.axvspan(q_.min(), q_[k_min], color=wplt.SERIES[1], alpha=0.08, label="unstable (left of minimum)")
+    ax.plot(q_, p_, color=wplt.SERIES[0], lw=1.8, marker="o", ms=3, label="VLP")
+    ax.scatter([q_[k_min]], [p_[k_min]], s=60, facecolor="white", edgecolor=wplt.INK, lw=1.8, zorder=5,
+               label="minimum point of stability")
+    for flag_, mk_, lab_ in (("Turner velocity flag", "v", "Turner flag"), ("Erosional velocity flag", "^", "erosional flag")):
+        sel_ = [i for i, (q, d) in enumerate(res) if d.get(flag_) == "Yes"]
+        if sel_:
+            ax.scatter(q_[sel_], p_[sel_], marker=mk_, s=36, color=wplt.SERIES[2 if mk_ == "v" else 3], zorder=4,
+                       label=lab_)
+    ax.set_xlabel(f"Rate ({_qunit(kind)})")
+    ax.set_ylabel("VLP (bottom node) pressure (psia)")
+    if q_.max() / max(q_.min(), 1e-9) > 30:
+        ax.set_xscale("log")
+    ax.grid(alpha=0.3, ls="--")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+    st.dataframe(tab.style.format(precision=3), hide_index=True, width="stretch")
+    st.download_button("Download VLP table (CSV)", tab.to_csv(index=False).encode(), "vlp_tubing_curves.csv")
 
 
 def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl=None, jet=None, pcp=None,
@@ -8649,7 +8867,9 @@ with tabs[5]:
     PCP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("pcp_motor", "pcp_rod"))
     HSP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "hsp")
     DIL_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("diluent", "diluent_gl"))
-    _modes = CALC_MODES + ([QL_MODE] if GL_ON else []) + ([ESPQL_MODE] if ESP_ON else []) + ([HSPQL_MODE] if HSP_ON else []) + \
+    LIFT_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") != "none")
+    _modes = CALC_MODES[:2] + ([VLPC_MODE] if not LIFT_ON and _o is not None and not _o.is_injector else []) + \
+        CALC_MODES[2:] + ([QL_MODE] if GL_ON else []) + ([ESPQL_MODE] if ESP_ON else []) + ([HSPQL_MODE] if HSP_ON else []) + \
         ([EQC_MODE] if GL_ON and getattr(_o, "artificial_lift", "") == "gas_lift" else [])
     if val("calc_mode") not in _modes:
         put("calc_mode", CALC_MODES[0])
@@ -9197,6 +9417,8 @@ with tabs[5]:
                 hsp_quicklook_mode(right, fluid, eqd, o, corr, p1, p2, ss.get("hsp_equipment"), ipr_curve)
             elif EQC:
                 equilibrium_mode(right, fluid, eqd, o, base, corr, p1, p2, gl_setup, ipr_curve)
+            elif mode == VLPC_MODE:
+                vlp_curve_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface)
             elif mode == CALC_MODES[1]:
                 traverse_mode(right, kind, fluid, eqd, o, base, corr, p1, p2, surface,
                               ss.get("esp_equipment") if ESP_ON else None, gl_setup,

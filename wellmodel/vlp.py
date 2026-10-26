@@ -350,7 +350,7 @@ class RetrogradeBOFluid:
         fo = np.where(ql > 1e-15, q_o / np.maximum(ql, 1e-15), 0.0)
         return dict(ql=ql, qg=q_g, rho_l=fo * pr["rho_o"] + (1 - fo) * rho_w, rho_g=pr["rho_g"],
                     mu_l=fo * pr["mu_o"] + (1 - fo) * mu_w, mu_g=pr["mu_g"],
-                    sig=fo * pr["ift"] + (1 - fo) * sigma_water_gas(rho_w, pr["rho_g"]))
+                    sig=sigma_liquid(pr["ift"], sigma_water_gas(rho_w, pr["rho_g"]), 1 - fo))
 
     def mass_cp(self, case, hc: HeatCapacities):
         r = self.rinp

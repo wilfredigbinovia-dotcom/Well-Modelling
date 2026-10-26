@@ -1,0 +1,738 @@
+{
+ "format": "wellmodel-project",
+ "version": 1,
+ "name": "T43 Flow Assurance",
+ "saved": "2026-10-26T21:30:00+00:00",
+ "inputs": {
+  "eq_cpg": 0.51,
+  "sys_flags": "Yes",
+  "calc_mode": "VLP (tubing curves)",
+  "sys_node": "Bottom node",
+  "sys_rate_method": "Automatic - Geometric",
+  "eq_cpo": 0.53,
+  "eq_tsur": 70.0,
+  "eq_cpw": 1.0,
+  "sys_lhi": "DisAllow",
+  "eq_u": 5.0,
+  "eq_usur": 5.0,
+  "sys_whp": 1014.696,
+  "sys_wgr": 50.0,
+  "sys_sep_gor": 7431.94,
+  "sys_corr": "pe5_style",
+  "sys_use_fit": false,
+  "pvt_sal": 20000.0,
+  "pvt_t": 300.0,
+  "pvt_pres": 6014.696,
+  "ipr_model_gas": "Petroleum Experts",
+  "ipr_pr": 6014.696,
+  "ipr_t_from_pvt": true,
+  "ipr_wgr": 0.0,
+  "ipr_k": 25.0,
+  "ipr_h": 100.0,
+  "ipr_area": 340.0,
+  "ipr_ca": 31.6,
+  "ipr_rw": 0.354,
+  "ipr_hp": 100.0,
+  "ipr_tdays": 50.0,
+  "ipr_phi": 0.25,
+  "ipr_swc": 0.2,
+  "ipr_perm_kind": "Total permeability",
+  "ipr_d_method": "Calculated",
+  "ipr_mech": "Enter skin by hand",
+  "ipr_skin": 5.0,
+  "ipr_devpp": "None",
+  "sys_p1_pe5_style": 1.0,
+  "sys_p2_pe5_style": 1.0,
+  "pvt_sep_p": 14.696,
+  "pvt_sep_t": 60.0,
+  "pvt_sep_gor": 7431.94,
+  "pvt_gas_sg": 0.745,
+  "pvt_tank_gor": 1.0,
+  "pvt_tank_sg": 0.745,
+  "pvt_cond_api": 43.56,
+  "pvt_wgr": 0.0,
+  "pvt_h2s": 0.0,
+  "pvt_co2": 2.33,
+  "pvt_n2": 0.31,
+  "pvt_dew": 4611.526,
+  "trav_rates_gas": "33.219",
+  "pvt_hyd_on": true,
+  "vlpc_how": "Automatic - geometric"
+ },
+ "widgets": {
+  "opt_completion": "cased_hole",
+  "opt_method": "black_oil",
+  "opt_well_type": "producer",
+  "opt_sand_control": "none",
+  "opt_fluid_type": "retrograde_condensate",
+  "opt_flow_type": "tubing",
+  "opt_separator": "single_stage",
+  "opt_water_vapour": "none",
+  "opt_artificial_lift": "none",
+  "sys_sens_on": false,
+  "eq_filter_on": false,
+  "opt_temp_model": "improved"
+ },
+ "tables": {
+  "eq_survey": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "True Vertical Depth (ft)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      12000.0,
+      12000.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "True Vertical Depth (ft)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_surface": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Fitting",
+     "Pipe Length (ft)",
+     "TVD of End Point (ft)",
+     "Pipe Inside Diameter (in)",
+     "Pipe Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Fitting": "object",
+    "Pipe Length (ft)": "float64",
+    "TVD of End Point (ft)": "float64",
+    "Pipe Inside Diameter (in)": "float64",
+    "Pipe Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_downhole": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Measured Depth (ft)",
+     "Tubing Inside Diameter (in)",
+     "Tubing Inside Roughness (in)",
+     "Tubing Outside Diameter (in)",
+     "Tubing Outside Roughness (in)",
+     "Casing Inside Diameter (in)",
+     "Casing Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5
+    ],
+    "data": [
+     [
+      null,
+      "Xmas Tree",
+      0.0,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      1000.0,
+      3.992,
+      0.0018,
+      4.5,
+      null,
+      null,
+      null,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "SSSV",
+      null,
+      3.5,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      11800.0,
+      3.992,
+      0.0018,
+      4.5,
+      null,
+      null,
+      null,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "Casing",
+      12000.0,
+      null,
+      null,
+      null,
+      null,
+      6.4,
+      0.0018,
+      1.0,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Measured Depth (ft)": "float64",
+    "Tubing Inside Diameter (in)": "float64",
+    "Tubing Inside Roughness (in)": "float64",
+    "Tubing Outside Diameter (in)": "float64",
+    "Tubing Outside Roughness (in)": "float64",
+    "Casing Inside Diameter (in)": "float64",
+    "Casing Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_geo": {
+   "__df__": {
+    "columns": [
+     "Formation Measured Depth (ft)",
+     "Formation Temperature (deg F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "data": [
+     [
+      0.0,
+      70.0
+     ],
+     [
+      12000.0,
+      300.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Formation Measured Depth (ft)": "float64",
+    "Formation Temperature (deg F)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_ihtc": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "Heat Transfer Coefficient (BTU/h/ft2/F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12
+    ],
+    "data": [
+     [
+      0,
+      1.4
+     ],
+     [
+      4000,
+      1.4
+     ],
+     [
+      9312.5,
+      2.5
+     ],
+     [
+      12000,
+      1.2
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "Heat Transfer Coefficient (BTU/h/ft2/F)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "pvt_hydrate": {
+   "__df__": {
+    "columns": [
+     "Pressure (psig)",
+     "Temperature (\u00b0F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25
+    ],
+    "data": [
+     [
+      137.075,
+      35
+     ],
+     [
+      173.727,
+      38
+     ],
+     [
+      219.27,
+      41
+     ],
+     [
+      276.27,
+      44
+     ],
+     [
+      348.312,
+      47
+     ],
+     [
+      440.621,
+      50
+     ],
+     [
+      561.192,
+      53
+     ],
+     [
+      723.153,
+      56
+     ],
+     [
+      950.262,
+      59
+     ],
+     [
+      1291.9,
+      62
+     ],
+     [
+      1865.8,
+      65
+     ],
+     [
+      2818.41,
+      68
+     ],
+     [
+      4028.83,
+      71
+     ],
+     [
+      5484.25,
+      74
+     ],
+     [
+      7174.16,
+      77
+     ],
+     [
+      9088.71,
+      80
+     ],
+     [
+      11217.8,
+      83
+     ],
+     [
+      13550.7,
+      86
+     ],
+     [
+      16076.3,
+      89
+     ],
+     [
+      18782.6,
+      92
+     ],
+     [
+      21657.5,
+      95
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Pressure (psig)": "float64",
+    "Temperature (\u00b0F)": "float64"
+   },
+   "index_name": "Point"
+  }
+ },
+ "extras": {}
+}

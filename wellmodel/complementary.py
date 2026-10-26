@@ -63,6 +63,7 @@ class CompOptions:
     inhibited_rate: float = 0.0       # 0.001 in/yr (PROSPER IRC)
     inhibitor_eff: float = 0.0        # percent (PROSPER EFF)
     alkalinity: float = 0.0           # kg/kg bicarbonate in the water (PROSPER pH buffer)
+    hydrate: tuple | None = None      # hydrate formation curve ((psia...), (F...)) for the hydrate flag (PVT warnings)
 
 
 # ------------------------------------------------------------------ maximum grain size
@@ -118,6 +119,40 @@ def turner_velocity(sig_dyncm, rho_l, rho_g, c=2.04):
     return c * sig_dyncm ** 0.25 * (rho_l - rho_g) ** 0.25 / np.sqrt(rho_g)
 
 
+# ------------------------------------------------------------------ PE5-style stability
+# PROSPER's PE5 stability flag (Tutorial 43): "unstable" where the PE5 momentum balance has the liquid flowing back
+# down. Not published; reproduced as a liquid-film reversal (flooding) criterion: unstable where the Kutateladze
+# number of the gas Ku = vsg rho_g^0.5 / (g sigma (rho_l - rho_g))^0.25 is below 1.637 D*^0.32, D* = D (g (rho_l -
+# rho_g) / sigma)^0.5 the Bond diameter. Calibrated on the user's T43 file (black-oil condensate, WGR 50): every VLP
+# flag at 1000 and 100 psig (unstable to 10.5-10.7 MMscf/d, stable from 12-15.3, set at the 6.4 in casing at the
+# bottom) and the gradient's node flags at 4 MMscf/d (casing unstable; the tubing, stable in PROSPER, sits at the
+# threshold here - ratio 0.999). Liquid-continuous flow (no-slip
+# liquid fraction above 0.5) is reported stable.
+PE5_STAB = (1.637, 0.32)
+SIG_POUNDAL = 6.852e-5 * 32.174     # dyne/cm -> poundal/ft
+
+
+def pe5_stability_ratio(vsl, vsg, rho_l, rho_g, sig_dyncm, d_ft):
+    """Ku / Ku_critical (> 1 stable). nan where not applicable (no gas, liquid-continuous, single phase)."""
+    vm = vsl + vsg
+    if not (vm > 0 and vsg > 0 and vsl > 0 and rho_l > rho_g > 0 and sig_dyncm > 0) or vsl / vm > 0.5:
+        return np.nan
+    sp = sig_dyncm * SIG_POUNDAL
+    ku = vsg * np.sqrt(rho_g) / (G_FT * sp * (rho_l - rho_g)) ** 0.25
+    ds = d_ft * np.sqrt(G_FT * (rho_l - rho_g) / sp)
+    return float(ku / (PE5_STAB[0] * ds ** PE5_STAB[1]))
+
+
+def hydrate_flag(p_psia, t_f, curve):
+    """True where (p, t) lies on the hydrate side of the curve ((psia...), (F...)): colder than the hydrate
+    temperature at that pressure."""
+    if curve is None:
+        return False
+    pc, tc = (np.asarray(x, float) for x in curve)
+    o = np.argsort(pc)
+    return bool(t_f <= np.interp(p_psia, pc[o], tc[o]))
+
+
 # ------------------------------------------------------------------ per node
 def node_values(kind, vm, vsg, rho_ns, mu_ns, rho_l, rho_g, sig, d_in, free_gas_mmscfd, opts: CompOptions):
     """Complementary results at one node. kind 'oil' or 'gas' selects the grain-size equation."""
@@ -130,7 +165,11 @@ def node_values(kind, vm, vsg, rho_ns, mu_ns, rho_l, rho_g, sig, d_in, free_gas_
     # Turner is a gas-well criterion (droplets carried by the gas core); not reported for oil wells
     vt = turner_velocity(sig, rho_l, rho_g, opts.turner) if kind == "gas" and has_gas and vsg < vm else np.nan
     q_crit = free_gas_mmscfd * vt / vsg if (np.isfinite(vt) and vsg > 0 and np.isfinite(free_gas_mmscfd)) else np.nan
-    return {"Max. Grain Size Diameter (in)": dmax,
+    stab = pe5_stability_ratio(vm - vsg, vsg, rho_l, rho_g, sig, d_in / 12.0)
+    return {"Turner Velocity Flag": bool(np.isfinite(vt) and vm < vt),
+            "Erosional Velocity Flag": bool(ve > 0 and vm > ve),
+            "PE5 Stability Ratio": stab,
+            "Max. Grain Size Diameter (in)": dmax,
             "Erosional Velocity (ft/s)": ve,
             "Velocity / Erosional Velocity": vm / ve if ve > 0 else np.nan,
             "C Factor (flow)": vm * np.sqrt(max(rho_ns, 0.0)),
@@ -165,6 +204,20 @@ def summary(rows) -> dict:
         qc = col("Critical Gas Rate (MMscf/day)")
         if qc.size:
             out["Max. Turner critical gas rate (MMscf/d)"] = float(qc.max())
+    if rows and "Turner Velocity Flag" in rows[0]:
+        lv = col("Liquid Loading Velocity (ft/s)")
+        if lv.size:
+            out["Max. Turner velocity (ft/s)"] = float(lv.max())
+            out["Min. Turner velocity (ft/s)"] = float(lv.min())
+        out["Erosional velocity flag"] = "Yes" if any(r["Erosional Velocity Flag"] for r in rows) else "No"
+        out["Turner velocity flag"] = "Yes" if any(r["Turner Velocity Flag"] for r in rows) else "No"
+        st_ = col("PE5 Stability Ratio")
+        out["PE5 stability flag"] = "Unstable" if st_.size and st_.min() < 1.0 else "Stable"
+        if st_.size:
+            out["Min. PE5 stability ratio"] = float(st_.min())
+        if any("Hydrate Formation" in r for r in rows):
+            out["Hydrates formation flag"] = ("Hydrates" if any(r.get("Hydrate Formation") for r in rows)
+                                              else "No hydrates")
     if rows and "Erosion Rate (mm/year)" in rows[0]:
         e = col("Erosion Rate (mm/year)")
         if e.size:

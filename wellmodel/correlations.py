@@ -750,6 +750,11 @@ def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p, hb_
 # ---------------------------------------------------------------------------
 PE5_SLUG_SLIP = 0.32           # ft/s - slug-flow slip velocity, calibrated on PROSPER PE5 gradients (Abura 2S)
 PE5_DRIFT = (1.04213, -0.30582, 1.70985, 0.63258)  # vsg/(1-HL) = (a + b lambda) vm + c lambda^n (ft/s)
+PE5_LOW_VM_DRIFT = (0.65, 10.0, 20.0)  # drift at least 0.65 ft/s below vm = 10 ft/s, fading out by 20 ft/s - PROSPER PE5 at
+#                                low mixture velocity (Tutorials 41 and 43, 6-9 ft/s, 7-12 % liquid: drift 0.56-0.74 ft/s where
+#                                c lambda^n gives 0.3-0.4; holdup was 14-21 % low, now within 3 % on average)
+PE5_LOW_VM_RHO = 6.0          # lb/ft3 - the low-velocity drift scales down with the gas density below this (T47 lifted
+#                                low rates at 350 psig and T43 at 100 psig need much less)
 PE5_DRIFT_CAP = 3.0            # drift-flux holdup at most 3 x the no-slip holdup (dry gas tends to no slip)
 PE5_FRICTION = (-2.28432, 0.29878, 0.10340, -0.72371, 0.32939)  # slug friction / Moody =
 #   exp(a + b HL + c ln vm + d ln mu_g + e ln(rho_g / rho_l))
@@ -767,7 +772,8 @@ def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     Everything else is reported by PE5 as slug flow, even at 110 ft/s gas velocity with 2 % liquid where Duns & Ros
     would give mist (Tutorial 38): holdup the larger of a constant 0.32 ft/s slip (low velocity, Abura 2S) and a
     drift flux vsg/(1-HL) = (1.0421 - 0.3058 lambda) vm + 1.710 lambda^0.6326 ft/s (the drift grows with the liquid
-    fraction; capped at 3 x the no-slip holdup); static gradient from the in-situ density; friction =
+    fraction; at least 0.65 ft/s below 10 ft/s mixture velocity, fading out by 20 ft/s - Tutorials 41 / 43; capped at
+    3 x the no-slip holdup); static gradient from the in-situ density; friction =
     exp(-2.284 + 0.299 HL + 0.1034 ln vm - 0.724 ln mu_g + 0.329 ln(rho_g/rho_l)) x the Moody friction of the slug
     mixture (in-situ density, mixture velocity, liquid viscosity). Fitted on PROSPER's PE5 gradients of Tutorial 38
     (condensate, 2-9 % liquid, 19-115 ft/s, BO and EoS, 8 traverses) and Tutorial 47 (water-rich, 3-38 % liquid,
@@ -781,7 +787,12 @@ def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     disc = np.maximum((1 + vm / vs) ** 2 - 4 * vsg / vs, 0.0)
     hl_slip = 1 - 0.5 * (1 + vm / vs - np.sqrt(disc))
     a0, a1, c_d, n_d = PE5_DRIFT
-    hl_df = np.minimum(1 - vsg / np.maximum((a0 + a1 * lam) * vm + c_d * lam ** n_d, 1e-9), PE5_DRIFT_CAP * lam)
+    v0, vlo, vhi = PE5_LOW_VM_DRIFT
+    vd = np.maximum(c_d * lam ** n_d, v0 * np.clip((vhi - vm) / (vhi - vlo), 0.0, 1.0)
+                    * np.clip(rho_g / PE5_LOW_VM_RHO, 0.0, 1.0))
+    fade = np.clip((vhi - vm) / (vhi - vlo), 0.0, 1.0)
+    cap = np.where(fade > 0, 1.0, PE5_DRIFT_CAP * lam)          # the no-slip cap only at high mixture velocity
+    hl_df = np.minimum(1 - vsg / np.maximum((a0 + a1 * lam) * vm + vd, 1e-9), cap)
     hl_s = np.clip(np.maximum(hl_slip, hl_df), lam, 1.0)
     rho_s = rho_l * hl_s + rho_g * (1 - hl_s)
     f_m = friction_factor(rho_s * vm * d / (mu_l * CP_TO_LBFTS), rough / d)

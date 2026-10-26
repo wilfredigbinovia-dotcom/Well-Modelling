@@ -85,7 +85,10 @@ def _retro(fluid, p, t, case, hc):
     x_o, x_g = (1 - fw) * xo, (1 - fw) * (1 - xo)
     cpo, cpg = cp_oil(t, r.gamma_o), cp_gas(p, t, M, tpc, ppc)
     cp = x_o * cpo + x_g * cpg + fw * hc.water
-    num = x_g * gas_jt_term(p, t, M, tpc, ppc) + x_o * C_OIL - (1 - fw) * K_COND * dxp + fw * WATER_TERM
+    # condensation (liquid dropping out as the pressure falls) cools the stream; PROSPER shows no matching heating
+    # where the black-oil condensate re-vaporises below the maximum drop-out pressure (Tutorial 43: JT 0.02-0.03
+    # F/psi at 1000-1900 psia, the gas, oil and water terms alone)
+    num = x_g * gas_jt_term(p, t, M, tpc, ppc) + x_o * C_OIL - (1 - fw) * K_COND * np.minimum(dxp, 0.0) + fw * WATER_TERM
     return cp, num / cp
 
 
