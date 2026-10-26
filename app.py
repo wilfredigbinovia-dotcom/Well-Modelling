@@ -44,6 +44,9 @@ from wellmodel import gaslift as wgl
 from wellmodel import gaslift_system as wgls
 from wellmodel import coiled as wct
 from wellmodel import quicklook as wql
+from wellmodel import esp_quicklook as weql
+from wellmodel import hsp_quicklook as whql
+from wellmodel import srp_cards as wsrpc
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -51,6 +54,7 @@ from wellmodel import jetpump as wjet
 from wellmodel import hsp as whsp
 from wellmodel import pcp as wpcp
 from wellmodel import gaspvt as wgp
+from wellmodel import retrograde as wrg
 from wellmodel import complementary as wcx
 from wellmodel import units as wu
 from wellmodel import ui_units as wuu
@@ -888,7 +892,31 @@ def gas_pvt_inputs(opts_now=None, matched=None) -> wgp.GasPVTInputs:
     return gi
 
 
+def retro_bo_on(o_=None):
+    o_ = o_ or ss.get("options")
+    return bool(o_ is not None and o_.fluid_type == "retrograde_condensate" and o_.method == "black_oil"
+                and o_.well_type == "producer")
+
+
+def retro_inputs() -> wrg.RetroInputs:
+    """PROSPER's black-oil retrograde condensate inputs (PVT tab)."""
+    return wrg.RetroInputs(
+        sep_gor=float(val("pvt_sep_gor", 7000.0)), sep_sg=float(val("pvt_gas_sg", 0.70)),
+        tank_gor=float(val("pvt_tank_gor", 0.0)), tank_sg=float(val("pvt_tank_sg", 0.70)),
+        api=float(val("pvt_cond_api", 50.0)), p_dew=float(val("pvt_dew", 4014.7)),
+        t_res=float(val("pvt_t", 200.0)), p_res=float(val("pvt_pres", 3014.7)), wgr=float(val("pvt_wgr", 0.0)),
+        salinity_ppm=float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"])), h2s=float(val("pvt_h2s", 0.0)),
+        co2=float(val("pvt_co2", 0.0)), n2=float(val("pvt_n2", 0.0)))
+
+
 def _gas_pvt_inputs_raw() -> wgp.GasPVTInputs:
+    if retro_bo_on():               # the wet-gas inputs equivalent to the condensate (IPR pseudo-pressure etc.)
+        ri = retro_inputs()
+        return wgp.GasPVTInputs(
+            gas_sg=ri.gas_sg, sep_p=float(val("pvt_sep_p", 14.696)) - 14.696, cgr=ri.cgr, cond_api=ri.api,
+            wgr=ri.wgr, salinity_ppm=ri.salinity_ppm, h2s=ri.h2s, co2=ri.co2, n2=ri.n2,
+            visc="carr" if val("pvt_gvisc", "Lee et al") == "Carr et al" else "lee",
+            t_res=ri.t_res, p_res=ri.p_res - 14.696)
     return wgp.GasPVTInputs(
         gas_sg=float(val("pvt_gas_sg", 0.70)), sep_p=float(val("pvt_sep_p", 214.7)) - 14.696,
         cgr=float(val("pvt_cgr", 0.0)), cond_api=float(val("pvt_cond_api", 50.0)), wgr=float(val("pvt_wgr", 0.0)),
@@ -918,9 +946,12 @@ def injector_calc(o, mode, eqd):
     t_inj = float(val("eq_tinj", 60.0))
     hc = eqd.get("heat_capacities")
     what = "Gas" if gas_inj else "Water"
+    p1, p2 = float(val("inj_p1", 1.0)), float(val("inj_p2", 1.0))
     st.caption(f"{what} injector: {what.lower()} at {t_inj:g} °F enters the wellhead and flows down the tubing "
                f"(gravity raises the pressure, friction lowers it), exchanging heat with the formation (U = {u:g} "
-               "BTU/h/ft2/F). PVT from the PVT tab, injection temperature and U from the Equipment tab.")
+               "BTU/h/ft2/F). PVT from the PVT tab, injection temperature and U from the Equipment tab."
+               + (f" VLP match applied (VLP tab): gravity x {p1:.5g}, friction x {p2:.5g}."
+                  if (p1, p2) != (1.0, 1.0) else ""))
     if gas_inj and ss.get("inj_ipr") is not None and getattr(ss["inj_ipr"], "fluid", "") != "gas_injection":
         ss.pop("inj_ipr", None)
     if not gas_inj and ss.get("inj_ipr") is not None and getattr(ss["inj_ipr"], "fluid", "") != "water_injection":
@@ -937,7 +968,7 @@ def injector_calc(o, mode, eqd):
         rows, sols = [], {}
         with st.spinner("Solving..."):
             for w_ in whps:
-                res, rates, vp, ip = winj.solve(path, fl_, float(w_), ipr_inj, u, t_inj, hc)
+                res, rates, vp, ip = winj.solve(path, fl_, float(w_), ipr_inj, u, t_inj, hc, p1, p2)
                 sols[w_] = (res, rates, vp, ip)
                 rows.append({"Wellhead pressure (psia)": w_,
                              f"Injection rate ({ru})": res.q if res else np.nan,
@@ -974,7 +1005,7 @@ def injector_calc(o, mode, eqd):
             fig.tight_layout()
             st.pyplot(fig, clear_figure=True)
         if getattr(ipr_inj, "sandface_temperature", False):
-            _, tb_ = winj.vlp_curve(path, fl_, float(pick), rates, u, t_inj, hc, with_t=True)
+            _, tb_ = winj.vlp_curve(path, fl_, float(pick), rates, u, t_inj, hc, p1, p2, with_t=True)
             dps_ = ipr_inj.dp_skin(rates, tb_)
         else:
             tb_, dps_ = np.full(len(rates), np.nan), ipr_inj.dp_skin(rates)
@@ -992,7 +1023,7 @@ def injector_calc(o, mode, eqd):
         whp = num(c[0], "Wellhead pressure (psia)", "grad_inj_whp", 1264.7, 14.7, 30000.0, 10.0)
         q = (num(c[1], "Gas injection rate (MMscf/d)", "grad_ginj_q", 7.5, 0.0, 1e4, 0.5) if gas_inj
              else num(c[1], "Injection rate (STB/d)", "grad_inj_q", 10000.0, 0.0, 1e6, 100.0))
-        P, T = winj.traverse(path, fl_, whp, [q], u, t_inj, hc)
+        P, T = winj.traverse(path, fl_, whp, [q], u, t_inj, hc, p1, p2)
         gt_ = winj.gradient_table(path, fl_, q, P[0], T[0], p_unit_gauge=False)
         cc = st.columns(2)
         for ax_i, (col_, lab_) in enumerate((("Pressure (psia)", "Pressure (psia)"), ("Temperature (°F)", "Temperature (°F)"))):
@@ -1046,9 +1077,11 @@ def injector_ipr_panel(o):
         dm = sel(c[2], "Non-Darcy flow factor (D)", ["Calculated", "Entered"], "ipr_d_method")
         d_ent = num(c[3], "D (1/(Mscf/d))", "ipr_d", 1e-4, 0.0, 1.0, None, "%.4e") if dm == "Entered" else None
         skin = num(st.columns(4)[0], "Skin", "ipr_skin_inj", 2.0, -8.0, 500.0, None, "%.5g")
-        cur = winj.petex_gas_injection(pr, t_res, k, h, area, ca, rw, hp, tdays, phi, swc, skin, flg, d_ent,
-                                       "gas" if perm == "Gas permeability" else "total")
+        perm_ = "gas" if perm == "Gas permeability" else "total"
+        cur = winj.petex_gas_injection(pr, t_res, k, h, area, ca, rw, hp, tdays, phi, swc, skin, flg, d_ent, perm_)
         ss["inj_ipr"] = cur
+        ss["inj_ipr_for"] = (lambda skin=skin, pr=pr: winj.petex_gas_injection(
+            pr, t_res, k, h, area, ca, rw, hp, tdays, phi, swc, skin, flg, d_ent, perm_))
         c = st.columns(4)
         c[0].metric("D", f"{cur.params['Non-Darcy flow factor D (1/(Mscf/d))']:.4e} 1/(Mscf/d)")
         c[1].metric("Drainage term X", f"{cur.params['Drainage term X']:.4g}")
@@ -1083,9 +1116,11 @@ def injector_ipr_panel(o):
         c = st.columns(4)
         skin = num(c[0], "Skin", "ipr_skin_inj", 0.0, -8.0, 500.0, None, "%.5g")
         cur = ipr_inj = winj.darcy_injection(pr, t_res, k, h, area, rw, skin, fl_)
+        ss["inj_ipr_for"] = lambda skin=skin, pr=pr: winj.darcy_injection(pr, t_res, k, h, area, rw, skin, fl_)
     else:
         j = num(st.columns(4)[0], "Injectivity index (STB/d/psi)", "ipr_j_inj", 5.0, 1e-6, 1e6, None, "%.5g")
         cur = ipr_inj = winj.pi_injection(pr, j)
+        ss["inj_ipr_for"] = lambda skin=None, pr=pr: winj.pi_injection(pr, j)
     ss["inj_ipr"] = ipr_inj
     c = st.columns(4)
     c[0].metric("Injectivity index", f"{cur.j:.4g} STB/d/psi")
@@ -1160,6 +1195,7 @@ def tif_panel(pr, t_res, fl_):
                          mu_res=mu_r, b_res=b_r)
     cur = wtif.tif_ipr(inp, fl_)
     ss["inj_ipr"] = cur
+    ss["inj_ipr_for"] = lambda skin=skin, pr=pr: wtif.tif_ipr(dataclasses.replace(inp, skin=skin, pr=pr), fl_)
     c = st.columns(4)
     c[0].metric("Cooled radius", f"{cur.params['Cooled radius (ft)']:.1f} ft")
     c[1].metric("Flooded radius", f"{cur.params['Flooded radius (ft)']:.1f} ft")
@@ -1350,6 +1386,72 @@ def gas_pvt_panel(opts_now):
         st.download_button("Download PVT table (CSV)", tab.to_csv(index=False).encode(), "gas_pvt.csv")
 
 
+def retro_pvt_panel(opts_now):
+    """PROSPER PVT | Input Data for Retrograde Condensate with the black-oil method."""
+    st.subheader("Input data")
+    st.caption("PROSPER's black-oil retrograde condensate model (reconstructed from its PVT tables, Tutorial 38 - see "
+               "wellmodel/retrograde.py): below the dew point condensate drops out of the gas and flows as liquid in "
+               "the well. The separator and tank figures describe the full stream brought to stock-tank conditions "
+               "(PROSPER's Tutorial 38: separator at 0 psig and 60 °F, tank GOR 1 scf/STB).")
+    c = st.columns(4)
+    num(c[0], "Separator Pressure (psia)", "pvt_sep_p", 14.696, 14.696, 5000.0, 10.0)
+    num(c[1], "Separator Temperature (deg F)", "pvt_sep_t", 60.0, 0.0, 300.0, 1.0)
+    num(c[2], "Separator GOR (scf/STB)", "pvt_sep_gor", 7000.0, 1.0, 1e7, 10.0)
+    num(c[3], "Separator Gas Gravity (sp. gravity)", "pvt_gas_sg", 0.70, 0.55, 2.0, 0.001, "%.4f")
+    c = st.columns(4)
+    num(c[0], "Tank GOR (scf/STB)", "pvt_tank_gor", 0.0, 0.0, 1e6, 1.0)
+    num(c[1], "Tank Gas Gravity (sp. gravity)", "pvt_tank_sg", 0.70, 0.55, 3.0, 0.001, "%.4f")
+    num(c[2], "Condensate Gravity (API)", "pvt_cond_api", 50.0, 10.0, 90.0, 0.1)
+    num(c[3], "Water Gas Ratio (STB/MMscf)", "pvt_wgr", 0.0, 0.0, 1e5, 1.0)
+    c = st.columns(4)
+    num(c[0], "Water Salinity (ppm)", "pvt_sal", INPUT_DEFAULTS["pvt_sal"], 0.0, 300000.0, 1000.0, "%.0f")
+    num(c[1], "Mole Percent H2S (percent)", "pvt_h2s", 0.0, 0.0, 100.0, 0.1)
+    num(c[2], "Mole Percent CO2 (percent)", "pvt_co2", 0.0, 0.0, 100.0, 0.1)
+    num(c[3], "Mole Percent N2 (percent)", "pvt_n2", 0.0, 0.0, 100.0, 0.1)
+    st.subheader("Reservoir data")
+    c = st.columns(4)
+    num(c[0], "Reservoir Temperature (deg F)", "pvt_t", 200.0, 61.0, 500.0, 1.0)
+    num(c[1], "Reservoir Pressure (psia)", "pvt_pres", 3014.7, 14.7, 30000.0, 10.0)
+    num(c[2], "Dew Point at Reservoir Temperature (psia)", "pvt_dew", 4014.7, 14.7, 30000.0, 10.0)
+    ri = retro_inputs()
+    for e in ri.check():
+        st.error(e)
+    if ri.check():
+        return
+    c[3].metric("Condensate-gas ratio", f"{ri.cgr:.2f} STB/MMscf")
+    if ri.p_res < ri.p_dew:
+        st.info("The reservoir pressure is below the dew point: condensate has dropped out in the reservoir too "
+                "(the IPR uses the full wellstream).")
+    st.caption("Not matched to laboratory data - as PROSPER advises for this model, validate it against an equation "
+               "of state instead (Tutorial 38: compare gradient traverses with the EoS model).")
+    st.subheader("Calculate")
+    c = st.columns(4)
+    temps = num_list(c[0], "Temperatures (°F)", "pvt_retro_temps", f"70, {(70 + ri.t_res) / 2:g}, {ri.t_res:g}",
+                     "comma separated")
+    p_lo = num(c[1], "First pressure (psia)", "pvt_retro_p0", 14.7, 14.7, 30000.0, 10.0)
+    p_hi = num(c[2], "Last pressure (psia)", "pvt_retro_p1", max(ri.p_res, ri.p_dew) * 1.1, 14.7, 30000.0, 10.0)
+    npts = int(num(c[3], "Number of pressures", "pvt_retro_n", 25.0, 2.0, 100.0, 1.0, "%.0f"))
+    if temps and p_hi > p_lo:
+        tab = wrg.pvt_table(ri, temps, np.linspace(p_lo, p_hi, npts) - 14.696)
+        tab.insert(1, "Pressure (psia)", tab["Pressure (psig)"] + 14.696)
+        tab.insert(3, "Dew point (psia)", tab["Dew point (psig)"] + 14.696)
+        tab = tab.drop(columns=["Pressure (psig)", "Dew point (psig)"])
+        fig, axs = plt.subplots(1, 4, figsize=(15, 3.8))
+        for i_, tt in enumerate(sorted(set(tab["Temperature (deg F)"]))):
+            d_ = tab[tab["Temperature (deg F)"] == tt]
+            for ax, col in zip(axs, ("Reservoir CGR (STB/MMscf)", "Z factor", "Gas density (lb/ft3)",
+                                     "Oil FVF (RB/STB)")):
+                ax.plot(d_["Pressure (psia)"], d_[col], color=wplt.SERIES[i_ % 4], lw=1.6, label=f"{tt:g} °F")
+                ax.set_title("Condensate dropout (STB/MMscf)" if col.startswith("Reservoir CGR") else col, fontsize=9)
+                ax.set_xlabel("Pressure (psia)", fontsize=8)
+                ax.grid(alpha=0.3)
+        axs[0].legend(fontsize=8)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+        st.dataframe(tab.style.format(precision=5, na_rep="—"), hide_index=True, width="stretch", height=320)
+        st.download_button("Download PVT table (CSV)", tab.to_csv(index=False).encode(), "retrograde_pvt.csv")
+
+
 with tabs[1]:
     st.header("PVT Input Data")
     opts_now = ss.get("options")
@@ -1357,6 +1459,8 @@ with tabs[1]:
         water_injector_pvt_panel()
     elif opts_now is not None and opts_now.method == "eos":
         render_eos(opts_now)
+    elif retro_bo_on(opts_now):
+        retro_pvt_panel(opts_now)
     elif opts_now is not None and opts_now.fluid_type != "oil":
         gas_pvt_panel(opts_now)
     else:
@@ -2011,14 +2115,16 @@ def sand_control_panel(o, fluid, h_default, res_known=None):
 
 
 def sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, multiphase):
-    """In-situ property function for the sand-control dP (properties at the sand-face pressure)."""
+    """In-situ property function for the sand-control dP: oil at the reservoir pressure (as PROSPER - Tutorials
+    15-18), gas at the sand-face pressure."""
     if fluid == "oil":
         if o.method != "eos":
             m = blackoil_model(o)
             if m is not None:
-                return wcomp.props_from_fluid(wvlp.BlackOilFluid(m), "oil", t_f,
-                                              {"wc": wc, "gor": float(m.inp.rsb)}, multiphase), \
-                    "black oil at the sand-face pressure"
+                return wcomp.props_at_pressure(wcomp.props_from_fluid(wvlp.BlackOilFluid(m), "oil", t_f,
+                                                                      {"wc": wc, "gor": float(m.inp.rsb)},
+                                                                      multiphase), float(val("ipr_pr", 5000.0))), \
+                    "black oil at the reservoir pressure (as PROSPER)"
         return wcomp.props_constant(pvt["bo"], pvt["rho"], pvt["mu"], "oil"), "oil properties at reservoir pressure"
     if o.method != "eos":
         inp = bo.PVTInputs(rsb=1, api=40, gas_sg=float(gasp["sg"]), salinity_ppm=float(val("pvt_sal", 50000.0)),
@@ -2226,6 +2332,14 @@ def vlp_fluid(o, kind, p_max, t_min, t_max):
             return None, "Complete the PVT Input Data tab (black oil)."
         fam = f"{bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}"
         return wvlp.BlackOilFluid(model), f"Black oil ({fam}{', matched' if model.params else ', not matched'})"
+    if retro_bo_on(o):
+        ri = retro_inputs()
+        bad = ri.check()
+        if bad:
+            return None, " ".join(bad)
+        return wvlp.RetrogradeBOFluid(ri), (
+            f"Black-oil retrograde condensate (dew point {ri.p_dew:,.0f} psia at {ri.t_res:g} °F, CGR {ri.cgr:.1f} "
+            f"STB/MMscf, {ri.api:g} °API): condensate drops out in the well below the dew point")
     inp = bo.PVTInputs(rsb=1, api=40, gas_sg=float(val("pvt_gas_sg", 0.70)), salinity_ppm=water.salinity_ppm,
                        h2s=water.h2s, co2=water.co2, n2=water.n2)
     api = float(val("pvt_cond_api", 50.0))
@@ -2382,9 +2496,11 @@ with tabs[2]:
                                            .separator_train()["gas_gravity"])
                         else:
                             sg_sep = gas_pvt_inputs(o).gas_sg
+                        cgr_k = cgr if cgr else (float(retro_inputs().cgr) if retro_bo_on(o) else 0.0)
                         curve = ipr.petex_gas(pr, t_f, r["k"], r["h"], r["area"], r["ca"], r["rw"], r["hp"], tdays,
                                               phi, swc, skin, psi_g, gasp["mu_r"], float(cg_), float(sg_sep), d_ent,
-                                              "gas" if perm == "Gas permeability" else "total")
+                                              "gas" if perm == "Gas permeability" else "total", wgr=float(wgr or 0.0),
+                                              cgr=float(cgr_k or 0.0), z_r=float(gasp["z_r"]))
                         kh_for_skin = curve.params["Gas permeability (md)"] * r["h"]
                     elif model == "Forchheimer":
                         c = st.columns(4)
@@ -2468,8 +2584,13 @@ with tabs[2]:
                                                           xf, fcd, nfr, ca_f, hz_skin, **(gas_kw if gas else oil_kw))
                 elif model == "Horizontal Well - friction dP":
                     g, spare = horizontal_inputs()
-                    st.caption("Overall productivity from Babu & Odeh; zones split it by permeability x length and "
-                               "zone skin. Zone lengths should add up to the well length.")
+                    meth_f = radio(st, "Horizontal well model", ["Kuchuk & Goode", "Babu & Odeh", "Joshi"],
+                                   "ipr_hzf_method", "Kuchuk & Goode", horizontal=True,
+                                   help="The overall productivity of the well (PROSPER's Horizontal Well Model); each "
+                                        "zone's skin (mechanical, along the well) enters it as that model scales it.")
+                    st.caption("Zones (heel to toe) split the overall productivity by permeability x length and zone "
+                               "skin; the wellbore friction is marched from the toe to the heel. Zone lengths should "
+                               "add up to the well length. Flowing ID = 2 x PROSPER's flowing radius.")
                     z = zones_table().dropna(subset=["Type", "Length (ft)"])
                     zones = [{"type": row["Type"], "length": float(row["Length (ft)"]),
                               "k": float(row["Permeability (md)"]) if pd.notna(row["Permeability (md)"]) else g["k"],
@@ -2479,8 +2600,12 @@ with tabs[2]:
                     total_len = sum(zz["length"] for zz in zones)
                     if abs(total_len - g["L"]) > 1:
                         st.warning(f"Zone lengths add up to {total_len:,.0f} ft but the well length is {g['L']:,.0f} ft.")
-                    kh_eq, D0, _ = ipr2.babu_odeh(g["k"], g["h"], g["rw"], g["aniso_h"], g["aniso_v"], g["L"], g["lx"],
-                                                  g["ly"], g["xw"], g["yw"], g["zw"], 0.0)
+                    _hz = lambda s_: ipr2.horizontal_resistance(meth_f, g["k"], g["h"], g["rw"], g["aniso_h"],
+                                                                g["aniso_v"], g["L"], g["lx"], g["ly"], g["xw"],
+                                                                g["yw"], g["zw"], s_)
+                    kh_eq, D0 = _hz(0.0)
+                    for zz in zones:
+                        zz["skin"] = _hz(zz["skin"])[1] - D0 if zz["skin"] else 0.0
                     ph = num(spare, "Heel pressure for profile plot (psia)", "ipr_heelp", round(pr * 0.5), 14.7, 3e4, 10.0)
                     props = (dict(mu=pvt["mu"], bo=pvt["bo"], rho=pvt["rho"], wc=wc) if not gas
                              else dict(mu_z=gasp["mu_z"], sg=gasp["sg"], t_f=t_f, mu_r=gasp["mu_r"], z_r=gasp["z_r"]))
@@ -4798,6 +4923,226 @@ def accept_ipr(key, value, label):
     ss.pop("vlp_vi", None)
 
 
+INJ_VLP_ACTIONS = ["Estimate U Value", "Match VLP", "VLP/IPR", "Adjust IPR"]
+
+
+def inj_tests_key(gas):
+    return "vlp_tests_inj_" + ("gas" if gas else "water")
+
+
+def inj_blank(gas):
+    cols = winj.inj_test_columns(gas)
+    df = pd.DataFrame({c: pd.Series([None] * VLP_ROWS, dtype=object) if c in ("Test Point Date", "Test Point Comment")
+                       else pd.Series([np.nan] * VLP_ROWS, dtype=float) for c in cols})
+    df.index = pd.RangeIndex(1, VLP_ROWS + 1, name="Test")
+    return df
+
+
+def inj_set_tests(gas, df):
+    k = inj_tests_key(gas)
+    ss[k] = df
+    ss["_ver_" + k] = ss.get("_ver_" + k, 0) + 1
+    for k_ in ("inj_match", "inj_vi", "inj_adj"):
+        ss.pop(k_, None)
+
+
+def accept_inj_match(p1, p2):
+    put("inj_p1", float(round(p1, 6)))
+    put("inj_p2", float(round(p2, 6)))
+
+
+def accept_inj_ipr(key, value):
+    put(key, float(value))
+    ss["inj_adj_accepted"] = (key, float(value))
+    ss["inj_action"] = "VLP/IPR"
+
+
+def injector_vlp_match(o, eqd):
+    """PROSPER VLP/IPR Matching for injectors (Tutorials 21 and 22): Estimate U Value (bottom-node temperature),
+    Match VLP (gravity multiplier on the gauge pressures), VLP/IPR at each test, Adjust IPR (skin or reservoir
+    pressure per test)."""
+    gas = o.well_type == "gas_injector"
+    fl_ = inj_gas_fluid() if gas else winj.WaterFluid(float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"])))
+    qunit = "MMscf/d" if gas else "STB/d"
+    u_cur = float(val("eq_u", eqd.get("u_geo", 8.0)))
+    t_inj = float(val("eq_tinj", 60.0))
+    hc = eqd["heat_capacities"]
+    p1c, p2c = float(val("inj_p1", 1.0)), float(val("inj_p2", 1.0))
+    top_md, secs_, _ = eqd["downhole"]
+    md_bot = float(secs_["MD bottom (ft)"].max())
+    st.caption(f"{'Gas' if gas else 'Water'} injection well tests. The injected fluid pressure is at the wellhead; "
+               "the downstream temperature is the temperature at the bottom of the tubing (PROSPER's estimate of U "
+               f"for an injector). Current U {u_cur:.5g} BTU/h/ft2/F, injection temperature {t_inj:g} °F (Equipment "
+               f"tab); VLP multipliers gravity x {p1c:.5g}, friction x {p2c:.5g}.")
+    key = inj_tests_key(gas)
+    ss.setdefault(key, inj_blank(gas))
+    cfg = {c_: st.column_config.NumberColumn(c_.split(" (")[0] + "\n(" + c_.split(" (", 1)[1] if " (" in c_ else c_,
+                                             format="%g") for c_ in winj.inj_test_columns(gas)[2:]}
+    tbl = track(key, st.data_editor(ss[key], key=f"{key}_ed_{ss.get('_ver_' + key, 0)}", num_rows="fixed",
+                                    width="stretch", column_config=cfg, height=36 * 11))
+    st.button("Clear tests", on_click=inj_set_tests, args=(gas, inj_blank(gas)))
+    tests, issues = winj.clean_inj_tests(tbl, gas, float(top_md), md_bot)
+    show_vlp_issues(issues)
+    if any(l_ == "error" for l_, _ in issues):
+        st.info("Fix the test table errors above to continue.")
+        return
+    if not len(tests):
+        st.info("Enter at least one test.")
+        return
+    try:
+        path = winj.from_flow_path(vlp_path(eqd, "tubing", [m for m in tests["gauge_md"] if np.isfinite(m)]))
+    except ValueError as e:
+        st.error(str(e))
+        return
+    st.divider()
+    bc = st.columns(len(INJ_VLP_ACTIONS))
+    for i, name in enumerate(INJ_VLP_ACTIONS):
+        bc[i].button(name, width="stretch", key=f"inj_act_{i}",
+                     on_click=lambda n=name: ss.__setitem__("inj_action", n),
+                     type="primary" if ss.get("inj_action", INJ_VLP_ACTIONS[0]) == name else "secondary")
+    action = ss.get("inj_action", INJ_VLP_ACTIONS[0])
+    st.subheader(action)
+    tsig = (tests.to_json(), fl_.rate_unit, str(getattr(fl_, "inp", getattr(fl_, "salinity", ""))), t_inj,
+            str(hc), tuple(np.round(path.md, 2)), tuple(np.round(path.d, 6)))
+
+    if action == "Estimate U Value":
+        tab_u = winj.estimate_u(path, fl_, tests, t_inj, hc)
+        good = tab_u["U (BTU/h/ft2/F)"].dropna()
+        st.dataframe(tab_u.style.format({"Downstream temperature (°F)": "{:.1f}", "U (BTU/h/ft2/F)": "{:.5f}"},
+                                        na_rep="—"), hide_index=True, width="stretch")
+        if not len(good):
+            st.warning("No test has a usable downstream temperature.")
+            return
+        u_new = float(good.mean())
+        m = st.columns(4)
+        m[0].metric("Mean U", f"{u_new:.5g}")
+        m[1].metric("Standard deviation", f"{float(good.std(ddof=1)) if len(good) > 1 else 0.0:.3g}")
+        m[2].metric("Current U (Equipment tab)", f"{u_cur:.5g}")
+        m[3].button(f"Transfer mean U = {u_new:.5g}", type="primary", on_click=accept_u, args=(u_new,),
+                    help="Writes the mean to the Geothermal gradient section of the Equipment tab.")
+        if abs(u_new - u_cur) < 1e-4:
+            st.success(f"U = {u_cur:.5g} BTU/h/ft2/F is in use.")
+        return
+
+    if action == "Match VLP":
+        st.caption("Parameter 1 multiplies the gravity pressure change and Parameter 2 the friction one. The "
+                   "traverse runs from the injected fluid pressure down to each gauge at the current U; Parameter 1 "
+                   "is regressed on the gauge pressures (PROSPER's Tutorials 21 and 22 end with Parameter 2 = 1 - "
+                   "friction is a small part of an injector's pressure change).")
+        if not np.isfinite(tests["gauge_p"]).any():
+            st.warning("No test has gauge data - matching needs a measured downhole pressure.")
+            return
+        fit2 = st.checkbox("Also regress Parameter 2 (friction)", key="inj_fit_p2", value=False)
+        msig = tsig + (u_cur, fit2)
+        if ss.get("inj_match", (None,))[0] != msig:
+            with st.spinner("Matching..."):
+                ss["inj_match"] = (msig, winj.match_vlp(path, fl_, tests, u_cur, t_inj, hc, fit2))
+        mt = ss["inj_match"][1]
+        g = tests[np.isfinite(tests["gauge_p"])].reset_index(drop=True)
+        m = st.columns(4)
+        m[0].metric("Parameter 1 (gravity)", f"{mt.p1:.5f}")
+        m[1].metric("Parameter 2 (friction)", f"{mt.p2:.5f}")
+        m[2].metric("Standard deviation (psi)", f"{mt.std:.4g}")
+        m[3].button("Accept match", type="primary", on_click=accept_inj_match, args=(mt.p1, mt.p2),
+                    help="Applies the multipliers to the injector's system and gradient calculations.")
+        if abs(mt.p1 - p1c) < 1e-6 and abs(mt.p2 - p2c) < 1e-6:
+            st.success("This match is applied to the calculations.")
+        st.dataframe(pd.DataFrame({"Test": g["label"], "Gauge depth (ft)": g["gauge_md"],
+                                   "Measured (psia)": g["gauge_p"], "Unmatched - measured (psi)": mt.before,
+                                   "Matched - measured (psi)": mt.after}).style.format(precision=2),
+                     hide_index=True, width="stretch")
+        return
+
+    ipr_for = ss.get("inj_ipr_for")
+    if ipr_for is None or ss.get("inj_ipr") is None:
+        st.info("Set up the injectivity in the IPR Data tab first.")
+        return
+    cur_ipr = ss["inj_ipr"]
+    isig = (str(cur_ipr.model), float(cur_ipr.pr), float(getattr(cur_ipr, "skin", 0.0)), str(cur_ipr.params))
+
+    def ipr_t(t, **kw):
+        kw.setdefault("pr", float(t["pr"]) if np.isfinite(t["pr"]) else float(cur_ipr.pr))
+        if "skin" not in kw and getattr(cur_ipr, "skin", None) is not None and cur_ipr.model != "P.I. Entry":
+            kw["skin"] = float(cur_ipr.skin)
+        return ipr_for(**kw)
+
+    if action == "VLP/IPR":
+        st.caption("Each test: the system (tubing with the VLP multipliers, injectivity at the test's reservoir "
+                   "pressure) at the test's injected fluid pressure. The measured bottom-hole pressure is the VLP's "
+                   "at the measured rate.")
+        if ss.get("inj_adj_accepted"):
+            k_, v_ = ss.pop("inj_adj_accepted")
+            st.success(f"{'Skin' if k_ == 'ipr_skin_inj' else 'Reservoir pressure'} = {v_:.5g} written to the "
+                       "IPR Data tab.")
+        vsig = tsig + (u_cur, p1c, p2c, isig)
+        if ss.get("inj_vi", (None,))[0] != vsig:
+            out = []
+            with st.spinner("Solving each test..."):
+                for _, t in tests.iterrows():
+                    ipr = ipr_t(t)
+                    res, rates, vp, ip = winj.solve(path, fl_, t["whp"], ipr, u_cur, t_inj, hc, p1c, p2c)
+                    bhp = float(winj.vlp_curve(path, fl_, t["whp"], [t["q"]], u_cur, t_inj, hc, p1c, p2c)[0])
+                    out.append((t, res, rates, vp, ip, bhp))
+            ss["inj_vi"] = (vsig, out)
+        out = ss["inj_vi"][1]
+        rows = []
+        for t, res, rates, vp, ip, bhp in out:
+            qc = res.q if res is not None else np.nan
+            rows.append({"Test": t["label"], f"Measured rate ({qunit})": t["q"], f"Calculated rate ({qunit})": qc,
+                         "Rate difference (%)": 100 * (qc - t["q"]) / t["q"],
+                         "Measured BHP (psia)": bhp, "Calculated BHP (psia)": res.pwf if res is not None else np.nan,
+                         "BHP difference (%)": 100 * ((res.pwf if res is not None else np.nan) - bhp) / bhp})
+        st.dataframe(pd.DataFrame(rows).style.format(precision=3, na_rep="—"), hide_index=True, width="stretch")
+        fig, ax = plt.subplots(figsize=(8, 4.6))
+        for i, (t, res, rates, vp, ip, bhp) in enumerate(out):
+            col = wplt.SERIES[i % len(wplt.SERIES)]
+            ax.plot(rates, vp, color=col, lw=1.6, label=f"test {t['label']} VLP")
+            ax.plot(rates, ip, color=col, lw=1.0, ls="--", label=f"test {t['label']} IPR")
+            ax.scatter([t["q"]], [bhp], color=col, marker="s", s=40, zorder=5, edgecolor=wplt.INK)
+            if res is not None:
+                ax.scatter([res.q], [res.pwf], facecolor="white", edgecolor=col, s=50, lw=1.8, zorder=5)
+        ax.set_xlabel(f"Injection rate ({qunit})")
+        ax.set_ylabel("Bottom-hole pressure (psia)")
+        ax.grid(alpha=0.3, ls="--")
+        ax.legend(fontsize=7, ncol=2)
+        ax.set_title("VLP/IPR by test (squares: measured, circles: calculated)", fontsize=10)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+        return
+
+    # Adjust IPR
+    pi_entry = cur_ipr.model == "P.I. Entry"
+    opts = (["Reservoir pressure"] if pi_entry else ["Skin", "Reservoir pressure"])
+    what = st.radio("Adjust", opts, horizontal=True, key="inj_adj_what")
+    st.caption("For each test, the " + ("skin" if what == "Skin" else "reservoir pressure") + " at which the system "
+               "(tubing with the VLP multipliers at the test's injected fluid pressure) takes the measured rate. "
+               "Accept writes the mean of the selected tests to the IPR Data tab."
+               + (" P.I. Entry has no skin." if pi_entry else ""))
+    w_ = "skin" if what == "Skin" else "pr"
+    asig = tsig + (u_cur, p1c, p2c, isig, w_)
+    if ss.get("inj_adj", (None,))[0] != asig:
+        vals = []
+        with st.spinner("Adjusting..."):
+            for _, t in tests.iterrows():
+                f_ = (lambda t_: (lambda **kw: ipr_t(t_, **kw)))(t)
+                vals.append(winj.adjust_ipr(path, fl_, t, f_, w_, u_cur, t_inj, hc, p1c, p2c))
+        ss["inj_adj"] = (asig, vals)
+    vals = ss["inj_adj"][1]
+    lab = "Skin" if w_ == "skin" else "Reservoir pressure (psia)"
+    st.dataframe(pd.DataFrame({"Test": tests["label"], f"Measured rate ({qunit})": tests["q"], lab: vals})
+                 .style.format(precision=4, na_rep="not found"), hide_index=True, width="stretch")
+    pick = st.multiselect("Tests to average", tests["label"].tolist(), default=tests["label"].tolist(),
+                          key="inj_adj_pick")
+    sel_ = [v for l_, v in zip(tests["label"], vals) if l_ in pick and np.isfinite(v)]
+    if sel_:
+        mean_ = float(np.mean(sel_))
+        st.button(f"Accept {lab.split(' (')[0].lower()} = {mean_:.5g}", type="primary", on_click=accept_inj_ipr,
+                  args=("ipr_skin_inj" if w_ == "skin" else "ipr_pr", mean_))
+        if len(sel_) > 1 and w_ == "skin" and np.ptp(sel_) > 1:
+            st.caption("The skins differ from test to test: the near-well conditions are changing with time "
+                       "(cooling, scaling or plugging around an injector), as PROSPER's Tutorials 21 and 22 discuss.")
+
+
 with tabs[4]:
     st.header("VLP")
     o = ss.get("options")
@@ -4805,7 +5150,10 @@ with tabs[4]:
     if o is None or o.errors:
         st.info("Fix the configuration in the Options summary first.")
     elif o.is_injector:
-        st.info("VLP matching for injectors is not built yet - this tab covers producers.")
+        if not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
+            st.info("Complete the Equipment Data tab first (every section in its status table must be OK).")
+        else:
+            injector_vlp_match(o, eqd)
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
         st.info("Complete the Equipment Data tab first (every section in its status table must be OK).")
     else:
@@ -5538,6 +5886,8 @@ def comp_panel():
 
 CALC_MODES = ["System analysis (IPR + VLP)", "Gradient traverse", "Lift curves (VFP tables)", "Choke performance"]
 QL_MODE = "Gas lift QuickLook"
+ESPQL_MODE = "ESP QuickLook"
+HSPQL_MODE = "HSP QuickLook"
 EQC_MODE = "Gas lift equilibrium curve"
 
 
@@ -6099,6 +6449,256 @@ def equilibrium_mode(col, fluid, eqd, o, base, corr, p1, p2, gl, ipr_curve):
                            "equilibrium_curve.csv")
 
 
+def _espql_transfer_wear(w):
+    put("espq_wear", float(round(w, 4)))
+    ss["espql_wear_done"] = float(round(w, 4))
+
+
+def esp_quicklook_mode(col, fluid, eqd, o, corr, p1, p2, esp_eq, ipr_curve):
+    """Matching | QuickLook | ESP (PROSPER Tutorial 34): top-down and bottom-up gradients of an ESP well test."""
+    hc = eqd["heat_capacities"]
+    if not esp_eq:
+        col.info("Enter the ESP in the Equipment Data tab first.")
+        return
+    with col:
+        st.markdown("**Well test**")
+        c = st.columns(3)
+        thp = num(c[0], "Tubing head pressure (psia)", "eql_thp", 289.7, 14.7, 2e4)
+        q = num(c[1], "Liquid rate (STB/d)", "eql_q", 7198.0, 1.0, 1e6)
+        wc = num(c[2], "Water cut (%)", "eql_wc", 74.0, 0.0, 99.9)
+        c = st.columns(3)
+        gor = num(c[0], "Produced GOR (scf/STB)", "eql_gor", 800.0, 0.0, 1e6)
+        pres = num(c[1], "Static bottom hole pressure (psia)", "eql_pres", float(ipr_curve.pr), 14.7, 2e4,
+                   help="The reservoir pressure the IPR is rebuilt at for the bottom-up gradient.")
+        wear = num(c[2], "Pump wear factor (fraction)", "eql_wear", float(esp_eq.get("wear", 0.0)), -0.5, 0.9, None,
+                   "%.4g", help="Defaults to the Equipment tab's; Transfer wear factor writes a new one back.")
+        st.markdown("**Downhole measurements**")
+        c = st.columns(3)
+        gtxt = c[0].text_input("Gauges: MD ft = pressure psia, separated by ';'", key="eql_gauges",
+                               **dflt("eql_gauges", value="6250 = 1971.696"))
+        pip_m = num(c[1], "Pump intake pressure (psia, 0 = none)", "eql_pip", 1728.7, 0.0, 2e4)
+        pdp_m = num(c[2], "Pump discharge pressure (psia, 0 = none)", "eql_pdp", 2826.7, 0.0, 2e4)
+        gauges = []
+        for part in [x for x in gtxt.split(";") if x.strip()]:
+            try:
+                a_, b_ = part.split("=")
+                gauges.append((float(a_), float(b_)))
+            except ValueError:
+                st.error(f"Could not read gauge entry '{part.strip()}'.")
+        st.markdown("**Surface electrical data**")
+        c = st.columns(3)
+        amps = num(c[0], "Current (A, 0 = none)", "eql_amps", 110.0, 0.0, 1e4)
+        volts = num(c[1], "Surface voltage (V, 0 = none)", "eql_volts", 1970.0, 0.0, 1e5)
+        power = num(c[2], "Power (hp, 0 = none)", "eql_power", 325.0, 0.0, 1e5)
+        st.caption(f"Pump from the Equipment tab: {esp_eq.get('stages')} stages at {esp_eq['pump_md']:,.0f} ft MD, "
+                   f"{esp_eq['freq']:g} Hz, gas separator {100 * esp_eq.get('sep', 0.0):g} %. Correlation and "
+                   "parameters from the left.")
+        go = st.button("Calculate QuickLook", type="primary", key="eql_go")
+    sig = (thp, q, wc, gor, pres, wear, tuple(gauges), pip_m, pdp_m, amps, volts, power, corr, p1, p2,
+           repr(sorted((k, str(v)) for k, v in esp_eq.items())), float(ipr_curve.pr))
+    if go:
+        try:
+            path = vlp_path(eqd, o.flow_type, tuple([esp_eq["pump_md"]] + [m for m, _ in gauges]))
+            ch = {"wc": wc / 100.0, "gor": gor}
+            try:
+                curve = rebuild_ipr({**ch, "pr": pres})
+                pres_for = lambda pr_: (lambda qq, c_=rebuild_ipr({**ch, "pr": pr_}): float(wgl.ipr_pwf(c_, qq)))
+            except ValueError:
+                curve, pres_for = ipr_curve, None
+                st.warning("The IPR model cannot be rebuilt at the static pressure - the IPR tab curve is used and "
+                           "the reservoir pressure estimate shifts it by the pressure difference.")
+            esp_ = {**esp_eq, "wear": wear}
+            inp = weql.ESPQuickLookInput(thp, q, wc / 100.0, gor, pres, tuple(gauges), pip_m or None, pdp_m or None,
+                                         amps or None, volts or None, power or None)
+            with st.spinner("Calculating..."):
+                res = weql.esp_quicklook(path, fluid, lambda qq: float(wgl.ipr_pwf(curve, qq)), inp, esp_, corr, p1,
+                                         p2, float(val("eq_u", eqd.get("u_geo", 8.0))), hc, pres_for)
+            ss["eql_res"] = {"sig": sig, "res": res, "path": path, "gauges": gauges, "pip": pip_m, "pdp": pdp_m,
+                             "pump_md": esp_eq["pump_md"]}
+        except (ValueError, RuntimeError) as e:
+            st.error(f"ESP QuickLook failed: {e}")
+    out = ss.get("eql_res")
+    if not out:
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate QuickLook to update.")
+    res = out["res"]
+    for n_ in res.notes:
+        st.warning(n_)
+    cc = st.columns([1.3, 1])
+    with cc[0]:
+        pr_ = res.profile
+        fig, ax = plt.subplots(figsize=(8.0, 7.0))
+        for sec_, ls_ in (("Tubing", "-"), ("Casing", "-")):
+            d_ = pr_[pr_["Section"] == sec_]
+            ax.plot(d_["Top down (psia)"], d_["MD (ft)"], color="#ef6c00", lw=1.8, ls=ls_,
+                    label="Fixed top node pressure (top down)" if sec_ == "Tubing" else None)
+            ax.plot(d_["Bottom up (psia)"], d_["MD (ft)"], color="#ad1457", lw=1.5, ls="--",
+                    label="From static BHP (bottom up)" if sec_ == "Tubing" else None)
+        pm = out["pump_md"]
+        td_ = res.summary
+        ax.plot([td_["Top down: pump intake (psia)"], td_["Top down: pump discharge (psia)"]], [pm, pm], color="#ef6c00", lw=1.2)
+        ax.plot([td_["Bottom up: pump intake (psia)"], td_["Bottom up: pump discharge (psia)"]], [pm, pm], color="#ad1457",
+                lw=1.0, ls="--")
+        meas = [(p_, m_) for m_, p_ in out["gauges"]] + [(p_, pm) for p_ in (out["pip"], out["pdp"]) if p_]
+        if meas:
+            ax.plot([a for a, _ in meas], [b for _, b in meas], "s", color=wplt.INK, ms=7, label="Downhole data")
+        ax.invert_yaxis(); ax.set_xlabel("Pressure (psia)"); ax.set_ylabel("Measured depth (ft)")
+        ax.grid(alpha=0.3); ax.legend(fontsize=8)
+        ax.set_title("ESP QuickLook", fontsize=10)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+    with cc[1]:
+        st.markdown("**QuickLook results**")
+        st.dataframe(pd.DataFrame([(k_, _fmt_result(v_) if isinstance(v_, (int, float, np.floating)) else str(v_))
+                                   for k_, v_ in res.summary.items()], columns=["Result", "Value"]),
+                     hide_index=True, width="stretch", height=560)
+        w_ = res.summary.get("Wear factor for the measured intake")
+        if w_ is not None and np.isfinite(w_):
+            st.button(f"Transfer wear factor {w_:.4f} to the Equipment tab", on_click=_espql_transfer_wear, args=(w_,),
+                      help="PROSPER's tutorial takes 1 - measured/calculated dP as a first guess; this is the wear "
+                           "factor with which the pump takes the measured discharge back to the measured intake.")
+        if ss.get("espql_wear_done") is not None:
+            st.success(f"Wear factor {ss['espql_wear_done']:g} written to the ESP in the Equipment tab.")
+    if len(res.points):
+        st.markdown("**Measured against calculated**")
+        st.dataframe(res.points.style.format(precision=1, na_rep="—"), hide_index=True, width="stretch")
+    with st.expander("Gradients (top down and bottom up)"):
+        st.dataframe(res.profile.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.caption("Fixed top node pressure: tubing from the measured THP down to the pump discharge, intake from the "
+               "pump curve, casing to the bottom node. From static BHP: IPR pressure at the test rate (IPR rebuilt at "
+               "the static pressure), casing up to the intake, pump gain, tubing up to the wellhead. If the top-down "
+               "gradient passes through the gauge and discharge but not the intake, the pump is worn (wear factor); "
+               "if the two gradients differ below the pump, the reservoir pressure has changed - use the reservoir "
+               "pressure estimate as the new static pressure.")
+
+
+def _hspql_transfer_wear(w):
+    put("hspq_wear", float(round(w, 4)))
+    ss["hspql_wear_done"] = float(round(w, 4))
+
+
+def hsp_quicklook_mode(col, fluid, eqd, o, corr, p1, p2, hsp_eq, ipr_curve):
+    """Matching | QuickLook | HSP (PROSPER Tutorial 35): top-down and bottom-up gradients of an HSP well test."""
+    hc = eqd["heat_capacities"]
+    if not hsp_eq:
+        col.info("Enter the hydraulic submersible pump in the Equipment Data tab first.")
+        return
+    with col:
+        st.markdown("**Well test**")
+        c = st.columns(3)
+        thp = num(c[0], "Tubing head pressure (psia)", "hql_thp", 514.7, 14.7, 2e4)
+        q = num(c[1], "Liquid rate (STB/d)", "hql_q", 5770.0, 1.0, 1e6)
+        wc = num(c[2], "Water cut (%)", "hql_wc", 24.0, 0.0, 99.9)
+        c = st.columns(3)
+        gor = num(c[0], "Produced GOR (scf/STB)", "hql_gor", 800.0, 0.0, 1e6)
+        pres = num(c[1], "Static bottom hole pressure (psia)", "hql_pres", float(ipr_curve.pr), 14.7, 2e4,
+                   help="The reservoir pressure the IPR is rebuilt at for the bottom-up gradient.")
+        wear = num(c[2], "Pump wear factor (fraction)", "hql_wear", float(hsp_eq.get("wear", 0.0)), -0.5, 0.9, None,
+                   "%.4g", help="Defaults to the Equipment tab's; Transfer wear factor writes a new one back.")
+        c = st.columns(3)
+        speed = num(c[0], "Pump speed (rpm)", "hql_speed", float(hsp_eq.get("speed", 7500.0)), 100.0, 30000.0)
+        qpf = num(c[1], "Power fluid rate (STB/d)", "hql_qpf", 6308.0, 1.0, 1e6)
+        ppf = num(c[2], "Power fluid surface back pressure (psia, 0 = none)", "hql_ppf", 2086.7, 0.0, 2e4)
+        st.markdown("**Downhole measurements**")
+        c = st.columns(3)
+        gtxt = c[0].text_input("Gauges: MD ft = pressure psia, separated by ';'", key="hql_gauges",
+                               **dflt("hql_gauges", value=""))
+        pip_m = num(c[1], "Pump intake pressure (psia, 0 = none)", "hql_pip", 2589.7, 0.0, 2e4)
+        pdp_m = num(c[2], "Pump discharge pressure (psia, 0 = none)", "hql_pdp", 3219.7, 0.0, 2e4)
+        gauges = []
+        for part in [x for x in gtxt.split(";") if x.strip()]:
+            try:
+                a_, b_ = part.split("=")
+                gauges.append((float(a_), float(b_)))
+            except ValueError:
+                st.error(f"Could not read gauge entry '{part.strip()}'.")
+        st.caption(f"Pump from the Equipment tab: {hsp_eq['pump']}, {hsp_eq['stages']} stages at "
+                   f"{hsp_eq['pump_md']:,.0f} ft MD; turbine {hsp_eq['turbine']}, {hsp_eq['turbine_stages']} stages. "
+                   "Pump speed entered (PROSPER's 'With Pump Speed Entered'). Correlation and parameters from the left.")
+        go = st.button("Calculate QuickLook", type="primary", key="hql_go")
+    sig = (thp, q, wc, gor, pres, wear, speed, qpf, ppf, tuple(gauges), pip_m, pdp_m, corr, p1, p2,
+           repr(sorted((k, str(v)) for k, v in hsp_eq.items())), float(ipr_curve.pr))
+    if go:
+        try:
+            path = vlp_path(eqd, o.flow_type, tuple([hsp_eq["pump_md"]] + [m for m, _ in gauges]))
+            ch = {"wc": wc / 100.0, "gor": gor}
+            try:
+                curve = rebuild_ipr({**ch, "pr": pres})
+                pres_for = lambda pr_: (lambda qq, c_=rebuild_ipr({**ch, "pr": pr_}): float(wgl.ipr_pwf(c_, qq)))
+            except ValueError:
+                curve, pres_for = ipr_curve, None
+                st.warning("The IPR model cannot be rebuilt at the static pressure - the IPR tab curve is used and "
+                           "the reservoir pressure estimate shifts it by the pressure difference.")
+            inst = _hsp_installed(hsp_eq, wear=wear, speed=speed)
+            inp = whql.HSPQuickLookInput(thp, q, wc / 100.0, gor, pres, speed, qpf, ppf or None, tuple(gauges),
+                                         pip_m or None, pdp_m or None)
+            with st.spinner("Calculating..."):
+                res = whql.hsp_quicklook(path, fluid, lambda qq: float(wgl.ipr_pwf(curve, qq)), inp, inst, corr, p1,
+                                         p2, float(val("eq_u", eqd.get("u_geo", 8.0))), hc, pres_for)
+            ss["hql_res"] = {"sig": sig, "res": res, "gauges": gauges, "pip": pip_m, "pdp": pdp_m,
+                             "pump_md": hsp_eq["pump_md"]}
+        except (ValueError, RuntimeError, KeyError) as e:
+            st.error(f"HSP QuickLook failed: {e}")
+    out = ss.get("hql_res")
+    if not out:
+        return
+    if out["sig"] != sig:
+        st.info("Inputs have changed since the last calculation - press Calculate QuickLook to update.")
+    res = out["res"]
+    for n_ in res.notes:
+        st.warning(n_)
+    cc = st.columns([1.3, 1])
+    with cc[0]:
+        pr_ = res.profile
+        fig, ax = plt.subplots(figsize=(8.0, 7.0))
+        for j_, sec_ in enumerate(pr_["Section"].unique()):
+            d_ = pr_[pr_["Section"] == sec_]
+            ax.plot(d_["Top down (psia)"], d_["MD (ft)"], color="#ef6c00", lw=1.8,
+                    label="Fixed top node pressure (top down)" if j_ == 0 else None)
+            ax.plot(d_["Bottom up (psia)"], d_["MD (ft)"], color="#ad1457", lw=1.5, ls="--",
+                    label="From static BHP (bottom up)" if j_ == 0 else None)
+        pm = out["pump_md"]
+        td_ = res.summary
+        ax.plot([td_["Top down: pump intake (psia)"], td_["Top down: pump discharge (psia)"]], [pm, pm],
+                color="#ef6c00", lw=1.2)
+        ax.plot([td_["Bottom up: pump intake (psia)"], td_["Bottom up: pump discharge (psia)"]], [pm, pm],
+                color="#ad1457", lw=1.0, ls="--")
+        meas = [(p_, m_) for m_, p_ in out["gauges"]] + [(p_, pm) for p_ in (out["pip"], out["pdp"]) if p_]
+        if meas:
+            ax.plot([a for a, _ in meas], [b for _, b in meas], "s", color=wplt.INK, ms=7, label="Downhole data")
+        ax.invert_yaxis(); ax.set_xlabel("Pressure (psia)"); ax.set_ylabel("Measured depth (ft)")
+        ax.grid(alpha=0.3); ax.legend(fontsize=8)
+        ax.set_title("HSP QuickLook", fontsize=10)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+    with cc[1]:
+        st.markdown("**QuickLook results**")
+        st.dataframe(pd.DataFrame([(k_, _fmt_result(v_) if isinstance(v_, (int, float, np.floating)) else str(v_))
+                                   for k_, v_ in res.summary.items()], columns=["Result", "Value"]),
+                     hide_index=True, width="stretch", height=560)
+        w_ = res.summary.get("Wear factor for the measured intake")
+        if w_ is not None and np.isfinite(w_):
+            st.button(f"Transfer wear factor {w_:.4f} to the Equipment tab", on_click=_hspql_transfer_wear,
+                      args=(w_,), key="hql_transfer",
+                      help="PROSPER's tutorial takes 1 - measured/calculated dP as a first guess (0.09 in Tutorial "
+                           "35); this is the wear factor with which the pump takes the measured intake to the "
+                           "measured discharge.")
+        if ss.get("hspql_wear_done") is not None:
+            st.success(f"Wear factor {ss['hspql_wear_done']:g} written to the HSP in the Equipment tab.")
+    if len(res.points):
+        st.markdown("**Measured against calculated**")
+        st.dataframe(res.points.style.format(precision=1, na_rep="—"), hide_index=True, width="stretch")
+    with st.expander("Gradients (top down and bottom up)"):
+        st.dataframe(res.profile.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
+    st.caption("Fixed top node pressure: tubing (production + power fluid) from the measured THP down to the pump "
+               "discharge, intake from the pump curve, casing to the bottom node. From static BHP: IPR pressure at "
+               "the test rate (IPR rebuilt at the static pressure), casing up to the intake, pump gain, tubing up to "
+               "the wellhead. If the top-down gradient passes through the discharge but not the intake, the pump is "
+               "worn (wear factor); if the two differ below the pump, the reservoir pressure has changed - use the "
+               "reservoir pressure estimate as the new static pressure.")
+
+
 def quicklook_mode(col, fluid, eqd, o, corr, p1, p2, gl, ipr_curve):
     """Matching | QuickLook for a gas-lifted well (PROSPER User Guide 2.11.5; Tutorial 33a)."""
     G = 14.696
@@ -6153,11 +6753,19 @@ def quicklook_mode(col, fluid, eqd, o, corr, p1, p2, gl, ipr_curve):
         multi = st.toggle("Multipoint QuickLook", key="ql_multi", disabled=not valves,
                           help="Top down, each valve passes the gas the valve model gives at the measured pressures; "
                                "the lift gas left below it is reduced.")
+        vmodel = sel(st, "Valve model (multipoint)", ["Throttling", "Thornhill-Craver"], "ql_vmodel",
+                     disabled=not multi,
+                     help="Throttling: this tool's rule fitted to PROSPER's multipoint VLP. Thornhill-Craver: the full "
+                          "port once the casing is above the closing pressure (PROSPER's model type of that name). "
+                          "PROSPER's Acuna and Nieberding models are not available (unpublished).")
+        if multi and vmodel == "Thornhill-Craver":
+            valves = tuple(dataclasses.replace(v_, model="Thornhill-Craver") if v_.kind != "Orifice" else v_
+                           for v_ in valves)
         st.caption("Uses the gas lift data of the Equipment tab (lift gas, annulus friction, valves) and the "
                    "correlation and parameters on the left; the other inputs on the left are not used.")
         go = st.button("Calculate QuickLook", type="primary")
     sig = (thp, tht, qliq, wc, qgt, qgi, chp, inj, port, derate, use_static, static, fit_u, tuple(gauges), multi,
-           corr, p1, p2, repr(gl), float(ipr_curve.pr))
+           corr, p1, p2, repr(gl), float(ipr_curve.pr), repr(valves))
     if go:
         try:
             if qgi >= qgt:
@@ -6500,6 +7108,29 @@ def srp_torque_plot(res):
     return fig
 
 
+def srp_card_reference():
+    """Dynamometer card troubleshooting reference (PROSPER Tutorial 36)."""
+    with st.expander("Dynamometer card troubleshooting - typical pump card shapes (Tutorial 36)"):
+        st.caption("Idealised downhole (pump) cards: load against plunger position. A - bottom of the stroke, "
+                   "B - fluid load picked up, C - top of the stroke, D - fluid load released. Fo is the differential "
+                   "(fluid) load on the plunger, MPT the maximum plunger travel, EPT the effective plunger travel "
+                   "(the part that moves fluid). Unanchored tubing stretches as the fluid load moves between "
+                   "tubing and rods, which slopes the sides of the card. Real cards often combine several effects: "
+                   "use them with what is known about the well.")
+        for i, c in enumerate(wsrpc.reference_cards()):
+            if i:
+                st.divider()
+            cc = st.columns([1, 1.15, 1], vertical_alignment="center")
+            with cc[0]:
+                st.pyplot(wplt.plot_card_reference(c.anchored, title="Anchored tubing"), clear_figure=True)
+            with cc[1]:
+                st.markdown(f"**{c.title}**")
+                st.write(c.description)
+                st.caption("Look for: " + c.look_for)
+            with cc[2]:
+                st.pyplot(wplt.plot_card_reference(c.unanchored, title="Unanchored tubing"), clear_figure=True)
+
+
 def srp_tab(o, eqd, ipr_curve):
     """Design | Sucker Rod Pump - after PROSPER (Tutorial 28)."""
     st.caption("Sucker rod pump design after PROSPER Design | Sucker Rod Pump: the rod string (API RP 11L Table 4.1) "
@@ -6508,6 +7139,7 @@ def srp_tab(o, eqd, ipr_curve):
                "stresses (modified Goodman), counterbalance, torque and powers follow. The damping factor is "
                "estimated as PROSPER does (rod friction power one eighth of the rod weight times the mean rod speed, Gibbs' damping) "
                "or entered.")
+    srp_card_reference()
     top_, secs_, pts_ = eqd["downhole"]
     path = vlp_path(eqd, "tubing", ())
     tvd_at = lambda md: float(np.interp(md, path.md, path.tvd))
@@ -6629,6 +7261,7 @@ def srp_system_tab(o, eqd, ipr_curve):
                "S + Ep - Fo L / (E A) with Fo = Ap (Pdis - PIP); the pump delivers displacement x Ev x the liquid "
                "fraction of its intake volume. The solution is where the pump rate equals the inflow rate. (PROSPER "
                "has no gradient traverse for rod pumps.)")
+    srp_card_reference()
     gmd, gt = eqd["geothermal"]
     top_, secs_, pts_ = eqd["downhole"]
     tub = secs_[secs_["Type"] == "Tubing"]
@@ -7404,7 +8037,7 @@ with tabs[5]:
     JET_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "jet")
     PCP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("pcp_motor", "pcp_rod"))
     HSP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "hsp")
-    _modes = CALC_MODES + ([QL_MODE] if GL_ON else []) + \
+    _modes = CALC_MODES + ([QL_MODE] if GL_ON else []) + ([ESPQL_MODE] if ESP_ON else []) + ([HSPQL_MODE] if HSP_ON else []) + \
         ([EQC_MODE] if GL_ON and getattr(_o, "artificial_lift", "") == "gas_lift" else [])
     if val("calc_mode") not in _modes:
         put("calc_mode", CALC_MODES[0])
@@ -7412,6 +8045,8 @@ with tabs[5]:
     SYS = mode == CALC_MODES[0]
     CHOKE = mode == CALC_MODES[3]
     QLK = mode == QL_MODE
+    EQL = mode == ESPQL_MODE
+    HQL = mode == HSPQL_MODE
     EQC = mode == EQC_MODE
     gl_setup = ss.get("gl_setup") if GL_ON else None
     st.subheader(mode)
@@ -7428,7 +8063,7 @@ with tabs[5]:
                    else "Complete the Equipment Data tab first.")
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
         blocker = "Complete the Equipment Data tab first."
-    elif (SYS or QLK or EQC) and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
+    elif (SYS or QLK or EQC or EQL or HQL) and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
         blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
     elif SRP_ON and mode == CALC_MODES[1]:
         blocker = ("PROSPER has no gradient traverse for a sucker rod pump well: use System analysis (solution at the "
@@ -7922,6 +8557,10 @@ with tabs[5]:
                                                "system_analysis.csv")
             elif QLK:
                 quicklook_mode(right, fluid, eqd, o, corr, p1, p2, gl_setup, ipr_curve)
+            elif EQL:
+                esp_quicklook_mode(right, fluid, eqd, o, corr, p1, p2, ss.get("esp_equipment"), ipr_curve)
+            elif HQL:
+                hsp_quicklook_mode(right, fluid, eqd, o, corr, p1, p2, ss.get("hsp_equipment"), ipr_curve)
             elif EQC:
                 equilibrium_mode(right, fluid, eqd, o, base, corr, p1, p2, gl_setup, ipr_curve)
             elif mode == CALC_MODES[1]:

@@ -142,6 +142,47 @@ def md_at_tvd(path, tvd):
 
 
 # ================================================================ gas-lifted traverse
+class GasLiftedFluid:
+    """A gas-well fluid with lift gas injected (gas lifted gas well, PROSPER Tutorial 47): case key qgi_lift (MMscf/d
+    of lift gas). The lift gas joins the gas phase as a separate real-gas stream (its own gravity and Z, Standing's
+    natural-gas pseudo-criticals); density by mass, viscosity by volume weighting; the produced fluid's state is
+    unchanged. Without qgi_lift (or 0) it is the base fluid."""
+
+    def __init__(self, base, gas: "LiftGas"):
+        self.base, self.gas = base, gas
+        self.kind = base.kind
+        for a in ("inp", "rinp", "m"):
+            if hasattr(base, a):
+                setattr(self, a, getattr(base, a))
+
+    def state(self, p, t, case):
+        st = self.base.state(p, t, case)
+        qgi = case.get("qgi_lift")
+        if qgi is None:
+            return st
+        qgi = np.asarray(qgi, float)
+        if not np.any(qgi > 0):
+            return st
+        _, bg, rho_i, mu_i = bo.gas_props(self.gas.inp, p, t)
+        q_i = qgi * 1e6 * bg / 86400.0                          # ft3/s at p, t
+        qg = st["qg"] + q_i
+        w = np.where(qg > 0, q_i / np.maximum(qg, 1e-15), 0.0)
+        out = dict(st)
+        out["qg"] = qg
+        out["rho_g"] = (st["rho_g"] * st["qg"] + rho_i * q_i) / np.maximum(qg, 1e-15)
+        out["mu_g"] = (1 - w) * st["mu_g"] + w * mu_i
+        return out
+
+    def mass_cp(self, case, hc: HeatCapacities):
+        w, cp = self.base.mass_cp(case, hc)
+        qgi = case.get("qgi_lift")
+        if qgi is None:
+            return w, cp
+        wg = np.asarray(qgi, float) * 1e6 * self.gas.rho_sc / 24.0
+        wt = w + wg
+        return wt, (w * cp + wg * hc.gas) / np.maximum(wt, 1e-12)
+
+
 def lifted_case(case, qgi):
     """Case dict above the injection point: formation GOR plus the lift gas per STB of oil."""
     q, wc = np.asarray(case["q"], float), np.clip(np.asarray(case["wc"], float), 0, 0.9999)
@@ -206,7 +247,13 @@ def _lifted_traverse(path: V.FlowPath, fluid, top_p, case, qgi, correlation="hag
     fix = case.pop("_fix", None)
     nc, n = top.size, len(path.md)
     corr = CORRELATIONS[correlation]
-    lift = lifted_case(case, qg)
+    if fluid.kind == "gas":                   # gas lifted gas well: the lift gas is its own stream (GasLiftedFluid)
+        if not isinstance(fluid, GasLiftedFluid):
+            fluid = GasLiftedFluid(fluid, LiftGas(sg=gas_sg))
+        case["qgi_lift"] = np.zeros(nc)
+        lift = {**case, "qgi_lift": np.asarray(qg, float) * np.ones(nc)}
+    else:
+        lift = lifted_case(case, qg)
     max_md = path.md[-1] if max_md is None else min(float(max_md), path.md[-1])
     pc_fn = pc if callable(pc) else None
     if pc is not None and pc_fn is None:

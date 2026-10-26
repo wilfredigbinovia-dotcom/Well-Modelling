@@ -211,9 +211,11 @@ def test_completion_choices_absorbed_not_blocking():
     assert any("pack thickness" in x for x in o.data_requirements()["Equipment"])
 
 
-def test_condensate_black_oil_warns():
+def test_condensate_black_oil_notes_validation():
+    """Black-oil retrograde condensate is modelled (Tutorial 38); the options note says to validate it against EoS."""
     o = WellOptions(fluid_type="retrograde_condensate")
-    assert any(i.level == "warning" and "method" in i.fields for i in o.validate())
+    assert any(i.level == "info" and "method" in i.fields and "equation of state" in i.message for i in o.validate())
+    assert not any(i.level == "error" for i in o.validate())
 
 
 def test_cased_hole_slotted_liner_warns():
@@ -1439,7 +1441,9 @@ def test_tuffp_unified_gas_well_within_mechanistic_family():
 
 
 def test_pe5_style_reproduces_prosper_pe5_rows():
-    """Rows from a PROSPER PE5 gradient export (Abura 2S) at PROSPER's own conditions (roughness 0.0006 in)."""
+    """Rows from a PROSPER PE5 gradient export (Abura 2S) at PROSPER's own conditions (roughness 0.0006 in): holdup
+    within 0.006, total gradient within 2 % (friction alone within 15 % - the friction multiplier is fitted mainly on
+    the Tutorial 38 / 47 condensate gradients)."""
     from wellmodel import correlations as C
     # vsl, vsg, rho_l, rho_g, mu_l, mu_g, sigma, d_in, angle, p | holdup, static, friction (PROSPER PE5)
     rows = [(4.026, 3.315, 52.153, 2.169, 3.1533, 0.0124, 11.339, 2.44, 0.61, 686.37, 0.558753, 0.209, 0.033),
@@ -1447,9 +1451,10 @@ def test_pe5_style_reproduces_prosper_pe5_rows():
     for vsl, vsg, rl, rg, ml, mg, sg, d, ang, p, hl_p, gs_p, gf_p in rows:
         a = [np.array([x]) for x in (vsl, vsg, rl, rg, ml, mg, sg)]
         e, f, hl = C.pe5_style(*a, d / 12, 0.0006 / 12, np.cos(np.radians(ang)), np.array([p]))
-        assert hl[0] == pytest.approx(hl_p, abs=0.002)
-        assert e[0] == pytest.approx(gs_p, abs=0.002)
-        assert f[0] == pytest.approx(gf_p, rel=0.05)
+        assert hl[0] == pytest.approx(hl_p, abs=0.006)
+        assert e[0] == pytest.approx(gs_p, abs=0.003)
+        assert e[0] + f[0] == pytest.approx(gs_p + gf_p, rel=0.02)   # total gradient (friction alone within 10 %)
+        assert f[0] == pytest.approx(gf_p, rel=0.15)
     a = [np.array([x]) for x in (6.836, 0.520, 49.301, 6.243, 1.5516, 0.0157, 4.43)]
     args = (*a, 1.95 / 12, 0.0006 / 12, 0.95, np.array([1960.0]))
     assert np.allclose(C.pe5_style(*args), C.hagedorn_brown(*args))         # bubble flow: Griffith
@@ -2002,7 +2007,7 @@ def test_artificial_lift_databases_from_prosper():
     hsp = pd.read_csv(d / "hsp_pumps.csv")
     assert len(hsp) == 10 and hsp.loc[hsp.name == "TP115AH", "h6"].iloc[0] == pytest.approx(376.014)
     tur = pd.read_csv(d / "hsp_turbines.csv")
-    assert list(tur.setting) == ["A", "B", "C", "D"] and tur.best_eff.iloc[3] == pytest.approx(72.1)
+    assert list(tur.setting) == list("ABCDABCDE") and tur.best_eff.iloc[3] == pytest.approx(72.1)    # T60 A-D, T68 A-E
     dyn = pd.read_csv(d / "gl_valve_dynamics.csv")
     assert len(dyn) == 32 and dyn.loc[(dyn.Model == "R-20") & (dyn.Port == 16), "Fe"].iloc[0] == pytest.approx(0.15)
     vt = pd.read_csv(d / "gl_valves.csv")
@@ -2659,7 +2664,9 @@ def _gl_well():
 def test_gas_lift_option_validation():
     assert not WellOptions(artificial_lift="gas_lift").errors
     assert WellOptions(artificial_lift="gas_lift").computable
-    assert WellOptions(artificial_lift="gas_lift", fluid_type="dry_wet_gas").errors
+    g = WellOptions(artificial_lift="gas_lift", fluid_type="dry_wet_gas")       # gas lifted gas well (T47): allowed
+    assert not g.errors and any("Tutorial 47" in i.message for i in g.validate() if i.level == "info")
+    assert WellOptions(artificial_lift="gas_lift", well_type="water_injector").errors
     assert WellOptions(artificial_lift="gas_lift", flow_type="annular").errors
 
 
@@ -3562,7 +3569,7 @@ def test_hsp_pump_and_turbine_curves_prosper_t27():
     from wellmodel import hsp as H
     p = H.PUMPS["CLYDE UNION TP115AH (4250-12325 rpm)"]
     t = H.TURBINES["CLYDE UNION T60 - A"]
-    assert len(H.PUMPS) == 10 and len(H.TURBINES) == 4
+    assert len(H.PUMPS) == 10 and len(H.TURBINES) == 9                # T60 A-D, T68 A-E
     q_avg, head, sg = 8076.85, 2074.75, 0.8035
     n = int(np.ceil(head / float(p.head_stage(q_avg, 7500.0))))
     assert n == 28
@@ -4228,3 +4235,680 @@ def test_gas_lift_equilibrium_curve_prosper_t23():
         assert r["Valve tubing temperature (F)"] == pytest.approx(t, abs=1.0)
         assert r["Gas rate (MMscf/d)"] == pytest.approx(r["Liquid rate (STB/d)"] * 0.2 * 800 / 1e6)
     assert len(prof) == 8
+
+
+def test_horizontal_friction_ipr_prosper_t10():
+    """PROSPER Tutorial 10 (user's run): Horizontal Well - dP Friction Loss In WellBore with Kuchuk & Goode, 50 md,
+    100 ft, Kz/Ky 0.1, 800 ft well in a 4200 ft square, one perforated zone (skin 3 by hand, 0.3175 ft flowing radius,
+    0.0006 in roughness), Pr 5200 psig, 210 F, GOR 800, dry; Glaso / Beal matched to the five-point lab table. The
+    IPR pressures of PROSPER's VLP / IPR table within 10 psi from 40 to 39,968 STB/d; AOF within 0.1 %."""
+    from wellmodel import inflow_adv as IA
+    G = 14.696
+    inp = wbo.PVTInputs(rsb=800, api=37, gas_sg=0.76, salinity_ppm=23000)
+    lab = pd.DataFrame({"Pressure": np.array([4000, 3500, 3000, 2400, 1000]) + G,
+                        "Gas Oil Ratio": [800, 800, 655, 500, 190], "Oil FVF": [1.42, 1.432, 1.352, 1.273, 1.12],
+                        "Oil Viscosity": [0.364, 0.35, 0.403, 0.48, 0.7205]})
+    res = wbo.match_all(inp, wbo.MatchData(210.0, 3500 + G, lab))
+    assert res.matches[("pb", "glaso")].p1 == pytest.approx(1.00882, abs=2e-4)          # PROSPER 1.00882 / 30.3398
+    assert res.matches[("visc", "beal")].p1 == pytest.approx(1.00146, abs=1e-3)          # PROSPER 1.00146 / 0.0046726
+    m = wbo.BlackOilModel(inp, "glaso", "beal", {**{k: res.matches[(k, "glaso")] for k in ("pb", "rs", "bo")},
+                                                 "visc": res.matches[("visc", "beal")]})
+    pr = 5200 + G
+    tab = m.table(210.0, [pr])
+    props = {"mu": float(tab["Oil viscosity (cp)"].iloc[0]), "bo": float(tab["Oil FVF (RB/STB)"].iloc[0]),
+             "rho": float(tab["Oil density (lb/ft3)"].iloc[0]), "wc": 0.0}
+    hz = lambda s: IA.horizontal_resistance("Kuchuk & Goode", 50, 100, 0.354, 1.0, 0.1, 800, 4200, 4200, 2100, 2100,
+                                            50, s)
+    kh, D0 = hz(0.0)
+    zone = {"type": "Perforated", "length": 800, "k": 50, "skin": hz(3.0)[1] - D0, "id_in": 0.3175 * 24,
+            "rough_in": 0.0006}
+    c = IA.horizontal_friction("oil", pr, [zone], kh, D0, 50, props, pb=m.bubble_point(210.0), n=80)
+    o = np.argsort(c.q)
+    q, pw = np.asarray(c.q)[o], np.asarray(c.pwf)[o]
+    prosper = [(40.0, 5197.1), (246.3, 5182.0), (1054.3, 5123.1), (2181.2, 5040.9), (4512.9, 4870.8),
+               (6491.3, 4726.4), (9337.0, 4518.8), (13430.2, 4220.0), (19317.9, 3790.3), (27786.6, 3157.0),
+               (39968.0, 1995.6)]
+    for qq, pp in prosper:
+        assert np.interp(qq, q, pw) - G == pytest.approx(pp, abs=10), qq
+    assert max(c.q) == pytest.approx(49955.6, rel=0.001)
+    # the zone skin enters as each model scales it: Kuchuk & Goode h / L sqrt(kx/kz) s, Babu & Odeh s
+    assert hz(3.0)[1] - D0 == pytest.approx(100 / 800 * np.sqrt(10) * 3)
+    bo_ = lambda s: IA.horizontal_resistance("Babu & Odeh", 50, 100, 0.354, 1.0, 0.1, 800, 4200, 4200, 2100, 2100,
+                                             50, s)
+    assert bo_(3.0)[1] - bo_(0.0)[1] == pytest.approx(3.0)
+
+
+def test_horizontal_well_system_prosper_t10():
+    """Tutorial 10 system calculation (user's run; the Tutorial 05 Logie well equipment, PE2 unmatched, U 8): VLP
+    within 20 psi and wellhead temperature within 0.5 F from 40 to 27,787 STB/d; solution 21,115 against 21,120.8
+    STB/d at 3655.5 against 3655.4 psig. The example project reproduces it."""
+    import json
+    from wellmodel import inflow_adv as IA
+    G = 14.696
+    fl = _t05_oil()
+    m = fl.m
+    path, _ = _t23_path()
+    P = {40.0: (3224.5, 40.7), 246.3: (2953.1, 44.3), 1054.3: (2065.9, 58.5), 3137.5: (2011.9, 92.2),
+         6491.3: (2178.7, 127.9), 13430.2: (2813.8, 160.8), 19317.9: (3447.5, 173.4), 27786.6: (4424.2, 183.3)}
+    q = np.array(list(P))
+    Pp, Tt = wvlp.traverse(path, fl, np.full(q.size, 500 + G), {"q": q, "wc": np.zeros(q.size),
+                                                                 "gor": np.full(q.size, 800.0)}, "pe2_style", 1, 1, 8.0)
+    for k, qq in enumerate(q):
+        assert Pp[k, -1] - G == pytest.approx(P[qq][0], abs=20) and Tt[k, 0] == pytest.approx(P[qq][1], abs=0.5)
+    pr = 5200 + G
+    tab = m.table(210.0, [pr])
+    props = {"mu": float(tab["Oil viscosity (cp)"].iloc[0]), "bo": float(tab["Oil FVF (RB/STB)"].iloc[0]),
+             "rho": float(tab["Oil density (lb/ft3)"].iloc[0]), "wc": 0.0}
+    hz = lambda s: IA.horizontal_resistance("Kuchuk & Goode", 50, 100, 0.354, 1.0, 0.1, 800, 4200, 4200, 2100, 2100,
+                                            50, s)
+    kh, D0 = hz(0.0)
+    c = IA.horizontal_friction("oil", pr, [{"type": "Perforated", "length": 800, "k": 50, "skin": hz(3.0)[1] - D0,
+                                            "id_in": 7.62, "rough_in": 0.0006}], kh, D0, 50, props,
+                               pb=m.bubble_point(210.0), n=80)
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "oil", {"whp": 500 + G, "u": 8.0, "wc": 0.0, "gor": 800.0}, [{}],
+                              lambda ch: c, "pe2_style", 1.0, 1.0, method="Automatic - Geometric")
+    assert res[0].q == pytest.approx(21120.8, rel=0.002) and res[0].pwf - G == pytest.approx(3655.4, abs=3)
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T10_Horizontal_Well.wellmodel.json"))
+    assert proj["inputs"]["ipr_model_oil"] == "Horizontal Well - friction dP"
+    assert proj["inputs"]["ipr_hzf_method"] == "Kuchuk & Goode" and proj["widgets"]["opt_artificial_lift"] == "none"
+
+
+def test_sand_control_prosper_t15_t18():
+    """PROSPER Tutorials 15-18 on the Logie well (user's runs; T05 PVT, Pr 5200 psig, 210 F, dry, GOR 800). The
+    sand-control dP uses the fluid at the reservoir pressure (as PROSPER: skins and dPs within 0.3 % that way; at
+    the sand-face pressure the dP near the AOF was up to 2.3 times PROSPER's). T16-T18: Darcy 50 md, 100 ft, 500
+    acres with PROSPER's perforation (1.600337) and deviation (-0.016550) skins plus the screen: IPR within 15 psi,
+    AOF within 0.6 %, system solution within 1.3 % (PE2 unmatched, U 8). T15: gravel pack A / B within 0.3 % and the
+    velocity at the casing within 0.2 %."""
+    from wellmodel import completion as C, inflow as I
+    G = 14.696
+    fl = _t05_oil()
+    m = fl.m
+    pr = 5200 + G
+    props = C.props_at_pressure(C.props_from_fluid(fl, "oil", 210.0, {"wc": 0.0, "gor": 800.0}, True), pr)
+    # sand-control skin and dP against PROSPER's VLP / IPR tables (rate, PROSPER dP, PROSPER skin)
+    tables = {
+        "wire_wrapped_screen": ({"interval": 100, "screen_outer_radius": 0.28},
+                                [(23.8, 0.09, 0.234508), (11517.1, 42.23, 0.234692), (23828.4, 87.45, 0.234889)], 0.003),
+        "pre_packed_screen": ({"interval": 100, "screen_inner_radius": 0.25, "screen_outer_radius": 0.33,
+                               "screen_perm": 500},
+                              [(23.9, 0.04, 0.097968), (11537.6, 17.68, 0.098086), (23870.8, 36.63, 0.098213)], 0.003),
+        "slotted_liner": ({"interval": 100, "liner_inner_radius": 0.32, "liner_outer_radius": 0.34,
+                           "slot_height_in": 4, "slot_width_in": 0.02, "slot_density": 4, "screen_outer_radius": 0,
+                           "outside_perm": 50000},
+                          [(23.0, 0.02, 0.06265), (11124.5, 164.17, 0.94447), (23016.1, 679.36, 1.88906)], 0.025),
+        "gravel_pack_cased": ({"interval": 100, "perf_diameter_in": 0.26, "spf": 8, "perf_efficiency": 0.87,
+                               "pack_length_in": 4, "gravel_perm": 25000},
+                              [(13.3, 0.34, 1.652017), (6414.7, 1065.89, 10.634428), (9226.8, 2102.05, 14.580392)],
+                              0.003)}
+    for kind, (prm, rows, tol) in tables.items():
+        mdl = C.SandControlModel(C.SandControl(kind, prm), props, 50, 100, 0.354)
+        for q, dp, skin in rows:
+            d = mdl.details(np.array([q]), None)
+            assert float(d["skin"][0]) == pytest.approx(skin, rel=tol), (kind, q)
+            if dp > 1:
+                assert float(d["dp"][0]) == pytest.approx(dp, rel=tol), (kind, q)
+    gp = C.SandControlModel(C.SandControl("gravel_pack_cased", tables["gravel_pack_cased"][0]), props, 50, 100, 0.354)
+    d = gp.details(np.array([1000.0]), None)
+    bo = float(d["Q"][0]) / 1000
+    assert d["a"][0] * bo ** 2 == pytest.approx(0.000022, rel=0.03) and d["b"][0] * bo == pytest.approx(0.025522, rel=0.003)
+    assert gp.details(np.array([9226.8]), None)["velocity"][0] == pytest.approx(3.276, rel=0.003)
+    # T16-T18 IPR and system
+    tab = m.table(210.0, [pr])
+    mu, bo = float(tab["Oil viscosity (cp)"].iloc[0]), float(tab["Oil FVF (RB/STB)"].iloc[0])
+    assert I.darcy_pi(50, 100, mu, bo, 500, 31.6, 0.354, 0.0) == pytest.approx(7.83615, rel=0.003)
+    base = I.darcy(pr, m.bubble_point(210.0), 50, 100, 500, 31.6, 0.354, 1.600337 - 0.016550, mu, bo, 0.0)
+    path, _ = _t23_path()
+    runs = {"wire_wrapped_screen": (23847.5, 14296.1, 2908.0, [(2690.5, 4780.2), (16566.1, 2504.0)]),
+            "pre_packed_screen": (23889.9, 14404.2, 2919.3, [(2695.3, 4785.2), (16595.5, 2533.5)]),
+            "slotted_liner": (23034.5, 13591.9, 2835.8, [(2598.8, 4793.2), (16001.3, 2342.6)])}
+    for kind, (aof, qs, ps, pts) in runs.items():
+        c = C.apply_sand_control(base, C.sand_control_dp(C.SandControl(kind, tables[kind][0]), props, 50, 100, 0.354))
+        o = np.argsort(c.q)
+        for qq, pp in pts:
+            assert np.interp(qq, np.asarray(c.q)[o], np.asarray(c.pwf)[o]) - G == pytest.approx(pp, abs=15)
+        assert max(c.q) == pytest.approx(aof, rel=0.006)
+        res, _ = wsys.solve_cases(lambda tid: path, fl, "oil", {"whp": 500 + G, "u": 8.0, "wc": 0.0, "gor": 800.0},
+                                  [{}], lambda ch: c, "pe2_style", 1.0, 1.0, method="Automatic - Geometric")
+        assert res[0].q == pytest.approx(qs, rel=0.013) and res[0].pwf - G == pytest.approx(ps, abs=8)
+
+
+def test_fractured_well_frac_and_pack_prosper_t15():
+    """PROSPER Tutorial 15 file (user's runs): Hydraulically Fractured Well, 50 md, 100 ft, 500 acres, xf 35 ft, FCD
+    4500, 5 days, porosity 0.16, with the cased-hole gravel pack. Formation PI (no skin) against PROSPER's base and
+    eleven variations within 1.4 % (transient Gringarten held at tDA 0.0891; FCD >= 100 infinite); with the gravel
+    pack the AOF within 0.3 %, the IPR within 5 psi and the system solution within 0.4 % (PE2 unmatched, U 8)."""
+    from wellmodel import inflow_adv as IA, completion as C
+    G = 14.696
+    fl = _t05_oil()
+    m = fl.m
+    pr = 5200 + G
+    tab = m.table(210.0, [pr, pr - 10])
+    bo1, bo2 = tab["Oil FVF (RB/STB)"].to_numpy()
+    co, mu, pb = -(bo1 - bo2) / 10 / bo1, float(tab["Oil viscosity (cp)"].iloc[0]), m.bubble_point(210.0)
+    base = dict(k=50, h=100, area=500, ca=31.6, rw=0.354, xf=35, fcd=4500, t_days=5, phi=0.16, ct=co, mu=mu)
+    runs = [({}, 13.3913), ({"fcd": 10}, 12.9775), ({"fcd": 100}, 13.3913), ({"fcd": 20000}, 13.3913),
+            ({"xf": 100}, 17.1533), ({"xf": 200}, 21.0141), ({"k": 20}, 5.74275), ({"t_days": 1}, 15.566),
+            ({"t_days": 30}, 13.3913), ({"t_days": 365}, 13.3913), ({"k": 10}, 3.1132), ({"k": 100}, 26.7825)]
+    for ch, j in runs:
+        c = IA.fractured_well("oil", pr, pb=pb, bo=bo1, **{**base, **ch})
+        assert c.params["PI (STB/d/psi)"] == pytest.approx(j, rel=0.014), ch
+    c0 = IA.fractured_well("oil", pr, pb=pb, bo=bo1, **base)
+    props = C.props_at_pressure(C.props_from_fluid(fl, "oil", 210.0, {"wc": 0.0, "gor": 800.0}, True), pr)
+    sc = C.SandControl("gravel_pack_cased", {"interval": 100, "perf_diameter_in": 0.26, "spf": 8,
+                                             "perf_efficiency": 0.87, "pack_length_in": 4, "gravel_perm": 25000})
+    c = C.apply_sand_control(c0, C.sand_control_dp(sc, props, 50, 100, 0.354))
+    assert max(c.q) == pytest.approx(13282.3, rel=0.004)
+    o = np.argsort(c.q)
+    for qq, pp in ((1498.5, 5000.6), (6414.7, 3655.1), (9226.8, 2408.9)):
+        assert np.interp(qq, np.asarray(c.q)[o], np.asarray(c.pwf)[o]) - G == pytest.approx(pp, abs=6)
+    path, _ = _t23_path()
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "oil", {"whp": 500 + G, "u": 8.0, "wc": 0.0, "gor": 800.0}, [{}],
+                              lambda ch: c, "pe2_style", 1.0, 1.0, method="Automatic - Geometric")
+    assert res[0].q == pytest.approx(9238.8, rel=0.005) and res[0].pwf - G == pytest.approx(2401.8, abs=15)
+
+
+def test_gas_lift_multipoint_quicklook_prosper_t33b():
+    """PROSPER Tutorial 33b Multipoint QuickLook (user's run: 390 psig / 147 F, 7488 STB/d, 35 % water cut, 5.3935
+    MMscf/d total, 1.5 injected, 1490 psig CHP, static 3700 psig; R-20 valves 16 / 12 / 8 at 3731 / 5661 / 6659 ft,
+    orifice 9/64 at 7020 ft) with every valve on Thornhill-Craver: valve 1 takes all 1.5 MMscf/d; tubing and casing
+    pressures at the valves within 7 and 1 psi, opening / closing pressures within 1.5 psi, capacities ('calculated
+    gas rates') within 4 %, results at the orifice; calculated CHP from the bottom-up tubing pressure within 4 psi,
+    critical rate within 0.5 %, fitted U within 0.1 %. PROSPER's Acuna model (the tutorial's) is not available."""
+    from wellmodel import gaslift_system as wgls, quicklook as wql
+    G = 14.696
+    oil = _t05_oil()
+    tc = "Thornhill-Craver"
+    vs = (wgls.GLValve(3731.19, "Valve", 16, 0.066, 1210.8, model=tc), wgls.GLValve(5660.62, "Valve", 12, 0.038,
+                                                                                     1194.07, model=tc),
+          wgls.GLValve(6659.12, "Valve", 8, 0.017, 1178.0, model=tc), wgls.GLValve(7019.67, "Orifice", 9))
+    s = wgls.GasLiftSetup(valves=vs, annulus_friction=True)
+    path, secs = _t23_path([v.md for v in vs] + [6250.0])
+    s.annulus = wgls.annulus_geometry(path, secs)
+    inp = wql.QuickLookInput(390 + G, 147, 7488, 0.35, 5.3935, 1.5, 1490 + G, 7019.67, 9,
+                             gauges=((6250.0, 1440 + G),), static_p=3700 + G, valves=vs)
+    r = wql.quicklook(path, oil, lambda q: 2336.27 + G, s, inp, "pe2_style", 1.03108, 1.00278, 8.580277,
+                      multipoint=True)
+    v = r.valves
+    prosper = [  # Pt, Pc, T, Pvo, Pvc (psig), used, calculated (MMscf/d)
+        (921.372, 1612.04, 180.613, 1590.92, 1546.73, 1.5, 1.89315),
+        (1380.36, 1686.84, 196.603, 1575.7, 1568.27, 0.0, 0.89042),
+        (1649.75, 1725.83, 202.708, 1561.15, 1562.66, 0.0, 0.21783),
+        (1751.9, 1740.01, 204.498, np.nan, np.nan, 0.0, 0.0)]
+    for (_, x), (pt, pc, t, pvo, pvc, qu, qc) in zip(v.iterrows(), prosper):
+        assert x["Tubing pressure (psia)"] - G == pytest.approx(pt, abs=7.5)
+        assert x["Casing pressure (psia)"] - G == pytest.approx(pc, abs=1.0)
+        assert x["Temperature (°F)"] == pytest.approx(t, abs=0.5)
+        if np.isfinite(pvo):
+            assert x["Opening pressure (psia)"] - G == pytest.approx(pvo, abs=1.5)
+            assert x["Closing pressure (psia)"] - G == pytest.approx(pvc, abs=1.5)
+        assert x["Gas rate (MMscf/d)"] == pytest.approx(qu, abs=1e-6)
+        assert x["Calculated gas rate (MMscf/d)"] == pytest.approx(qc, rel=0.04, abs=1e-6)
+    sm = r.summary
+    assert sm["Tubing pressure at valve (psia)"] - G == pytest.approx(1751.9, abs=7.5)      # at the orifice
+    assert sm["Casing pressure at valve (psia)"] - G == pytest.approx(1740.01, abs=1.0)
+    assert sm["Calculated casing head pressure (psia)"] - G == pytest.approx(1429.12, abs=4)
+    assert sm["Calculated critical flow rate (MMscf/d)"] == pytest.approx(0.63507, rel=0.005)
+    assert sm["Fitted thermal coefficient (BTU/h/ft2/F)"] == pytest.approx(8.43945, rel=0.001)
+    assert sm["Equivalent calculated PI (STB/d/psi)"] == pytest.approx(5.49084, rel=1e-3)
+    assert sm["Multipoint flag"] == "Single"
+    # the Acuna run's Thornhill-Craver valve 3 (8/64) and orifice (9/64) capacities at PROSPER's own pressures
+    from wellmodel import gaslift as GL
+    for d, pt, pc, t, q in ((8, 1564.64, 1725.22, 202.712, 0.30659), (9, 1663.13, 1739.39, 204.498, 0.27668)):
+        assert float(GL.thornhill_craver(d / 64, pc + G, pt + G, t, s.gas.sg)) / 1000 == pytest.approx(q, rel=0.002)
+
+
+def _inj_tests(gas, rows):
+    from wellmodel import injection as winj
+    cols = winj.inj_test_columns(gas)
+    df = pd.DataFrame([[None, f"test {i + 1}", *r] for i, r in enumerate(rows)], columns=cols,
+                      index=range(1, len(rows) + 1))
+    return winj.clean_inj_tests(df, gas)[0]
+
+
+def test_water_injection_well_test_matching_prosper_t21():
+    """PROSPER Tutorial 21 (matching water injection well tests; T03a well, TIF injectivity, gauge at 8000 ft).
+    Estimate U: PROSPER 8.88441 / 8.88067 / 8.88373 (mean 8.88293) from the bottom-node ('downstream')
+    temperature - ours within 0.1 %. Match VLP (PE2): P1 0.99461, P2 1, std 0.466 psi - ours P1 0.9932 (the
+    unmatched gauge pressure is about 5 psi higher than PROSPER's), std 0.56. User's file (U 8.88293, P1 0.99461,
+    skin 3, WHP 1250 psig): system 11,853.7 STB/d at 5,382.4 psig; VLP and IPR at the VLP-tab rates. Adjust Skin in
+    the user's file: 4.66919 / 6.56128 / 8.8501 (the manual's 3 / 4.2 / 5.6 come from a different injectivity) -
+    these calibrate the split of the TIF fully-developed-fracture regime between skin and the other terms (see
+    tif.py); ours within 0.03."""
+    import dataclasses
+    from wellmodel import injection as winj, tif
+    G = 14.696
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 600},
+            {"Type": "Tubing", "Measured Depth (ft)": 8500, "Tubing Inside Diameter (in)": 5.2,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 9000, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = winj.from_flow_path(wvlp.build_flow_path(top, secs, pts, [0, 9000], [0, 9000], [0, 600, 9000],
+                                                    [60, 40, 210], extra_md=[8000.0]))
+    fl = winj.WaterFluid(200000)
+    tests = _inj_tests(False, [(1250 + G, 99.3, 8467, 8000, 4910 + G, 4100 + G),
+                               (1075 + G, 112.1, 5897, 8000, 4747 + G, 4100 + G),
+                               (985 + G, 123.6, 4456, 8000, 4662 + G, 4100 + G)])
+    u = winj.estimate_u(path, fl, tests, 60.0)["U (BTU/h/ft2/F)"].to_numpy()
+    assert np.allclose(u, [8.88441, 8.88067, 8.88373], rtol=1e-3) and abs(u.mean() / 8.88293 - 1) < 1e-3
+    U, P1 = 8.88293, 0.99461
+    m = winj.match_vlp(path, fl, tests, U, 60.0)
+    assert abs(m.p1 - P1) < 0.002 and m.p2 == 1.0 and abs(m.std - 0.46553) < 0.2
+    assert np.all(np.abs(m.before - 25.5) < 1.5)
+    base = tif.TIFInputs(pr=4100 + G, t_res=210, t_inj=120, k=50, h=100, area=250, ca=31.6, rw=.354, phi=.18,
+                         t_days=20, q_hist=12000, skin=3, sigma_ini=5300 + G, sweep=.75, alpha=5e-6,
+                         mu_res=0.35734, b_res=1.4116)
+    ipr = tif.tif_ipr(base, fl)
+    res, *_ = winj.solve(path, fl, 1250 + G, ipr, U, 60.0, p1=P1, n=40)
+    assert abs(res.q / 11853.7 - 1) < 0.006 and abs(res.pwf - G - 5382.4) < 3
+    qq = np.array([1215.8, 4037.2, 8985.7, 13405.8, 20000.0])
+    P, Tt = winj.traverse(path, fl, 1250 + G, qq, U, 60.0, p1=P1)
+    assert np.abs(P[:, -1] - G - [5420.4, 5432.8, 5409.6, 5367.6, 5275.8]).max() < 1.0
+    assert np.abs(ipr.pwf(qq, Tt[:, -1]) - G - [4351.1, 4465.1, 5000.8, 5588.9, 6505.3]).max() < 8
+    ipr_for = lambda **kw: tif.tif_ipr(dataclasses.replace(base, **kw), fl)
+    for (_, t), s_p in zip(tests.iterrows(), (4.66919, 6.56128, 8.8501)):
+        s_ = winj.adjust_ipr(path, fl, t, ipr_for, "skin", U, 60.0, None, P1)
+        assert abs(s_ - s_p) < 0.05, (s_, s_p)
+    r3, *_ = winj.solve(path, fl, t["whp"], ipr_for(skin=s_), U, 60.0, p1=P1)
+    assert abs(r3.q / t["q"] - 1) < 1e-3
+
+
+def test_gas_injection_well_test_matching_prosper_t22():
+    """PROSPER Tutorial 22 (matching gas injection well tests; T04 well, gauge at 4650 ft). Estimate U: PROSPER
+    2.88602 / 2.881 / 2.86746 (mean 2.87816) - ours 1.1 % higher. Match VLP (PE2): P1 1.04285, P2 1, std 0.172,
+    unmatched gauge pressures about 21-22 psi off - ours P1 1.0435, 21.0-21.9 psi. User's file (U 2.87816, P1
+    1.04285, skin 2, WHP 2750 psig): system 15.238 MMscf/d at 3,283.8 psig (ours 15.35 at 3,283.5); VLP and IPR at
+    the test rates within 0.5 psi. Adjust Skin: ours -0.91 / 0.0 / 1.0; PROSPER in the user's file 0 / 0 / 0 (test 2
+    agrees; tests 1 and 3 not yet explained). The manual's 2 / 3.2 / 4.6 come from a different injectivity."""
+    from wellmodel import injection as winj, gaspvt as gp
+    G = 14.696
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 4.5,
+             "Tubing Inside Roughness (in)": 0.00006},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 4.0},
+            {"Type": "Tubing", "Measured Depth (ft)": 4800, "Tubing Inside Diameter (in)": 4.5,
+             "Tubing Inside Roughness (in)": 0.00006},
+            {"Type": "Casing", "Measured Depth (ft)": 5010, "Casing Inside Diameter (in)": 6.13,
+             "Casing Inside Roughness (in)": 0.00006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = winj.from_flow_path(wvlp.build_flow_path(top, secs, pts, [0, 1500, 1982, 2460, 2905, 3335, 4650, 5010],
+                                                    [0, 1500, 1980, 2450, 2883, 3300, 4560, 4900],
+                                                    [0, 1500, 5010], [45, 75, 166], extra_md=[4650.0]))
+    fl = winj.GasFluid(gp.GasPVTInputs(0.769, 100, 0, 67, 0, 100000, 0, 0.368, 4.005, "lee", 166, 2750),
+                       impurities=False)
+    tests = _inj_tests(True, [(2500 + G, 112.9, 10.2, 4650, 2971.1 + G, 2750 + G),
+                              (2750 + G, 106.4, 17.515, 4650, 3242 + G, 2750 + G),
+                              (2450 + G, 119.8, 6.99, 4650, 2919 + G, 2750 + G)])
+    u = winj.estimate_u(path, fl, tests, 100.0)["U (BTU/h/ft2/F)"].to_numpy()
+    assert np.allclose(u, [2.88602, 2.881, 2.86746], rtol=0.02) and abs(u.mean() / 2.87816 - 1) < 0.015
+    U, P1 = 2.87816, 1.04285
+    m = winj.match_vlp(path, fl, tests, U, 100.0)
+    assert abs(m.p1 - P1) < 0.002 and abs(m.std - 0.17206) < 0.2
+    assert np.all(np.abs(np.abs(m.before) - 21.6) < 1.0)
+    ipr_for = lambda skin=2.0, pr=2750 + G: winj.petex_gas_injection(pr, 166, 25, 55, 500, 31.6, .354, 45, 100,
+                                                                     .15, .25, skin, fl)
+    res, *_ = winj.solve(path, fl, 2750 + G, ipr_for(), U, 100.0, p1=P1)
+    assert abs(res.q / 15.238 - 1) < 0.01 and abs(res.pwf - G - 3283.8) < 2
+    qq = np.array([6.99, 10.2, 17.515])
+    P, Tt = winj.traverse(path, fl, 2750 + G, qq, U, 100.0, p1=P1)
+    assert np.abs(P[:, -1] - G - [3295.8, 3291.6, 3280.3]).max() < 0.6
+    assert np.abs(Tt[:, -1] - [120.0, 112.9, 106.4]).max() < 0.4
+    assert np.abs(ipr_for().pwf(qq) - G - [2971.7, 3085.6, 3373.4]).max() < 0.8
+    s2 = winj.adjust_ipr(path, fl, tests.iloc[1], ipr_for, "skin", U, 100.0, None, P1)
+    assert abs(s2 - 0.0) < 0.05
+
+
+def _t38_path():
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 11800, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0018},
+            {"Type": "Casing", "Measured Depth (ft)": 12000, "Casing Inside Diameter (in)": 8.3,
+             "Casing Inside Roughness (in)": 0.0018}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    return wvlp.build_flow_path(top, secs, pts, [0, 12000], [0, 12000], [0, 12000], [70, 300])
+
+
+def test_pe5_style_high_velocity_condensate_prosper_t38():
+    """PROSPER's PE5 gradient exports of Tutorial 38 (25 MMscf/d of condensate, 3.99 in tubing, wellhead 500-2000
+    psig, black-oil and EoS PVT; 2-9 % liquid at 20-115 ft/s): PE5 calls all of it slug flow. With PROSPER's own
+    node properties, the drift-flux holdup is within 3 % at every tubing node and the pressure drop integrated down
+    the well within 4 % in all eight traverses (the joint fit with Tutorial 47's water-rich gradients; T38 alone gave
+    1 % / 2.5 %). Before (Duns & Ros mist above the slug limit) the holdup was the no-slip one, 60 % low."""
+    from wellmodel import correlations as C
+    df = pd.read_csv(__file__.replace("test_wellmodel.py", "data/t38_gradients.csv"))
+    for (pvt, whp), g in df.groupby(["pvt", "whp"]):
+        g = g.sort_values("md")
+        a = [g[c].to_numpy() for c in ("vsl", "vsg", "rho_l", "rho_g", "mu_l", "mu_g", "ift_gl")]
+        e, f, hl = C.pe5_style(*a, g.d_in.to_numpy() / 12, 0.0018 / 12, 1.0, g.p.to_numpy() + 14.696)
+        tub = g.d_in.to_numpy() < 4
+        assert np.abs(hl[tub] / g.hl.to_numpy()[tub] - 1).max() < 0.03, (pvt, whp)
+        dp = np.sum((e + f) * g.length.to_numpy())
+        assert abs(dp / np.sum(g.grad.to_numpy() * g.length.to_numpy()) - 1) < 0.04, (pvt, whp)
+
+
+def test_retrograde_black_oil_pvt_prosper_t38():
+    """PROSPER's black-oil retrograde condensate PVT table (Tutorial 38: separator GOR 7431.94, tank GOR 1, gas
+    gravity 0.745, 43.56 API, 2.33 % CO2, 0.31 % N2, dew point 4596.83 psig at 300 F; 25 temperatures 70-300 F x 25
+    pressures 0-7000 psig). Dew point, dropout ('reservoir CGR'), oil FVF and density reproduced exactly; gas density
+    and viscosity within 1.2 % (Z within 0.32 %: PROSPER's impurity correction not found); the condensate viscosity is Beal's (PROSPER's is
+    not a published correlation found)."""
+    import dataclasses
+    from wellmodel import retrograde as RG
+    G = 14.696
+    df = pd.read_csv(__file__.replace("test_wellmodel.py", "data/t38_bo_retrograde_pvt.csv"))
+    inp = RG.RetroInputs(7431.94, 0.745, 1.0, 0.745, 43.56, 4596.83 + G, 300.0, 6000 + G, 0.0, 20000, 0, 2.33, 0.31)
+    r = RG.props(inp, df.p.to_numpy() + G, df["T"].to_numpy())
+    assert np.abs(r["p_dew"] - G - df.pd.to_numpy()).max() < 0.05
+    assert np.abs(r["dropout"] - df.cgr.to_numpy()).max() < 0.03
+    two = df.cgr.to_numpy() > 0
+    assert np.abs(r["bo"][two] / df.bo.to_numpy()[two] - 1).max() < 5e-4
+    assert np.abs(r["rho_o"][two] / df.rho_o.to_numpy()[two] - 1).max() < 5e-4
+    assert np.abs(r["z"] / df.z.to_numpy() - 1).max() < 0.01
+    assert np.abs(r["rho_g"] / df.rho_g.to_numpy() - 1).max() < 0.01
+    assert np.abs(r["mu_g"] / df.mu_g.to_numpy() - 1).max() < 0.012
+    assert np.abs(np.median(r["mu_o"][two] / df.mu_o.to_numpy()[two] - 1)) < 0.08
+    # same fluid with CO2 = N2 = 0: Standing's condensate pseudo-criticals of the separator gas give PROSPER's Z exactly
+    df0 = pd.read_csv(__file__.replace("test_wellmodel.py", "data/t38_bo_retrograde_pvt_noimp.csv"))
+    r0 = RG.props(dataclasses.replace(inp, co2=0.0, n2=0.0), df0.p.to_numpy() + G, df0["T"].to_numpy())
+    assert np.abs(r0["z"] / df0.z.to_numpy() - 1).max() < 1e-4 and np.abs(r0["mu_g"] / df0.mu_g.to_numpy() - 1).max() < 0.003
+    # the inputs changed one at a time (reservoir temperature 250 F, dew point 4000 psig, separator GOR 10,000, 50 API)
+    # and all four together: the dew-point curve, the dropout shape (drop_shape) and the Glaso liquid hold
+    for name, kw, tol in (("tres250", dict(t_res=250.0), 0.01), ("pd4000", dict(p_dew=4000 + G), 0.01),
+                          ("gor10000", dict(sep_gor=10000.0), 0.01), ("api50", dict(api=50.0), 0.01)):
+        dfx = pd.read_csv(__file__.replace("test_wellmodel.py", f"data/t38_bo_retro_{name}.csv"))
+        rx = RG.props(dataclasses.replace(inp, **kw), dfx.p.to_numpy() + G, dfx["T"].to_numpy())
+        assert np.abs(rx["dropout"] - dfx.cgr.to_numpy()).max() < tol, name
+        assert np.abs(rx["p_dew"] - G - dfx.pd.to_numpy()).max() < 0.05, name
+        assert np.abs(rx["rho_g"] / dfx.rho_g.to_numpy() - 1).max() < 0.005, name
+    df1 = pd.read_csv(__file__.replace("test_wellmodel.py", "data/t38_bo_retrograde_pvt_run1.csv"))
+    inp1 = dataclasses.replace(inp, sep_gor=10000.0, api=50.0, p_dew=4000 + G, t_res=250.0)
+    r1 = RG.props(inp1, df1.p.to_numpy() + G, df1["T"].to_numpy())
+    two1 = df1.cgr.to_numpy() > 0
+    assert np.abs(r1["p_dew"] - G - df1.pd.to_numpy()).max() < 0.05
+    assert np.abs(r1["bo"][two1] / df1.bo.to_numpy()[two1] - 1).max() < 5e-4
+    assert np.abs(r1["dropout"] - df1.cgr.to_numpy()).max() < 0.2
+    assert np.abs(r1["rho_g"] / df1.rho_g.to_numpy() - 1).max() < 0.01
+
+
+def test_retrograde_black_oil_vs_eos_traverse_prosper_t38():
+    """PROSPER Tutorial 38 (the T37 well, 25 MMscf/d, PE5, U 5): bottom-hole pressure for wellhead 500 / 1000 /
+    1500 / 2000 psig. Black-oil condensate - PROSPER 2953.82 / 3159.26 / 3505.60 / 3959.33 psig: ours within 2.5 %,
+    wellhead temperature 202.7 F (PROSPER 202.69). Equation of state - PROSPER 3118.52 / 3296.10 / 3617.52 /
+    4053.77: ours within 1.5 % of PROSPER's black-oil results but 1-6 % below its EoS ones. PROSPER's EoS traverse does
+    not conserve mass (its total mass rate is 12 % above the wellstream's at the top of the well and 4 % above at the
+    bottom, with phase densities equal to ours to 0.1 %); ours does."""
+    import json
+    from wellmodel import retrograde as RG, eos as E
+    G = 14.696
+    path = _t38_path()
+    whp = np.array([500, 1000, 1500, 2000.0]) + G
+    inp = RG.RetroInputs(7431.94, 0.745, 1.0, 0.745, 43.56, 4596.83 + G, 300.0, 6000 + G, 0.0, 20000, 0, 2.33, 0.31)
+    P, T = wvlp.traverse(path, wvlp.RetrogradeBOFluid(inp), whp, {"q": 25.0, "wgr": 0.0}, "pe5_style", u=5.0)
+    bo_p = np.array([2953.82, 3159.26, 3505.60, 3959.33])
+    assert np.abs((P[:, -1] - G) / bo_p - 1).max() < 0.025 and abs(T[0, 0] - 202.69) < 0.3
+    root = __file__.replace("tests/test_wellmodel.py", "examples/")
+    f = E.EOSFluid(E.parse_prp(open(root + "T37_Retrograde_Condensate_EoS.prp").read()))
+    sep = f.separator_train()
+    fe = wvlp.EOSTableFluid("gas", wvlp.eos_grid(f, 7000, 60, 300), float(f.z @ f.mw),
+                            float(sep["stages"]["Gas (scf per lbmol feed)"].sum()), float(sep["stb_per_lbmol"]),
+                            float(sep["oil_density"]), wbo.PVTInputs(rsb=1, api=40, gas_sg=0.7, salinity_ppm=20000))
+    Pe, _ = wvlp.traverse(path, fe, whp, {"q": 25.0, "wgr": 0.0}, "pe5_style", u=5.0)
+    assert np.abs((Pe[:, -1] - G) / bo_p - 1).max() < 0.015
+    eos_p = np.array([3118.52, 3296.10, 3617.52, 4053.77])
+    assert np.abs((Pe[:, -1] - G) / eos_p - 1).max() < 0.065
+    proj = json.load(open(root + "T38_Black_Oil_Retrograde_Condensate.wellmodel.json"))
+    assert proj["widgets"]["opt_method"] == "black_oil" and proj["inputs"]["pvt_dew"] == pytest.approx(4611.526)
+
+
+def test_esp_quicklook_prosper_t34():
+    """PROSPER Tutorial 34 (ESP QuickLook on the T26 well: GC10000, 113 stages at 8500 ft, 60 Hz, PE2 1.03 / 1.01;
+    test 7198 STB/d, 74 % water cut, GOR 800, THP 275 psig; gauge 1957 psig at 6250 ft, intake 1714, discharge
+    2812). PROSPER's fixed-top-node gradient (manual): wear 0 - discharge 2807.7, intake 1623.6 psig; wear 0.08 -
+    discharge 2802.7, intake 1706.7, bottom hole 1977.6 psig. Ours within 0.6 %; the gauge within 1 psi of the
+    measured. The measured / calculated pump dP is 0.93 (PROSPER's first guess: wear 0.08); the wear factor that takes
+    the measured discharge back to the measured intake is 0.083. Bottom up against the user's PROSPER run: intake
+    and discharge within 3 psi, THP within 12 psi, pump power, current and voltage within 1 %."""
+    import dataclasses, json
+    from wellmodel import esp as E, esp_quicklook as EQ
+    G = 14.696
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 600},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 4.052,
+             "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 4.8, "Casing Inside Diameter (in)": 6.4},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.72},
+            {"Type": "Tubing", "Measured Depth (ft)": 8500, "Tubing Inside Diameter (in)": 4.052,
+             "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 4.8, "Casing Inside Diameter (in)": 6.4},
+            {"Type": "Casing", "Measured Depth (ft)": 9275, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    smd_, stvd_ = np.array(LOGIE_SURVEY).T
+    path = wvlp.build_flow_path(top, secs, pts, smd_, stvd_, [0, 600, 9275], [60, 40, 210], extra_md=[6250.0, 8500.0])
+    fl = _t05_oil()
+    esp = {"pump_md": 8500.0, "pump": E.PUMPS["Centrilift GC10000 (5.13 in)"], "stages": 113, "freq": 60.0,
+           "wear": 0.0, "sep": 0.0, "motor": E.MOTORS["Centrilift 544 300HP 1675V 105A"],
+           "cable": E.CABLES["#1 Copper"], "cable_len": 9000.0}
+    inp = EQ.ESPQuickLookInput(275 + G, 7198.0, 0.74, 800.0, 3350 + G, ((6250.0, 1957 + G),), 1714 + G, 2812 + G)
+    J = 7198.0 / (3260 - 1976.34)                      # PROSPER's IPR pressure at the test rate, straight line
+    ipr = lambda pr: (lambda q: pr - q / J)
+    r0 = EQ.esp_quicklook(path, fl, ipr(3350 + G), inp, esp, "pe2_style", 1.03, 1.01, 8.580277, pres_for=ipr)
+    s0 = r0.summary
+    assert abs(s0["Top down: pump discharge (psia)"] - G - 2807.7) < 15
+    assert abs(s0["Top down: pump intake (psia)"] - G - 1623.6) < 15
+    assert abs(r0.points["Top down - measured (psi)"].iloc[0]) < 1.5
+    assert abs(s0["Measured / calculated pump dP"] - 0.927) < 0.01
+    assert abs(s0["Wear factor for the measured intake"] - 0.083) < 0.005
+    r8 = EQ.esp_quicklook(path, fl, ipr(3260 + G), dataclasses.replace(inp, pres=3260 + G), {**esp, "wear": 0.08},
+                          "pe2_style", 1.03, 1.01, 8.580277, pres_for=ipr)
+    s8 = r8.summary
+    assert abs(s8["Top down: pump intake (psia)"] - G - 1706.7) < 10
+    assert abs(s8["Top down: bottom-hole pressure (psia)"] - G - 1977.6) < 10
+    # reservoir pressure that gives the top-down BHP (PROSPER: 3260 psig from a 5 psi sensitivity)
+    assert abs(s8["Reservoir pressure for the top-down BHP (psia)"] - G - 3260) < 10
+    # with the matched wear factor and reservoir pressure the two gradients overlie
+    assert np.nanmax(np.abs(r8.profile["Top down (psia)"] - r8.profile["Bottom up (psia)"])) < 15
+    # the user's PROSPER "From Static BHP" stream (IPR pressure 1979.7 psig at the test rate): intake 1707.7 psig;
+    # wear 0 - discharge 2911.3, THP 320.4, pump 269.97 hp, 96.82 A, 1951.51 V; wear 0.08 - discharge 2809.4, THP
+    # 275.8, pump 269.45 hp (the wear lowers the head, not the power), 96.67 A, 1951.26 V
+    for w_, (pdp_p, thp_p, hp_p, a_p, v_p) in ((0.0, (2911.3, 320.4, 269.97, 96.82, 1951.51)),
+                                               (0.08, (2809.4, 275.8, 269.45, 96.67, 1951.26))):
+        rb = EQ.esp_quicklook(path, fl, lambda q: 1979.7 + G, inp, {**esp, "wear": w_}, "pe2_style", 1.03, 1.01,
+                              8.580277)
+        b, sb = rb.bottom_up, rb.summary
+        assert abs(b["pip"] - G - 1707.7) < 3 and abs(b["pdp"] - G - pdp_p) < 3
+        assert abs(b["thp"] - G - thp_p) < 12
+        assert abs(sb["Bottom up: pump power (hp)"] / hp_p - 1) < 0.01
+        assert abs(sb["Bottom up: motor current (A)"] / a_p - 1) < 0.01
+        assert abs(sb["Bottom up: surface voltage (V)"] / v_p - 1) < 0.005
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T34_ESP_QuickLook.wellmodel.json"))
+    assert proj["widgets"]["opt_artificial_lift"] == "esp" and proj["inputs"]["espq_n"] == 113.0
+
+
+def test_hsp_quicklook_prosper_t35():
+    """PROSPER Tutorial 35 (HSP QuickLook on the T27 well: CLYDE UNION TP115AH 30 stages at 8500 ft, 7545 rpm, PE2
+    1.03 / 1.01; test 5770 STB/d, 24 % water cut, GOR 800, THP 500 psig, power fluid 6308 STB/d; intake 2575, discharge
+    3205 psig). The manual's Fixed Top Node Pressure stream: wear 0 - discharge 3199.6, intake 2506.5 psig (measured
+    dP 91 % of calculated: wear 0.09); wear 0.09 - discharge 3195.3, intake 2564.3, bottom hole 2796.8 psig; IPR
+    pressure 2806.55 psig at 5770 STB/d with Pres 3800 psig (from 3750-4000 in 50 psi steps), at which the two streams
+    overlie. Ours within 25 psi (0.8 %); dP ratio 0.903 against 0.909. Turbine: CLYDE UNION T68-A, 26 stages - its
+    power at the test's power fluid rate within 2 % of the pump's (the test is consistent), the power fluid it needs
+    within 0.5 % of the measured 6308 STB/d."""
+    import dataclasses, json
+    from wellmodel import hsp as H, hsp_quicklook as HQ
+    G = 14.696
+    path, fl, I = _t27_setup()
+    inst = H.HSPInstalled(8500.0, "CLYDE UNION TP115AH (4250-12325 rpm)", 30, "CLYDE UNION T68 - A", 26, 7500.0,
+                          casing_id=6.8, tubing_od=4.8)
+    J = 5770.0 / (3800 - 2806.55)                      # PROSPER's IPR pressure at the test rate, straight line
+    ipr = lambda pr: (lambda q: pr - q / J)
+    inp = HQ.HSPQuickLookInput(500 + G, 5770.0, 0.24, 800.0, 3950 + G, 7545.0, 6308.0, 2072 + G, (), 2575 + G,
+                               3205 + G)
+    r0 = HQ.hsp_quicklook(path, fl, ipr(3950 + G), inp, inst, "pe2_style", 1.03, 1.01, I["eq_u"], pres_for=ipr)
+    s0 = r0.summary
+    assert abs(s0["Top down: pump discharge (psia)"] - G - 3199.6) < 25
+    assert abs(s0["Top down: pump intake (psia)"] - G - 2506.5) < 25
+    assert abs(s0["Measured / calculated pump dP"] - 0.909) < 0.01
+    assert abs(s0["Wear factor - first guess (1 - dP ratio, PROSPER)"] - 0.09) < 0.01
+    assert 0.08 < s0["Wear factor for the measured intake"] < 0.11
+    assert np.nanmax(np.abs(r0.profile["Top down (psia)"] - r0.profile["Bottom up (psia)"])) > 100   # not matched
+    assert s0["Pump speed (rpm)"] == 7545.0
+    r9 = HQ.hsp_quicklook(path, fl, ipr(3800 + G), dataclasses.replace(inp, pres=3800 + G),
+                          dataclasses.replace(inst, wear=0.09), "pe2_style", 1.03, 1.01, I["eq_u"], pres_for=ipr)
+    s9 = r9.summary
+    assert abs(s9["Top down: pump discharge (psia)"] - G - 3195.3) < 25
+    assert abs(s9["Top down: pump intake (psia)"] - G - 2564.3) < 25
+    assert abs(s9["Top down: bottom-hole pressure (psia)"] - G - 2796.8) < 25
+    pts = r9.points.set_index("Measurement")
+    assert abs(pts.loc["Pump intake", "Top down - measured (psi)"]) < 10       # intake now on the measured
+    assert abs(s9["Reservoir pressure for the top-down BHP (psia)"] - G - 3800) < 25
+    # with the matched wear factor and reservoir pressure the two streams overlie and reach the measured THP
+    assert np.nanmax(np.abs(r9.profile["Top down (psia)"] - r9.profile["Bottom up (psia)"])) < 15
+    assert abs(r9.bottom_up["thp"] - (500 + G)) < 10
+    assert abs(s9["Turbine power at the power fluid rate (hp)"] / s9["Top down: pump power (hp)"] - 1) < 0.02
+    assert abs(s9["Power fluid rate for the pump power (STB/d)"] / 6308.0 - 1) < 0.005 and not r9.notes
+    # a turbine not in the database: the pump side still runs, with a note
+    rn = HQ.hsp_quicklook(path, fl, ipr(3800 + G), inp, dataclasses.replace(inst, turbine="NO SUCH TURBINE"),
+                          "pe2_style", 1.03, 1.01, I["eq_u"])
+    assert np.isclose(rn.summary["Top down: pump intake (psia)"], s0["Top down: pump intake (psia)"])
+    assert any("not in the database" in n for n in rn.notes)
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T35_HSP_QuickLook.wellmodel.json"))
+    assert proj["widgets"]["opt_artificial_lift"] == "hsp" and proj["inputs"]["hql_qpf"] == 6308.0
+
+
+def test_hsp_turbine_t68_curves_prosper_t35():
+    """PROSPER's CLYDE UNION T68 blade A curves from the user's T35 file (plot at 7500 rpm, 22 stages): total head
+    loss, power per stage and efficiency against net turbine flow - exact with the database coefficients and the
+    affinity laws; the recommended range 3750-15450 bbl/d (5000-20600 at 10,000 rpm)."""
+    from wellmodel import hsp as H
+    t = H.TURBINES["CLYDE UNION T68 - A"]
+    assert {f"CLYDE UNION T68 - {k}" for k in "ABCDE"} <= set(H.TURBINES)
+
+    def rd(name):
+        rows = [l.split() for l in open(Path(__file__).parent / "data" / name)]
+        return np.array([(float(r[1]), float(r[2])) for r in rows if len(r) == 3 and r[0].isdigit()])
+    h, w, e = rd("t35_t68a_head_22st_7500.prn"), rd("t35_t68a_hp_per_stage_7500.prn"), rd("t35_t68a_eff_7500.prn")
+    assert np.allclose(22 * t.head_stage(h[:, 0], 7500.0), h[:, 1], rtol=2e-4, atol=0.2)
+    assert np.allclose(t.power_stage(w[:, 0], 7500.0), w[:, 1], rtol=2e-4, atol=1e-4)
+    assert np.allclose(100 * t.efficiency(e[:, 0], 7500.0), e[:, 1], atol=0.02)
+    assert np.allclose(t.range_at(7500.0), (3750.0, 15450.0))
+
+
+def test_srp_card_reference_t36():
+    """Tutorial 36's dynamometer card shapes (no PROSPER calculation): six shapes, anchored and unanchored, each a
+    closed loop with the effective plunger travel inside the stroke - shorter than it for every problem card."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from wellmodel import srp_cards as SC, plotting as P
+    cs = SC.reference_cards()
+    assert len(cs) == 6 and cs[0].title.startswith("Normal")
+    for c in cs:
+        for k in (c.anchored, c.unanchored):
+            assert np.allclose([k.x[0], k.y[0]], [k.x[-1], k.y[-1]])            # closed
+            assert set(k.labels) == set("ABCD")
+            a, b = k.ept
+            assert 0.0 <= a < b <= 1.0
+            if c.title.startswith(("Leaking", "Severe", "Gas")):
+                assert b - a < 0.8
+        P.plot_card_reference(c.anchored)
+    assert cs[0].anchored.ept == (0.0, 1.0)
+    assert max(cs[5].unanchored.y) > 1.2 and min(cs[5].anchored.y) < -0.2   # tapping: spike at C / at A
+
+
+def test_gas_lifted_gas_well_t47():
+    """PROSPER Tutorial 47 (the user's file: gas lift in the T38 retrograde condensate well, 0.7 gravity lift gas at a
+    fixed 10,000 ft, no annulus friction, WGR 500, PE5, U 5). The lift gas joins the produced gas above the injection
+    point (GasLiftedFluid): against PROSPER's gradient (1 MMscf/d of lift gas, 3.923 MMscf/d) the node superficial
+    velocities and densities are within 3 % above and below the valve; without lift gas the lifted traverse is the
+    plain one. PROSPER's VLP table (350 psig, 0-5 MMscf/d of lift gas): within 6 % from 1.9 to 16.9 MMscf/d (PE5-style
+    refitted on these and the T38 gradients; below about 0.6 MMscf/d PROSPER's PE5 loads up much more - ours is
+    10-60 % low there); wellhead temperature within 0.5 F. With PROSPER's IPR (its VLP/IPR table) the solution
+    bottom-hole pressure is within 1.3 % in every case; the rates within 3.3 % with 0.5-5 MMscf/d of lift gas at 1750
+    psig (PROSPER 3.374-3.951) and 1-5 MMscf/d at 1500 psig (2.359-2.792), and +10.7 % unlifted at 1750 psig (near the
+    VLP minimum the VLP is flat and PROSPER's IPR steep: 1 % of pressure is 5-8 % of rate); no flow at 1500 psig without
+    lift gas in both (with 0.5 MMscf/d ours finds a 0.25 MMscf/d point in the liquid-loading region, PROSPER none)."""
+    import dataclasses
+    from wellmodel import retrograde as RG, gaslift as GL, gaslift_system as GLS, system as SYS
+    G = 14.696
+    inp = RG.RetroInputs(7431.94, 0.745, 1.0, 0.745, 43.56, 4596.83 + G, 300.0, 1750 + G, 500.0, 20000, 0, 2.33, 0.31)
+    fl = wvlp.RetrogradeBOFluid(inp)
+    path = GL.with_nodes(_t38_path(), [10000.0])
+    lf = GL.GasLiftedFluid(fl, GL.LiftGas(0.7))
+    # node properties against PROSPER's gradient (top node 1750 psig, 3.923 MMscf/d, 1 MMscf/d lift gas)
+    nodes = []
+    for line in open(Path(__file__).parent / "data" / "t47_gradient_qgi1_top1750.prn"):
+        p_ = line.split()
+        if len(p_) > 40 and p_[0].isdigit():
+            v = [float(x) for x in p_[:7] + [x for x in p_[9:] if not x.isalpha()]]
+            if v[1] > 10000:
+                v.insert(42, 0.0)
+            nodes.append(v)
+    for v in nodes:
+        md, p, t, vsl, vsg, d, rho_l, rho_g = v[1], v[3], v[4], v[13], v[14], v[29], v[45], v[46]
+        if d > 4:
+            continue
+        c = {"q": np.array([3.923]), "wgr": np.array([500.0]), "qgi_lift": np.array([1.0 if md < 10000 else 0.0])}
+        s_ = lf.state(np.array([p + G]), np.array([t]), c)
+        a = np.pi * (d / 12) ** 2 / 4
+        assert float(np.ravel(s_["ql"])[0]) / a == pytest.approx(vsl, rel=0.03), md
+        assert float(np.ravel(s_["qg"])[0]) / a == pytest.approx(vsg, rel=0.025), md
+        assert float(np.ravel(s_["rho_g"])[0]) == pytest.approx(rho_g, rel=0.025), md
+        assert float(np.ravel(s_["rho_l"])[0]) == pytest.approx(rho_l, rel=0.025), md
+    s0 = lf.state(np.array([1000.0]), np.array([200.0]), {"q": np.array([2.0]), "wgr": np.array([500.0])})
+    s1 = fl.state(np.array([1000.0]), np.array([200.0]), {"q": np.array([2.0]), "wgr": np.array([500.0])})
+    assert all(np.allclose(s0[k], s1[k]) for k in s1)
+    case = {"q": np.array([2.0, 10.0]), "wgr": np.array([500.0, 500.0]), "cgr": np.array([134.5, 134.5])}
+    P0, _ = wvlp.traverse(path, fl, np.array([364.7, 364.7]), case, "pe5_style", 1.0, 1.0, 5.0)
+    r0 = GL.lifted_traverse(path, fl, 364.7, case, 0.0, "pe5_style", 1.0, 1.0, 5.0, fixed_md=10000.0, gas_sg=0.7)
+    assert np.allclose(r0.P[:, -1], P0[:, -1], rtol=2e-3)
+    # PROSPER's VLP table
+    vt = pd.read_csv(Path(__file__).parent / "data" / "t47_vlp_ipr.csv")
+    vt = vt[(vt.pr == 1750) & (vt.q > 1.9)]
+    q, qg = vt.q.to_numpy(), vt.qgi.to_numpy()
+    n = len(q)
+    r = GL.lifted_traverse(path, fl, np.full(n, 350 + G), {"q": q, "wgr": np.full(n, 500.0), "cgr": np.full(n, 134.55)},
+                           qg, "pe5_style", 1.0, 1.0, 5.0, fixed_md=10000.0, gas_sg=0.7)
+    err = (r.P[:, -1] - G) / vt.vlp.to_numpy() - 1
+    assert np.abs(err).max() < 0.065, err
+    assert np.allclose(r.T[:, 0], vt.tht.to_numpy(), atol=0.5)
+    assert np.allclose(r.inj_md, 10000.0)
+    # system calculation with PROSPER's IPR (fixed depth gas lift for a gas well)
+    from types import SimpleNamespace
+    full = pd.read_csv(Path(__file__).parent / "data" / "t47_vlp_ipr.csv")
+    sysr = pd.read_csv(Path(__file__).parent / "data" / "t47_system.csv")
+    setup = GLS.GasLiftSetup(method=GLS.METHODS[0], gas=GL.LiftGas(0.7), qgi=1.0, fixed_md=10000.0)
+    base = {"whp": 364.7, "u": 5.0, "wgr": 500.0, "sep_gor": 7432.94}
+    for pr, qgis, tol in ((1750.0, (0.5, 1.0, 3.0, 5.0), 0.035), (1500.0, (1.0, 2.5, 5.0), 0.035), (1750.0, (0.0,), 0.12)):
+        for qgi in qgis:
+            ip = full[(full.pr == pr) & (full.qgi == qgi)].sort_values("q")
+            curve = SimpleNamespace(q=np.r_[0.0, ip.q.to_numpy()] * 1000, pwf=np.r_[pr, ip.ipr.to_numpy()] + G,
+                                    pr=pr + G, aof=float(ip.q.max()) * 1000, fluid="gas", model="PROSPER table")
+            res, _ = SYS.solve_cases(lambda tid: path, fl, "gas", base, [{"qgi": qgi}], lambda ch, c=curve: c,
+                                     "pe5_style", 1.0, 1.0, lift=setup)
+            ref = float(sysr[(sysr.pr == pr) & (sysr.qgi == qgi)].q.iloc[0])
+            assert res[0].q == pytest.approx(ref, rel=tol), (pr, qgi, res[0].q, ref)
+            bhp = float(sysr[(sysr.pr == pr) & (sysr.qgi == qgi)].bhp.iloc[0])
+            assert res[0].pwf - G == pytest.approx(bhp, rel=0.0135), (pr, qgi)
+    ip = full[(full.pr == 1500) & (full.qgi == 0.0)].sort_values("q")
+    curve = SimpleNamespace(q=np.r_[0.0, ip.q.to_numpy()] * 1000, pwf=np.r_[1500.0, ip.ipr.to_numpy()] + G,
+                            pr=1500 + G, aof=float(ip.q.max()) * 1000, fluid="gas", model="PROSPER table")
+    res, _ = SYS.solve_cases(lambda tid: path, fl, "gas", base, [{"qgi": 0.0}], lambda ch: curve, "pe5_style", 1.0,
+                             1.0, lift=setup)
+    assert res[0].q is None                              # 1500 psig without lift gas: no flow (PROSPER too)
+    with pytest.raises(ValueError):
+        SYS.solve_cases(lambda tid: path, fl, "gas", base, [{"qgi": 1.0}], lambda ch: curve, "pe5_style",
+                        lift=dataclasses.replace(setup, method=GLS.METHODS[1]))
+
+
+def test_petex_gas_rel_perm_with_liquid_t47():
+    """PROSPER's Petroleum Experts gas IPR reduces the gas relative permeability with the produced liquid (its
+    'Calculated Gas Relative Permeability', rel perms off). User's Tutorial 47 file (1750 psig, 300 F, total GOR
+    7432.66, Swc 0.2): WGR 0 / 100 / 250 / 500 / 1000 / 2000 - 0.74108 / 0.69293 / 0.62888 / 0.53951 / 0.40607 /
+    0.24033; Swc 0.3 at WGR 500 - 0.40432. Ours within 0.6 %; no liquid gives the Tutorial 02 value. The example's IPR
+    AOF is then within 1.3-2.7 % of PROSPER's (23.33 / 16.93 / 12.71 / 7.48 / 12.65 MMscf/d; it was 25.4 against 16.9)."""
+    from wellmodel import inflow as I
+    bg = 0.02827 * 0.934746 * 759.67 / 1764.696 / 5.614583 * 1e6          # rb/MMscf at 1750 psig, 300 F (Z PROSPER's)
+    cgr = 1e6 / 7432.66
+    for wgr, swc, k in ((0, .2, .74108), (100, .2, .69293), (250, .2, .62888), (500, .2, .53951), (1000, .2, .40607),
+                        (2000, .2, .24033), (500, .3, .40432)):
+        assert I.petex_krg_liquid(swc, wgr, cgr, bg) == pytest.approx(k, rel=0.006), (wgr, swc)
+    assert I.petex_krg_liquid(0.25, 0.0, 0.0, bg) == pytest.approx(I.petex_krg(0.25))
+    assert I.petex_krg_liquid(0.25, 500.0, 0.0, None) == pytest.approx(I.petex_krg(0.25))

@@ -314,6 +314,43 @@ class WetGasFluid:
         return w / 24.0, (mg * hc.gas + mc * hc.oil + mw * hc.water) / np.maximum(w, 1e-12)
 
 
+class RetrogradeBOFluid:
+    """Retrograde condensate with PROSPER's black-oil condensate model (retrograde.py): condensate drops out of the
+    gas below the dew point and flows as liquid. Case keys: q (gas MMscf/d), wgr (STB/MMscf)."""
+    kind = "gas"
+
+    def __init__(self, inp):
+        self.rinp = inp
+        self.inp = inp.bo_inputs()           # water properties and impurities
+
+    def state(self, p, t, case):
+        from . import retrograde as RG
+        r, inp = self.rinp, self.inp
+        q, wgr = case["q"], np.maximum(case["wgr"], 0.0)
+        pr = RG.props(r, p, t)
+        q_c = q * pr["dropout"]                                    # condensed liquid, STB/d
+        m_tot = q * 1e6 * RHO_AIR_SC * r.gas_sg + q * r.cgr * RB * 62.428 * r.gamma_o
+        m_l = q_c * pr["bo"] * RB * pr["rho_o"]
+        q_o = q_c * pr["bo"] * RB / 86400
+        q_g = np.maximum(m_tot - m_l, 0.0) / pr["rho_g"] / 86400
+        bw, rho_w, mu_w = _water(inp, p, t)
+        q_w = q * wgr * bw * RB / 86400
+        ql = q_o + q_w
+        fo = np.where(ql > 1e-15, q_o / np.maximum(ql, 1e-15), 0.0)
+        return dict(ql=ql, qg=q_g, rho_l=fo * pr["rho_o"] + (1 - fo) * rho_w, rho_g=pr["rho_g"],
+                    mu_l=fo * pr["mu_o"] + (1 - fo) * mu_w, mu_g=pr["mu_g"],
+                    sig=fo * pr["ift"] + (1 - fo) * sigma_water_gas(rho_w, pr["rho_g"]))
+
+    def mass_cp(self, case, hc: HeatCapacities):
+        r = self.rinp
+        q, wgr = case["q"], np.maximum(case["wgr"], 0.0)
+        mg = q * 1e6 * RHO_AIR_SC * r.gas_sg
+        mc = q * r.cgr * RB * 62.428 * r.gamma_o
+        mw = q * wgr * RB * 62.428 * _water_sg(self.inp)
+        w = mg + mc + mw
+        return w / 24.0, (mg * hc.gas + mc * hc.oil + mw * hc.water) / np.maximum(w, 1e-12)
+
+
 def eos_grid(eos_fluid, p_max, t_min, t_max, n_p=80, n_t=6):
     """Flash the reservoir fluid on a (T, p) grid. Returns dict of 2-D arrays (n_t, n_p). Pressures: half
     geometric (low pressures), half linear (the tubing range) - the phase split and densities change fast near the
@@ -592,9 +629,10 @@ def case_of(tests: pd.DataFrame, kind: str):
 
 
 def traverse_up(path: FlowPath, fluid, p_bottom, case, correlation="beggs_brill", p1=1.0, p2=1.0, u=8.0,
-                hc: HeatCapacities | None = None):
+                hc: HeatCapacities | None = None, t_bottom=None):
     """Pressure (cases x nodes) from the bottom node up to the wellhead for a given bottom-node pressure (the inflow
-    side of a top-node solution). NaN from the node where the pressure is exhausted upwards."""
+    side of a top-node solution). NaN from the node where the pressure is exhausted upwards. t_bottom: temperature
+    of the fluid entering at the bottom node (default the formation temperature there)."""
     hc = hc or HeatCapacities()
     case = dict(case)
     case["_pb"], case["_p1"], case["_p2"] = p_bottom, p1, p2
@@ -602,7 +640,9 @@ def traverse_up(path: FlowPath, fluid, p_bottom, case, correlation="beggs_brill"
     pb, p1, p2 = case.pop("_pb"), case.pop("_p1"), case.pop("_p2")
     corr = CORRELATIONS[correlation]
     w, cp = fluid.mass_cp(case, hc)
-    T = temperature_profile(path, w, cp, u)
+    if t_bottom is not None:
+        w = np.broadcast_to(np.asarray(w, float), pb.shape)
+    T = temperature_profile(path, w, cp, u, t_bottom)
     n = len(path.md)
     P = np.full((pb.size, n), np.nan)
     bad = ~np.isfinite(pb) | (pb <= 14.7)

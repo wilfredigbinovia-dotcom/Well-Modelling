@@ -19,8 +19,10 @@ stays open). Injection is NOT POSSIBLE at the injection depth when the measured 
 tubing pressure there.
 
 Multipoint QuickLook: top down, each valve passes the gas the valve model gives at the measured casing and tubing
-pressures (gaslift_system.valve_rates), and the lift gas left below it is reduced; gas the valves cannot take is
-reported as unaccounted.
+pressures (gaslift_system.valve_rates - or Thornhill-Craver through the full port once open, PROSPER's
+'Thornhill-Craver' model type), and the lift gas left below it is reduced; gas the valves cannot take is reported as
+unaccounted. Each valve's calculated (capacity) rate is also reported. The results are at the injection depth entered
+(the orifice), as PROSPER. Validated on the user's PROSPER Tutorial 33b run with Thornhill-Craver valves.
 
 Units: psia, degF, ft MD, STB/d, MMscf/d.
 """
@@ -143,23 +145,29 @@ def quicklook(path: V.FlowPath, fluid, ipr_pwf, setup: GLS.GasLiftSetup, inp: Qu
         mds = np.array([v.md for v in valves])
         idx = [path.node(m) for m in mds]
         valve_q = np.zeros(len(valves))
+        valve_cap = np.zeros(len(valves))
         remaining = inp.qgi
         for j, v in enumerate(valves):
             seg = GLS._seg_from_valves(path, mds, valve_q[None, :])[0] + np.where(mid < mds[j], remaining, 0.0)
             P, T = GLS.multi_traverse(path, fluid, inp.thp, case, seg[None, :], correlation, p1, p2, u_use, hc, sg)
             flow = seg  # lift gas still going down the annulus = gas in the tubing below each depth (to valve j)
             pc = GLS.casing_profile(path, setup, np.array([inp.chp]), T, flow[None, :])
-            qv, _, _ = GLS.valve_rates((v,), pc[:, [idx[j]]], P[:, [idx[j]]], T[:, [idx[j]]], sg, setup.dome_high_p,
-                                       inp.tc_derate)
-            valve_q[j] = min(float(qv[0, 0]), remaining)
+            v_eff = v
+            if v.model == "Thornhill-Craver" and v.kind != "Orifice":
+                # full port once open (casing above the closing pressure at the valve temperature)
+                pvc = float(GLS.dome_at_t(v.pd60, T[0, idx[j]], setup.dome_high_p)) + 14.696 \
+                    if np.isfinite(v.pd60) else -np.inf
+                v_eff = replace(v, kind="Orifice") if pc[0, idx[j]] > pvc else replace(v, kind="Orifice", port_64=0.0)
+            qv, _, _ = GLS.valve_rates((v_eff,), pc[:, [idx[j]]], P[:, [idx[j]]], T[:, [idx[j]]], sg,
+                                       setup.dome_high_p, inp.tc_derate)
+            valve_cap[j] = float(qv[0, 0])
+            valve_q[j] = min(valve_cap[j], remaining)
             remaining -= valve_q[j]
         gas_seg = GLS._seg_from_valves(path, mds, valve_q[None, :])[0]
         if remaining > 1e-3:
             notes.append(f"{remaining:.3f} MMscf/d of the injected gas cannot pass the valves at the measured "
                          "pressures (unaccounted).")
-        inj_md = float(mds[np.nonzero(valve_q > 1e-6)[0][-1]]) if np.any(valve_q > 1e-6) else np.nan
-        if np.isfinite(inj_md):
-            k_inj = path.node(inj_md)
+        # results at the injection depth entered (PROSPER: the orifice), not the deepest valve passing gas
     # ---- top down
     T = GLS._temperature_gas(path, fluid, case, gas_seg[None, :], u_use, hc, sg)[0]
     P_td, _ = GLS.multi_traverse(path, fluid, inp.thp, case, gas_seg[None, :], correlation, p1, p2, u_use, hc, sg,
@@ -178,14 +186,18 @@ def quicklook(path: V.FlowPath, fluid, ipr_pwf, setup: GLS.GasLiftSetup, inp: Qu
     t_v = float(T[k_inj])
     q_port = (inp.qgi if not multipoint else float(valve_q[np.argmin(np.abs(np.array([v.md for v in valves]) -
                                                                            path.md[k_inj]))]))
-    pc_calc_v = GL.upstream_for_rate(q_port * 1000.0, d_in, pt_v, t_v, sg, inp.tc_derate)
-    dp_valve = pc_calc_v - pt_v
+    # single point: from the measured (top-down) tubing pressure at the valve; multipoint: from the bottom-up one
+    # (PROSPER's T33b run: calculated CHP 1429.12 psig against 1432 this way, 1495 from the top-down pressure)
+    pt_base = float(P_bu[k_inj]) if multipoint else pt_v
+    pc_calc_v = GL.upstream_for_rate(q_port * 1000.0, d_in, pt_base, t_v, sg, inp.tc_derate)
+    dp_valve = pc_calc_v - pt_base
     chp_calc = _chp_from_depth(path, setup, pc_calc_v, k_inj, T, flow)
     pc_bu = GLS.casing_profile(path, setup, np.array([chp_calc]), T[None, :], flow[None, :])[0] \
         if np.isfinite(chp_calc) else np.full(len(path.md), np.nan)
     pc_bu = np.where(path.md <= path.md[k_inj] + 1e-6, pc_bu, np.nan)
     pc_td_show = np.where(path.md <= path.md[k_inj] + 1e-6, pc_td, np.nan)
-    q_crit = float(GL.thornhill_craver(d_in, pc_calc_v, pc_calc_v * GL.TC_RCRIT, t_v, sg)) / 1000.0 * \
+    pc_crit_base = float(pc_v) if multipoint else pc_calc_v     # multipoint: at the measured casing pressure (T33b)
+    q_crit = float(GL.thornhill_craver(d_in, pc_crit_base, pc_crit_base * GL.TC_RCRIT, t_v, sg)) / 1000.0 * \
         (1 - inp.tc_derate / 100.0)
     # critical casing head pressure: the CHP whose casing pressure at the port passes the critical rate against the
     # measured tubing pressure (above it the port runs at or beyond its critical capacity)
@@ -261,6 +273,8 @@ def quicklook(path: V.FlowPath, fluid, ipr_pwf, setup: GLS.GasLiftSetup, inp: Qu
                             "Status": "OPEN" if pc > pt else "NEG DP"})
             if valve_q is not None:
                 row["Gas rate (MMscf/d)"] = float(valve_q[j])
+                row["Calculated gas rate (MMscf/d)"] = float(valve_cap[j])
+                row["Model"] = v.model or ("Thornhill-Craver" if v.kind == "Orifice" else "Throttling")
             rows.append(row)
         vt = pd.DataFrame(rows)
         if multipoint:

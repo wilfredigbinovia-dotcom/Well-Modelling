@@ -50,6 +50,7 @@ class GLValve:
     r: float = 0.0               # port / bellows area (valves)
     pd60: float = np.nan         # dome pressure at 60 F, psig (valves; multipoint only)
     n: int = 1                   # valves in the mandrel (PROSPER "Number of valves"): n x the gas of one
+    model: str = ""              # QuickLook valve model: "" (throttling rule) or "Thornhill-Craver" (full port once open)
 
 
 @dataclass
@@ -380,6 +381,13 @@ def lift_traverse(path: V.FlowPath, fluid, top_p, case: dict, setup: GasLiftSetu
     top = c.pop("_top")
     qgi, pcs, dpv, injmd = (c.pop(k) for k in ("_qgi", "_pcs", "_dpv", "_injmd"))
     nc = top.size
+    if fluid.kind == "gas":
+        if setup.method != METHODS[0] or setup.coiled is not None:
+            raise ValueError("Gas lifted gas wells: fixed depth of injection only (PROSPER Tutorial 47).")
+        if setup.rate_mode != RATE_MODES[0]:
+            raise ValueError("Gas lifted gas wells: enter the injected gas rate (not a GLR).")
+        if not isinstance(fluid, GL.GasLiftedFluid):
+            fluid = GL.GasLiftedFluid(fluid, setup.gas)
     sg = setup.gas.sg
     m = setup.method
     note = np.full(nc, "", dtype=object)

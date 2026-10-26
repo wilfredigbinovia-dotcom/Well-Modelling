@@ -155,9 +155,9 @@ class WellOptions:
                 "Injected gas is normally lean. Use Dry and wet gas unless rich gas is "
                 "being cycled back into the reservoir.")
         if self.fluid_type == "retrograde_condensate" and self.method == "black_oil":
-            add("warning", ["fluid_type", "method"],
-                "Black oil can only approximate condensate dropout below the dew point. "
-                "Equation of state is recommended for retrograde condensates.")
+            add("info", ["fluid_type", "method"],
+                "Black-oil retrograde condensate: PROSPER's model as reconstructed from its PVT tables (Tutorial 38). "
+                "As PROSPER advises, validate it against an equation of state rather than matching it to lab data.")
         if self.completion == "cased_hole" and self.sand_control == "slotted_liner":
             add("warning", ["completion", "sand_control"],
                 "Slotted liners are normally run in open hole. Check the completion, or "
@@ -218,9 +218,12 @@ class WellOptions:
                     "A PCP produces up the tubing (with a sucker rod drive, the rod-tubing annulus): choose Tubing "
                     "flow (separated gas goes up the casing annulus).")
         if self.artificial_lift == "gas_lift":
-            if self.well_type != "producer" or self.fluid_type != "oil":
-                add("error", ["artificial_lift", "fluid_type", "well_type"],
-                    "Continuous gas lift is modelled for oil (and water) producers.")
+            if self.well_type != "producer":
+                add("error", ["artificial_lift", "well_type"], "Continuous gas lift is modelled for producers.")
+            elif self.fluid_type != "oil":
+                add("info", ["artificial_lift", "fluid_type"],
+                    "Gas lifted gas well (PROSPER Tutorial 47): fixed depth of injection, injected gas rate, no "
+                    "friction in the annulus; the lift gas joins the produced gas above the injection point.")
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
                     "Gas lift injects down the annulus and produces up the tubing: choose Tubing flow.")

@@ -388,7 +388,7 @@ def design(d: Duty, pump: Pump, motor: Motor, cable: Cable, freq=60.0, cable_len
     n = int(stages) if stages else int(np.ceil(d.head / h - 1e-9))
     eff = float(pump.efficiency(d.q_avg, freq))
     hyd = d.fluid_hp * n * h / d.head
-    power = hyd / max(eff, 1e-6)
+    power = hyd / max(eff * (1.0 - wear), 1e-6)       # wear lowers the head, not the power
     hp_avail = motor.hp * freq / 60.0
     load = 100.0 * power * (1.0 + motor_margin) / hp_avail
     m = motor.at(load, freq)
@@ -481,7 +481,7 @@ def discharge_pressure(path, fluid, pwf, q, wc, gor, pump_md, pump: Pump, n_stag
             dp = h * rho / 144.0
             e = max(float(pump.efficiency(q_loc, freq)), 1e-6)
             hyd += q_loc * dp * DP_HP
-            pw += q_loc * dp * DP_HP / e
+            pw += q_loc * dp * DP_HP / (e * max(1.0 - wear, 0.05))   # wear lowers the head, not the power (PROSPER T34)
             q_sum += q_loc
             p += dp
         q_avg = q_sum / max(int(n_stages), 1)
@@ -638,7 +638,7 @@ def pump_gain(fluid, pip, t, case, pump: Pump, n_stages, freq=60.0, wear=0.0, gr
             pw += ps * per * rho / 62.428
         else:
             e = np.maximum(pump.efficiency(q_loc, freq), 1e-6)
-            pw += q_loc * dp * DP_HP / e
+            pw += q_loc * dp * DP_HP / (e * max(1.0 - wear, 0.05))   # wear lowers the head, not the power (PROSPER T34)
         qs += q_loc
         p = p + dp
     return p, hyd, pw, qs / ng

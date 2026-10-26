@@ -412,3 +412,128 @@ def gradient_table(path, fluid, q, P, T, p_unit_gauge=True) -> pd.DataFrame:
                      f"{name} viscosity (cp)": float(mu), fvf_lab: float(fvf),
                      "Diameter (in)": path.d[j] * 12, "Formation temperature (°F)": path.t_form[i]})
     return pd.DataFrame(recs)
+
+
+# ======================================================================= well test matching
+# PROSPER VLP/IPR Matching for injectors (Tutorials 21 and 22): Estimate U Value, Match VLP, VLP/IPR, Adjust IPR.
+def inj_test_columns(gas: bool) -> list[str]:
+    return ["Test Point Date", "Test Point Comment", "Injected Fluid Pressure (psia)",
+            "Downstream Temperature (deg F)", "Gas Rate (MMscf/d)" if gas else "Water Rate (STB/d)",
+            "Gauge Depth (Measured) (ft)", "Gauge Pressure (psia)", "Reservoir Pressure (psia)"]
+
+
+def clean_inj_tests(df: pd.DataFrame, gas: bool, md_top=None, md_bottom=None):
+    """Usable test rows (whp, t_down, q, gauge_md, gauge_p, pr, label) and a list of (level, message)."""
+    cols = inj_test_columns(gas)
+    num = lambda c: pd.to_numeric(df.get(c, pd.Series(np.nan, index=df.index)), errors="coerce").to_numpy(float)
+    whp, td, q, gmd, gp_, pr = (num(c) for c in cols[2:])
+    rows, issues = [], []
+    for i in range(len(df)):
+        if not (np.isfinite(whp[i]) or np.isfinite(q[i])):
+            continue
+        lab = str(df.index[i])
+        if not (np.isfinite(whp[i]) and np.isfinite(q[i]) and q[i] > 0):
+            issues.append(("error", f"Test {lab}: injected fluid pressure and a positive rate are required."))
+            continue
+        if np.isfinite(gmd[i]) and md_bottom is not None and not (md_top - 1e-6 <= gmd[i] <= md_bottom + 1e-6):
+            issues.append(("error", f"Test {lab}: gauge depth {gmd[i]:g} ft is outside the tubing "
+                                    f"({md_top:g}-{md_bottom:g} ft)."))
+            continue
+        if np.isfinite(gmd[i]) != np.isfinite(gp_[i]):
+            issues.append(("warning", f"Test {lab}: gauge depth and gauge pressure go together - the gauge is "
+                                      "ignored."))
+            gmd[i] = gp_[i] = np.nan
+        rows.append({"label": lab, "whp": whp[i], "t_down": td[i], "q": q[i], "gauge_md": gmd[i],
+                     "gauge_p": gp_[i], "pr": pr[i]})
+    return pd.DataFrame(rows, columns=["label", "whp", "t_down", "q", "gauge_md", "gauge_p", "pr"]), issues
+
+
+def _node(path, md):
+    return int(np.argmin(np.abs(path.md - md)))
+
+
+def estimate_u(path, fluid, tests, t_inj=60.0, hc=None, u_max=500.0) -> pd.DataFrame:
+    """U per test that brings the calculated temperature at the bottom node (PROSPER's 'downstream' temperature
+    for an injector) to the measured one."""
+    out = []
+    for _, t in tests.iterrows():
+        u = np.nan
+        if np.isfinite(t["t_down"]):
+            f = lambda x: traverse(path, fluid, t["whp"], [t["q"]], x, t_inj, hc)[1][0, -1] - t["t_down"]
+            try:
+                u = brentq(f, 1e-3, u_max, xtol=1e-6)
+            except ValueError:
+                u = np.nan
+        out.append({"Test": t["label"], "Downstream temperature (°F)": t["t_down"], "U (BTU/h/ft2/F)": u})
+    return pd.DataFrame(out)
+
+
+def gauge_pressures(path, fluid, tests, u=8.0, t_inj=60.0, hc=None, p1=1.0, p2=1.0):
+    """Calculated pressure at each test's gauge depth (NaN where a test has no gauge)."""
+    out = np.full(len(tests), np.nan)
+    for i, (_, t) in enumerate(tests.iterrows()):
+        if np.isfinite(t["gauge_md"]):
+            P, _ = traverse(path, fluid, t["whp"], [t["q"]], u, t_inj, hc, p1, p2)
+            out[i] = P[0, _node(path, t["gauge_md"])]
+    return out
+
+
+@dataclass
+class InjMatch:
+    p1: float
+    p2: float
+    std: float
+    before: np.ndarray       # calculated - measured gauge pressure (psi), unmatched
+    after: np.ndarray        # same, matched
+    n: int
+
+
+def match_vlp(path, fluid, tests, u=8.0, t_inj=60.0, hc=None, fit_p2=False) -> InjMatch:
+    """Parameter 1 (gravity multiplier) by least squares on the gauge pressures; Parameter 2 (friction) stays 1
+    unless fit_p2 (PROSPER's Tutorials 21 and 22 both end with P2 = 1: in an injector friction is a small part of
+    the pressure change and gravity carries the match)."""
+    g = tests[np.isfinite(tests["gauge_p"])].reset_index(drop=True)
+    if not len(g):
+        raise ValueError("No tests with gauge depth and pressure to match.")
+    meas = g["gauge_p"].to_numpy(float)
+    res = lambda x: gauge_pressures(path, fluid, g, u, t_inj, hc, x[0], x[1] if fit_p2 else 1.0) - meas
+    before = res([1.0, 1.0])
+    from scipy.optimize import least_squares
+    if fit_p2:
+        rr = lambda x: np.concatenate([res(x), [(x[1] - 1) * 40]])
+        x = least_squares(rr, [1.0, 1.0], bounds=([0.5, 0.05], [1.5, 5.0]), diff_step=1e-4, xtol=1e-8).x
+    else:
+        x = [least_squares(lambda y: res([y[0], 1.0]), [1.0], bounds=([0.5], [1.5]), diff_step=1e-4,
+                           xtol=1e-10).x[0], 1.0]
+    after = res(x)
+    std = float(np.std(after, ddof=1)) if len(after) > 1 else float(abs(after[0]))
+    return InjMatch(float(x[0]), float(x[1]), std, before, after, len(g))
+
+
+def vlp_ipr_test(path, fluid, t, ipr, u=8.0, t_inj=60.0, hc=None, p1=1.0, p2=1.0):
+    """One test: system rate and pressure at the test's injected fluid pressure, and the bottom-hole pressure
+    on the VLP at the measured rate ('measured' BHP). Returns (result or None, bhp_at_measured_rate)."""
+    res, *_ = solve(path, fluid, t["whp"], ipr, u, t_inj, hc, p1, p2)
+    bhp = float(vlp_curve(path, fluid, t["whp"], [t["q"]], u, t_inj, hc, p1, p2)[0])
+    return res, bhp
+
+
+def adjust_ipr(path, fluid, t, ipr_for, what="skin", u=8.0, t_inj=60.0, hc=None, p1=1.0, p2=1.0,
+               lo=None, hi=None):
+    """Skin (what='skin') or reservoir pressure (what='pr') at which the system rate equals the test's rate.
+    ipr_for(skin=..., pr=...) builds the injectivity. Returns the value or NaN."""
+    if what == "skin":
+        lo, hi = (-6.0 if lo is None else lo), (200.0 if hi is None else hi)
+    else:
+        bhp = float(vlp_curve(path, fluid, t["whp"], [t["q"]], u, t_inj, hc, p1, p2)[0])
+        lo, hi = (15.0 if lo is None else lo), (bhp - 0.01 if hi is None else hi)
+
+    def f(x):
+        ipr = ipr_for(**{what: x})
+        r, *_ = solve(path, fluid, t["whp"], ipr, u, t_inj, hc, p1, p2)
+        q = r.q if r is not None else 0.0
+        return q - t["q"]
+    try:
+        return float(brentq(f, lo, hi, xtol=1e-4))
+    except ValueError:
+        return float("nan")

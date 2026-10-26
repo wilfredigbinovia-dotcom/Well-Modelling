@@ -516,8 +516,28 @@ def petex_krg(swc):
     return float(max(_KRG_VAL[3] + slope * (swc - 0.4), 0.01))
 
 
+# gas relative permeability with produced liquid (PROSPER's 'Calculated Gas Relative Permeability', rel perms off):
+# the water saturation rises above connate by KAPPA x the liquid volume fraction at reservoir conditions, liquid =
+# WGR + C_CGR x CGR (stock-tank STB/MMscf, B = 1), gas = Bg (rb/MMscf); krg = krg(Swc) x f(Sw) / f(Swc) with
+# f(S) = (1 - S)^(1 + a S + b S^2). Fitted on the user's Tutorial 47 file (1750 psig, 300 F, CGR 134.5, WGR 0-2000,
+# Swc 0.2 and 0.3: 0.24-0.74, all within 0.5 %); with no liquid it is petex_krg(Swc) (Tutorial 02).
+PETEX_KRG_LIQ = (0.68086, 0.59868, 0.76963, 0.82765)     # a, b, KAPPA, C_CGR
+
+
+def petex_krg_liquid(swc, wgr=0.0, cgr=0.0, bg_rb_mmscf=None):
+    """Gas relative permeability at Swc with produced water and condensate (see PETEX_KRG_LIQ)."""
+    k0 = petex_krg(swc)
+    liq = max(float(wgr), 0.0) + PETEX_KRG_LIQ[3] * max(float(cgr), 0.0)
+    if liq <= 0 or not bg_rb_mmscf or bg_rb_mmscf <= 0:
+        return k0
+    a, b, kap, _ = PETEX_KRG_LIQ
+    f = lambda s_: (1 - s_) ** (1 + a * s_ + b * s_ * s_)
+    sw = min(swc + kap * liq / (liq + float(bg_rb_mmscf)), 0.99)
+    return float(k0 * f(sw) / f(min(swc, 0.99)))
+
+
 def petex_gas(pr, t_f, k, h, area_acres, ca, rw, hp, t_days, phi, swc, skin, m_fn, mu_r, cg_r, sg_sep,
-              d_entered=None, perm="total", cw=3e-6):
+              d_entered=None, perm="total", cw=3e-6, wgr=0.0, cgr=0.0, z_r=None):
     """PROSPER's Petroleum Experts IPR for dry and wet gas:
         M(Pr) - M(Pwf) = 1422 T / (k_g h) [ (X + S) q + D q^2 ]        (q Mscf/d, M = PROSPER's gauge m(p))
     k_g = k krg(Swc) (gas permeability at connate water; with perm="gas" the entered k is k_g).
@@ -527,9 +547,11 @@ def petex_gas(pr, t_f, k, h, area_acres, ca, rw, hp, t_days, phi, swc, skin, m_f
     beta = 2.73e10 / k_g^1.1045, g the separator gas gravity, mu at Pr, k absolute.
     Validated on PROSPER Tutorial 02 IPR runs (time, area, shape factor, wellbore radius, Swc, D): see tests."""
     tr = t_f + RANKINE
-    krg = petex_krg(swc) if perm == "total" else 1.0
+    bg_rb = 0.02827 * z_r * tr / pr / 5.614583 * 1e6 if z_r is not None else None
+    liq_ratio = petex_krg_liquid(swc, wgr, cgr, bg_rb) / petex_krg(swc)
+    krg = (petex_krg(swc) if perm == "total" else 1.0) * liq_ratio
     k_abs = k if perm == "total" else k / max(petex_krg(swc), 1e-6)
-    kg = k_abs * krg
+    kg = k_abs * krg if perm == "total" else k * liq_ratio
     dietz = dietz_term(area_acres, ca, rw)
     x_pss = dietz + PETEX_PSS_OFFSET
     ct = (1 - swc) * cg_r + swc * cw

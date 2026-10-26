@@ -225,3 +225,34 @@ def plot_forecast(fr, pb=None):
                         color=INK, fontsize=8.5, ha="right")
     fig.tight_layout()
     return fig
+
+
+def plot_card_reference(card, ax=None, title=None):
+    """One schematic dynamometer card of wellmodel.srp_cards (load against position, normalised)."""
+    import matplotlib.pyplot as plt
+    if ax is None:
+        _, ax = plt.subplots(figsize=(3.4, 2.5))
+    fig = ax.figure
+    ax.plot(card.x, card.y, color=SERIES[0], lw=2.0, solid_joinstyle="round")
+    off = {"A": (-0.05, -0.08), "B": (-0.05, 0.05), "C": (0.03, 0.05), "D": (0.03, -0.08)}
+    for k, (x, y) in card.labels.items():
+        dx, dy = off[k]
+        ax.text(x + dx, y + dy, k, fontsize=9, fontweight="bold", color=INK, ha="center", va="center")
+    ymin = min(-0.2, float(np.min(card.y)) - 0.12)
+    y_mpt, y_ept = ymin - 0.12, 0.5
+    ax.annotate("", (0.0, y_mpt), (1.0, y_mpt), arrowprops=dict(arrowstyle="<->", color=INK2, lw=0.9))
+    ax.text(0.5, y_mpt - 0.04, "MPT", fontsize=8, color=INK2, ha="center", va="top")
+    a, b = card.ept
+    ax.annotate("", (a, y_ept), (b, y_ept), arrowprops=dict(arrowstyle="<->", color=SERIES[1], lw=1.1))
+    ax.text(0.5 * (a + b), y_ept + 0.04, "EPT", fontsize=8, color=SERIES[1], ha="center", va="bottom")
+    if card.fo:
+        ax.annotate("", (1.12, 0.0), (1.12, 1.0), arrowprops=dict(arrowstyle="<->", color=INK2, lw=0.9))
+        ax.text(1.15, 0.5, "Fo", fontsize=8, color=INK2, va="center")
+    ax.set_xlim(-0.12, 1.25)
+    ax.set_ylim(y_mpt - 0.2, max(1.2, float(np.max(card.y)) + 0.15))
+    ax.set_xticks([]); ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    if title:
+        ax.set_title(title, fontsize=8.5, color=INK2)
+    return fig

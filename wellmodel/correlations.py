@@ -740,36 +740,50 @@ def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
 
 # ---------------------------------------------------------------------------
 PE5_SLUG_SLIP = 0.32           # ft/s - slug-flow slip velocity, calibrated on PROSPER PE5 gradients (Abura 2S)
-PE5_FRICTION = (1.6517, -0.3361)   # slug friction / Moody(rho_s vm d / mu_L) rho_s vm^2/2gd = a + b HL, same data
+PE5_DRIFT = (1.04213, -0.30582, 1.70985, 0.63258)  # vsg/(1-HL) = (a + b lambda) vm + c lambda^n (ft/s)
+PE5_DRIFT_CAP = 3.0            # drift-flux holdup at most 3 x the no-slip holdup (dry gas tends to no slip)
+PE5_FRICTION = (-2.28432, 0.29878, 0.10340, -0.72371, 0.32939)  # slug friction / Moody =
+#   exp(a + b HL + c ln vm + d ln mu_g + e ln(rho_g / rho_l))
+#   both fitted on PROSPER PE5 gradients: Tutorial 38 (384 nodes, condensate, 2-9 % liquid, 19-115 ft/s, 560-4020 psig) and
+#   Tutorial 47 (four gradients, 197 nodes, water-rich, 3-38 % liquid, 5-53 ft/s, 360-4015 psig), with Abura 2S
 
 
 def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     """PE5-style: a calibrated approximation of Petroleum Experts' proprietary PE5, from what PROSPER's PE5
-    gradient output shows (Abura 2S). NOT PE5 itself.
+    gradient output shows (Abura 2S oil well; Tutorial 38 condensate well, 3.99 in tubing, 20-115 ft/s). NOT PE5
+    itself.
 
     Bubble flow (Griffith & Wallis limit, gas fraction below max(1.071 - 0.2218 vm^2/d, 0.13)): Griffith holdup
     (0.8 ft/s slip) and Griffith friction - PE5 reports this region as dispersed bubble with exactly that slip.
-    Slug flow: holdup from a constant 0.32 ft/s slip (at least the no-slip holdup); static gradient from the
-    in-situ density; friction = (1.6517 - 0.3361 HL) x the Moody friction of the slug mixture (in-situ density,
-    mixture velocity, liquid viscosity). Transition and mist (Duns & Ros map): Duns & Ros."""
+    Everything else is reported by PE5 as slug flow, even at 110 ft/s gas velocity with 2 % liquid where Duns & Ros
+    would give mist (Tutorial 38): holdup the larger of a constant 0.32 ft/s slip (low velocity, Abura 2S) and a
+    drift flux vsg/(1-HL) = (1.0421 - 0.3058 lambda) vm + 1.710 lambda^0.6326 ft/s (the drift grows with the liquid
+    fraction; capped at 3 x the no-slip holdup); static gradient from the in-situ density; friction =
+    exp(-2.284 + 0.299 HL + 0.1034 ln vm - 0.724 ln mu_g + 0.329 ln(rho_g/rho_l)) x the Moody friction of the slug
+    mixture (in-situ density, mixture velocity, liquid viscosity). Fitted on PROSPER's PE5 gradients of Tutorial 38
+    (condensate, 2-9 % liquid, 19-115 ft/s, BO and EoS, 8 traverses) and Tutorial 47 (water-rich, 3-38 % liquid,
+    5-53 ft/s, 5 traverses), 624 nodes: holdup within 2.1 % (T38) / 5.2 % (T47) at every node, pressure drop per
+    traverse within 3.8 % (T47 within 2.2 %); Abura 2S holdup within 0.6 %, total gradient within 2 %."""
     vm, lam = _no_slip_lambda(vsl, vsg)
     e_hb, f_hb, hl_hb = hagedorn_brown(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
-    e_dr, f_dr, hl_dr = duns_ros(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p)
     lb = np.maximum(1.071 - 0.2218 * vm * vm / d, 0.13)
     bubble = (vsg / np.maximum(vm, 1e-12)) < lb
-    k = (rho_l / sig_l) ** 0.25
-    beyond_slug = 1.938 * vsg * k >= 50 + 36 * 1.938 * vsl * k
     vs = PE5_SLUG_SLIP
     disc = np.maximum((1 + vm / vs) ** 2 - 4 * vsg / vs, 0.0)
-    hl_s = np.clip(1 - 0.5 * (1 + vm / vs - np.sqrt(disc)), lam, 1.0)
+    hl_slip = 1 - 0.5 * (1 + vm / vs - np.sqrt(disc))
+    a0, a1, c_d, n_d = PE5_DRIFT
+    hl_df = np.minimum(1 - vsg / np.maximum((a0 + a1 * lam) * vm + c_d * lam ** n_d, 1e-9), PE5_DRIFT_CAP * lam)
+    hl_s = np.clip(np.maximum(hl_slip, hl_df), lam, 1.0)
     rho_s = rho_l * hl_s + rho_g * (1 - hl_s)
     f_m = friction_factor(rho_s * vm * d / (mu_l * CP_TO_LBFTS), rough / d)
-    a_, b_ = PE5_FRICTION
-    f_s = (a_ + b_ * hl_s) * f_m * rho_s * vm * vm / (2 * G * d) / 144.0
+    a_, b_, c_, d_, e_ = PE5_FRICTION
+    mult = np.exp(a_ + b_ * hl_s + c_ * np.log(np.maximum(vm, 1e-6)) + d_ * np.log(np.maximum(mu_g, 1e-4))
+                  + e_ * np.log(np.maximum(rho_g, 1e-3) / np.maximum(rho_l, 1e-3)))
+    f_s = mult * f_m * rho_s * vm * vm / (2 * G * d) / 144.0
     e_s = rho_s * sin_t / 144.0
-    e = np.where(bubble, e_hb, np.where(beyond_slug, e_dr, e_s))
-    f = np.where(bubble, f_hb, np.where(beyond_slug, f_dr, f_s))
-    hl = np.where(bubble, hl_hb, np.where(beyond_slug, hl_dr, hl_s))
+    e = np.where(bubble, e_hb, e_s)
+    f = np.where(bubble, f_hb, f_s)
+    hl = np.where(bubble, hl_hb, hl_s)
     single = lam > 0.99999
     return np.where(single, e_hb, e), np.where(single, f_hb, f), np.where(single, 1.0, hl)
 

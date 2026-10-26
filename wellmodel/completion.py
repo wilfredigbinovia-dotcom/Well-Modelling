@@ -274,6 +274,16 @@ def props_from_fluid(fluid, kind, t_f, ratios, multiphase=True):
     return props
 
 
+def props_at_pressure(props, p_fixed):
+    """The property function evaluated at one pressure (PROSPER evaluates an oil well's sand-control dP with the
+    fluid at the reservoir pressure: its Tutorial 15-18 skins and dPs within 0.3 % that way, against up to 2.3 times
+    the dP near the AOF with the sand-face pressure)."""
+    def f(q, p=None):
+        q = np.atleast_1d(np.asarray(q, float))
+        return props(q, np.full(q.shape, float(p_fixed)))
+    return f
+
+
 def props_constant(fvf, rho, mu, kind="oil"):
     """Constant properties (fvf RB/STB for oil, ft3/scf for gas)."""
     def props(q, p):

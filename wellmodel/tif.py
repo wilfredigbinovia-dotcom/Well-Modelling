@@ -19,10 +19,13 @@ mu_c B_c the water at T, mu_h B_h the water at reservoir temperature, mu_o B_o t
    time and historical-rate runs move the opening pressure by exactly this (-118 and -57 psi at 3000 STB/d);
    C0 = -3.9 psi, F_T = 0.951, A_Q = 0.871, A_MU = 1.106, A_S = 0.296.
 3. Fracture fully developed - the skin acts with the cold-water viscosity, the reservoir adds little:
-       Pwf3 = Pr + c [ 0.968 S mu_c B_c + 1.047 mu_h B_h ]
+       Pwf3 = Pr + c [ (1.165 S - 0.598) mu_c B_c + 1.057 mu_h B_h ]
+   (the Tutorial 03a runs reach this regime only at skin 3, which fixes the sum but not the split between the skin
+   and the other terms; the split comes from PROSPER's Adjust Skin on Tutorial 21 - skins 4.669 / 6.561 / 8.850 at
+   8467 / 5897 / 4456 STB/d and 99 / 112 / 124 F - and the fit covers both tutorials within 7.3 psi)
 The IPR is Pwf1 while Pwf1 <= Pwf2, otherwise max(Pwf2, Pwf3). PROSPER's "dP total skin" is Pwf(S) - Pwf(S = 0).
 
-Against the eight runs: regime 2 within 3.5 psi (27 points, all inputs), regime 3 within 0.25 % (4,500-28,500 STB/d),
+Against the eight runs: regime 2 within 3.5 psi (27 points, all inputs), regime 3 within 7.3 psi (4,500-28,500 STB/d, plus T21),
 regime 1 within 12 psi; the crossover rates follow. The coefficients are calibrated on this tutorial's inputs
 (k 50 md, h 100 ft, E 3e6 psi, v 0.2, Biot 0.7, the tutorial's heat properties); their dependence on inputs not
 varied in those runs is not known. In the IPR tab the temperature is the injected fluid temperature entered; in the
@@ -38,7 +41,7 @@ RB = 5.614583
 
 K_H, K_O = 2.27357, 2.47640
 C0, F_T, A_Q, A_MU, A_S = -3.949, 0.95051, 0.87116, 1.10637, 0.29641
-B3_S, B3_H = 0.9678, 1.047
+B3_S, B3_H, B3_C = 1.16516, 1.05733, -0.59775
 
 
 @dataclass
@@ -107,7 +110,7 @@ class TIFModel:
                            + K_O * inp.mu_res * inp.b_res * pss)
         th = self.fh * inp.alpha * inp.e_mod / (1 - inp.nu)
         p2 = inp.sigma_ini + C0 + F_T * th * (t - inp.t_res) + c * (A_Q + (A_MU + A_S * s) * mub_c)
-        p3 = inp.pr + c * (B3_S * s * mub_c + B3_H * self.mub_h)
+        p3 = inp.pr + c * ((B3_S * s + B3_C) * mub_c + B3_H * self.mub_h)
         return p1, p2, p3
 
     def pwf(self, q, t, skin=None):

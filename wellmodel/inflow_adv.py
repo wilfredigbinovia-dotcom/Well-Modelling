@@ -75,22 +75,32 @@ def pd_infinite_conductivity(td):
 
 
 # ======================================================= fractured well
+FRAC_TDA_CAP = 0.0891     # PROSPER's fractured well: the transient solution at most to tDA = 0.0891 (tD on the radius
+#                           of a circle of the drainage area = 0.28); later times give the same PI - its Tutorial 15
+#                           file: identical PI at 5, 30 and 365 days, the transient one at 1 day (k t = 50 md.d) and
+#                           with 10 / 20 md, and the cap's D falling as ln xf (xf 35 / 100 / 200 ft)
+FRAC_FCD_INFINITE = 100.0  # PROSPER: FCD >= 100 behaves as infinite conductivity (same PI at 100 to 20000)
+
+
 def fractured_well(fluid, pr, k, h, area, ca, rw, xf, fcd, t_days, phi, ct, mu,
                    face_skin=0.0, pb=None, bo=None, t_f=None, z=None, sg=None, hf=None):
+    """Hydraulically fractured well, as PROSPER: Gringarten infinite-conductivity transient solution at the time since
+    production started, held at its value at tDA = FRAC_TDA_CAP for later times, plus Cinco-Ley's finite-conductivity
+    correction f(FCD) - ln 2 (zero from FCD = 100) and the fracture face skin. Against PROSPER's Tutorial 15 file and
+    twelve variations (k 10-100 md, xf 35-200 ft, FCD 10-20000, 1-365 days): PI within 1.5 %."""
     if xf <= rw:
         raise ValueError("Fracture half-length must exceed the wellbore radius.")
-    f = float(cinco_f(fcd))
-    if not 0.1 <= fcd <= 1000:
-        f = float(cinco_f(np.clip(fcd, 0.1, 1000)))
+    a_ft2 = area * 43560.0
+    f = LN2 if fcd >= FRAC_FCD_INFINITE else float(cinco_f(np.clip(fcd, 0.1, FRAC_FCD_INFINITE)))
     td = 0.0002637 * k * t_days * 24 / (phi * mu * ct * xf ** 2)
-    d_tr = float(pd_infinite_conductivity(td)) + (f - LN2) + face_skin
-    d_pss = dietz_term(area, ca, rw) + np.log(rw / xf) + f + face_skin
-    D = min(d_tr, d_pss)
-    state = "transient" if d_tr < d_pss else "pseudo-steady state"
-    params = {"Equivalent skin": float(np.log(rw / xf) + f + face_skin), "tD (xf)": td}
-    notes = [f"At {t_days:g} days the fractured well is in {state} flow.",
+    td_cap = FRAC_TDA_CAP * a_ft2 / xf ** 2
+    D = float(pd_infinite_conductivity(min(td, td_cap))) + (f - LN2) + face_skin
+    state = "transient" if td < td_cap else f"at its tDA = {FRAC_TDA_CAP:g} limit (PROSPER)"
+    params = {"Equivalent skin": float(np.log(rw / xf) + f + face_skin), "tD (xf)": td,
+              "Dimensionless resistance D": D}
+    notes = [f"At {t_days:g} days the fractured well's solution is {state}.",
              "Early bilinear flow (low FcD) is not modelled."]
-    if 2 * xf > np.sqrt(area * 43560):
+    if 2 * xf > np.sqrt(a_ft2):
         notes.append("Fracture length is comparable to the drainage dimension - the radial "
                      "equivalent-skin approach is approximate.")
     if fluid == "oil":
@@ -249,6 +259,20 @@ def horizontal_well(fluid, method, pr, k, h, rw, aniso_h, aniso_v, L, lx, ly, xw
                       ["Non-Darcy flow neglected along the lateral."])
 
 
+def horizontal_resistance(method, k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin=0.0):
+    """(kh_eq, D) of a horizontal well for PROSPER's horizontal well models (q = kh_eq dp / (141.2 mu B D)); the
+    skin is the mechanical skin along the well, entering D as each model scales it (Kuchuk & Goode: h / L
+    sqrt(kx/kz) s; Babu & Odeh: s; Joshi: beta h / L s)."""
+    if method == "Babu & Odeh":
+        kh_eq, D, _ = babu_odeh(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin)
+    elif method in ("Kuchuk & Goode", "Kuchuk & Goode - constant pressure upper boundary"):
+        kh_eq, D, _ = goode_kuchuk(k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, skin,
+                                   "no flow" if method == "Kuchuk & Goode" else "constant pressure")
+    else:
+        kh_eq, D = joshi(k, h, rw, aniso_h, aniso_v, L, lx, ly, skin)
+    return float(kh_eq), float(D)
+
+
 def transverse_fractures(fluid, pr, k, h, rw, aniso_h, aniso_v, L, lx, ly, xw, yw, zw, mu,
                          xf, fcd, n_frac, ca=31.62, skin=0.0, pb=None, bo=None, t_f=None, z=None, sg=None):
     n_frac = int(n_frac)
@@ -379,7 +403,10 @@ def _segment_dp(q, p, length, dtvd, d_in, rough_in, rho_fn, mu_fn, vol_fn):
 def horizontal_friction(fluid, pr, zones: list, overall_kh_eq, overall_D, k_ref, props, pb=None, n=40,
                         profile_at=None):
     """zones (heel -> toe): {"type": "Perforated"|"Open Hole"|"Blank", "length", "k", "skin",
-    "id_in", "rough_in"}. overall_kh_eq / overall_D: horizontal-well resistance without skin."""
+    "id_in", "rough_in"}. overall_kh_eq / overall_D: horizontal-well resistance without skin; a zone's skin is its
+    increment to D (horizontal_resistance with the zone's mechanical skin less without - PROSPER's 'By Hand' zone
+    skin). Against PROSPER Tutorial 10 (Kuchuk & Goode, one 800 ft perforated zone, skin 3, 0.3175 ft flowing
+    radius): heel pressure within 9 psi from 40 to 39,968 STB/d, AOF 49,971 against 49,955.6 STB/d."""
     if not zones:
         raise ValueError("Enter at least one zone.")
     open_z = [z for z in zones if z["type"] != "Blank"]

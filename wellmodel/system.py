@@ -221,8 +221,10 @@ def solve_cases(path_for, fluid, kind, base: dict, cases: list[dict], ipr_for, c
     downstream). The solution rate does not depend on the node, so it is solved at the bottom node in both cases."""
     hc = hc or HeatCapacities()
     scale = 1000.0 if kind == "gas" else 1.0          # VLP rate units -> IPR units
-    if lift is not None and (node == "top" or kind != "oil"):
-        raise ValueError("Gas lift: oil producers with the bottom node as the solution node only.")
+    if lift is not None and node == "top":
+        raise ValueError("Gas lift: the bottom node as the solution node only.")
+    if lift is not None and kind == "gas" and lift.method != GLS.METHODS[0]:
+        raise ValueError("Gas lifted gas wells: fixed depth of injection only.")
 
     def trav(path, whp, case, plist, qlist, u):
         """Tubing traverse; with gas lift, the lift columns of each case are added from its params."""
