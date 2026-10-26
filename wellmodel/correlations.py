@@ -657,9 +657,13 @@ PE2_BAND = (1.75, 1.44, 0.241, 0.4797)   # slug friction step: where Ngv < 1.75 
 #                                - PROSPER PE2 friction steps up 10-20 % across that line (T33a, T23 5 MMscf/d, Tutorial 11)
 PE2_HB_R = (-0.08631087, -1.84429638, -8.66210136)   # PE2 / our HB chart fit, quadratic in ln X (T23 traverses)
 PE2_HB_U = (-10.684034, -9.199713)                    # ln X: vertex (held below) and where the ratio returns to 1
+PE2_HB_LOW = (0.00717988, 0.2452605, 2.0209254, -11.0)  # below ln X = -11 (X < 1.7e-5): HL = a u^2 + b u + c (u = ln X)
+#                                where smaller - PROSPER PE2 at very low liquid velocity numbers (Tutorial 42 steam, Nlv 0.2-1,
+#                                Ngv 25-42: HL 0.016-0.16 against the chart's 0.07 floor; fitted within 0.001). Steam only
+#                                (hb_low=True): on gas-lifted oil wells (T23 equilibrium curve) PROSPER keeps the chart value
 
 
-def _pe2_hb_holdup(vsl, vsg, rho_l, mu_l, sig_l, d, p):
+def _pe2_hb_holdup(vsl, vsg, rho_l, mu_l, sig_l, d, p, low=False):
     """Hagedorn & Brown holdup as PROSPER's PE2 gives it at high gas velocities: our HB chart fit (HL/psi vs X) is
     up to 19 % low at the left end of the chart (X = 2e-5 - 1e-4) against PROSPER PE2 gradients (Tutorial 23, 5 and
     20 MMscf/d of lift gas, vsg 11-82 ft/s, with PROSPER's liquid surface tension - vlp.sigma_liquid) - corrected
@@ -679,12 +683,17 @@ def _pe2_hb_holdup(vsl, vsg, rho_l, mu_l, sig_l, d, p):
     psi = ((1.0886 - 69.9473 * x2 + 2334.3497 * x2 ** 2 - 12896.683 * x2 ** 3)
            / (1 - 53.4401 * x2 + 1517.9369 * x2 ** 2 - 8419.8115 * x2 ** 3))
     psi = np.where(x2 < 0.01, 1.0, np.clip(psi, 1.0, 1.83))
-    u = np.clip(np.log(np.maximum(x1, 1e-30)), PE2_HB_U[0], PE2_HB_U[1])
+    ux = np.log(np.maximum(x1, 1e-30))
+    u = np.clip(ux, PE2_HB_U[0], PE2_HB_U[1])
     r = np.maximum(np.polyval(PE2_HB_R, u), 1.0)
-    return np.clip(hl_psi * r * psi, 0.0, 1.0)
+    hl = hl_psi * r * psi
+    a_, b_, c_, u_lo = PE2_HB_LOW
+    low_hl = np.maximum(a_ * ux * ux + b_ * ux + c_, 0.0) * psi
+    hl = np.where(ux < u_lo, np.minimum(hl, low_hl), hl) if low else hl
+    return np.clip(hl, 0.0, 1.0)
 
 
-def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
+def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p, hb_low=False):
     """PE2-style: a public-domain stand-in for Petroleum Experts' proprietary PE2, built from the pieces PROSPER's
     gradient output shows it uses and calibrated against PROSPER PE2 gradients.
 
@@ -711,7 +720,7 @@ def pe2_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     disc = np.maximum((1 + vm / vs) ** 2 - 4 * vsg / vs, 0.0)
     hl_s = np.clip(1 - 0.5 * (1 + vm / vs - np.sqrt(disc)), lam, 1.0)
     # at high gas velocities PROSPER's PE2 holdup follows Hagedorn & Brown (its chart), above the small-slip value
-    hl_s = np.maximum(hl_s, _pe2_hb_holdup(vsl, vsg, rho_l, mu_l, sig_l, d, p))
+    hl_s = np.maximum(hl_s, _pe2_hb_holdup(vsl, vsg, rho_l, mu_l, sig_l, d, p, hb_low))
     # slug friction: Hagedorn & Brown's form (no-slip density squared over the slip density, two-phase viscosity
     # mu_L^HL mu_G^(1-HL)) times (1.527 - 0.1205 HL) vsl^-0.0819 - PROSPER PE2 gradients (T23, T33a, Tutorial 11)
     rho_ss = rho_l * hl_s + rho_g * (1 - hl_s)

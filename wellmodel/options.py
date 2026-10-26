@@ -74,6 +74,11 @@ TEMP_MODELS = {
     "enthalpy": "Enthalpy balance",
 }
 
+STEAM = {
+    "none": "No steam calculations",
+    "allow": "Allow steam calculations",
+}
+
 FIELDS = {  # field -> (display name, choices)
     "fluid_type": ("Fluid", FLUID_TYPES),
     "method": ("Method", METHODS),
@@ -86,6 +91,7 @@ FIELDS = {  # field -> (display name, choices)
     "sand_control": ("Sand control", SAND_CONTROL),
     "artificial_lift": ("Artificial lift", ARTIFICIAL_LIFT),
     "temp_model": ("Temperature model", TEMP_MODELS),
+    "steam": ("Steam calculation", STEAM),
 }
 
 # What the calculation engine models today. Anything else is accepted as a
@@ -101,6 +107,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "water_vapour": {"none", "calculate"},
     "emulsions": {"none", "emulsion"},
     "temp_model": {"rough", "improved", "enthalpy"},
+    "steam": {"none", "allow"},
 }
 # Completion and sand control change near-wellbore pressure drop. Until they
 # are modelled explicitly, that drop is absorbed in the PI fitted to tests.
@@ -130,6 +137,7 @@ class WellOptions:
     sand_control: str = "none"
     artificial_lift: str = "none"
     temp_model: str = "rough"
+    steam: str = "none"
 
     def __post_init__(self):
         for f, (name, choices) in FIELDS.items():
@@ -266,6 +274,17 @@ class WellOptions:
         if self.artificial_lift == "mpump" and self.well_type != "producer":
             add("error", ["artificial_lift", "well_type"],
                 "The surface multiphase pump boosts a producing well's flowline: choose a producer.")
+        if self.steam == "allow" and self.temp_model == "rough":
+            add("error", ["steam", "temp_model"],
+                "Steam calculations need a coupled temperature model: choose the Improved Approximation.")
+        if self.steam == "allow" and self.well_type != "water_injector":
+            add("error", ["steam", "well_type"],
+                "Steam calculations are for a steam injector: choose Water injector (the water is injected as steam).")
+        if self.steam == "allow" and self.well_type == "water_injector" and self.temp_model == "improved":
+            add("info", ["steam", "well_type"],
+                "Steam injector (PROSPER Tutorial 42): the injected water's enthalpy (or steam quality) at the wellhead "
+                "is marched down with the heat loss; steam tables (IAPWS-95) for the quality and the steam, the PVT "
+                "tab's brine for the water. Steam calculator in the PVT tab; gradients in the Calculation tab.")
         if self.temp_model == "enthalpy" and self.well_type != "producer":
             add("error", ["temp_model", "well_type"],
                 "The Enthalpy Balance temperature model is built for producers; injectors use the Rough or the "

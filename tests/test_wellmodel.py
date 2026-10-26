@@ -5401,3 +5401,43 @@ def test_compositional_co2_injector_t39():
     assert abs(res.q / 24.683 - 1) < 0.04
     assert abs((res.pwf - g) / 5565.39 - 1) < 0.01
     assert abs(res.T[-1] - 196.08) < 2.0
+
+
+def test_steam_injector_t42():
+    """PROSPER Tutorial 42, the user's file: the T03 water injector as a steam injector (Improved Approximation,
+    U = 2, 200,000 ppm brine), 4000 STB/d at 2200 psig with wellhead enthalpies 900-1100 BTU/lb, PE2, 20 ft steps.
+    Steam calculator: PROSPER's 2200 psig values (IAPWS-95). Traverses: bottom pressure within 2 % (the pressure gain
+    within 5 %), temperatures within 2.5 F, enthalpy within 10 BTU/lb, holdup within 4 % (+0.005) below 2700 psig and the
+    quality within 5 points there (above it PROSPER's own steam table drifts from IAPWS-95 towards the critical point:
+    its saturated water enthalpy is up to 10 BTU/lb high at 3080 psia)."""
+    pytest.importorskip("CoolProp")
+    from wellmodel import steam as S, injection as winj
+    s = S.saturation(2214.696)
+    assert abs(s["t_sat"] - 650.453) < 0.01 and abs(s["latent"] - 422.233) < 0.01
+    assert abs(s["liquid"]["enthalpy"] - 696.821) < 0.01 and abs(s["vapour"]["density"] - 6.2118) < 0.002
+    assert abs(S.flash_ph(2214.696, 1100)["quality"] - 0.95487) < 1e-4
+    assert abs(S.flash_ph(2214.696, 900)["quality"] - 0.4812) < 1e-4
+    sup = S.flash_ph(2214.696, 1200)
+    assert sup["phase"] == "VAPOUR" and abs(sup["t"] - 689.45) < 0.01 and abs(sup["density"] - 4.92808) < 1e-3
+
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 600},
+            {"Type": "Tubing", "Measured Depth (ft)": 8500, "Tubing Inside Diameter (in)": 5.2,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 9000, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = winj.from_flow_path(wvlp.build_flow_path(top, secs, pts, [0, 9000], [0, 9000], [0, 600, 9000],
+                                                    [60, 40, 210]))
+    data = pd.read_csv(Path(__file__).parent / "data" / "t42_steam_gradients.csv")
+    bottom = {900: 4249.3, 950: 3910.0, 1000: 3608.1, 1050: 3197.0, 1100: 2968.8}
+    for h0, pb in bottom.items():
+        r = S.traverse(path, 2214.696, 4000, h0, u=2.0, salinity_ppm=200000)
+        d = data[data.h0 == h0]
+        assert abs((r.p[-1] - 14.696) / pb - 1) < 0.02, h0
+        assert abs((r.p[-1] - 14.696 - 2200) / (pb - 2200) - 1) < 0.05, h0
+        assert np.max(np.abs(np.interp(d.md, r.md, r.t) - d.t)) < 2.5, h0
+        dh = np.interp(d.md, r.md, r.h) - d.h
+        assert np.nanmax(np.abs(dh)) < 10.0, h0
+        low = (d.p < 2700) & d.x.notna() & (d.x > 0)
+        assert np.max(np.abs(np.interp(d.md[low], r.md, 100 * r.x) - d.x[low])) < 5.0, h0
+        assert np.all(np.abs(np.interp(d.md[low], r.md, r.holdup) - d.hl[low]) < 0.04 * d.hl[low] + 0.005), h0

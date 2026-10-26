@@ -54,6 +54,7 @@ from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
 from wellmodel import enthalpy as web
 from wellmodel import co2 as wco2
+from wellmodel import steam as wsteam
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -456,6 +457,9 @@ CAPTIONS = {
                    "improved": "Energy balance with Joule-Thomson, gravity and U by depth (PROSPER Tutorial 41)",
                    "enthalpy": "Energy balance with U calculated from the completion, casing record, lithology and "
                                "producing time (PROSPER Tutorial 40)"},
+    "steam": {"none": "Water injected as liquid",
+              "allow": "Steam injector: steam tables, quality from the enthalpy (PROSPER Tutorial 42; Improved "
+                       "Approximation)"},
     "artificial_lift": {"none": "Natural flow",
                         "gas_lift": "Continuous gas lift: Gas lift data in Equipment, Calculation (design in Design)",
                         "ct_gas_lift": "Lift gas down a coiled tubing, production up the annulus: Coiled tubing data in "
@@ -489,7 +493,7 @@ with tabs[0]:
                "and which calculations apply.")
     sel_opts = {}
     groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour", "emulsions"]),
-              ("Well", ["well_type", "flow_type", "artificial_lift", "temp_model"]),
+              ("Well", ["well_type", "flow_type", "artificial_lift", "temp_model", "steam"]),
               ("Completion", ["completion", "sand_control"])]
     cols = st.columns(3, gap="large")
     for col, (title, fields) in zip(cols, groups):
@@ -964,8 +968,81 @@ def gas_vapour_on(o_=None):
                 and o_.fluid_type == "dry_wet_gas" and o_.method == "black_oil")
 
 
+def steam_injector_calc(o, mode, eqd):
+    """PROSPER Tutorial 42: gradient traverse of a steam injector with a wellhead enthalpy (or quality) sensitivity."""
+    if not wsteam.available():
+        st.error("Steam calculations need the CoolProp package (pip install CoolProp).")
+        return
+    if mode != CALC_MODES[1]:
+        st.info("Steam injector: the gradient traverse (with enthalpy or quality sensitivities) is the calculation - "
+                "as PROSPER notes, the reservoir response to steam belongs in a thermal simulator, so there is no "
+                "IPR / system analysis here. Choose the gradient (traverse) calculation.")
+        return
+    try:
+        fpath = with_thermal(vlp_path(eqd, "tubing", ()))
+        path = winj.from_flow_path(fpath)
+    except ValueError as e:
+        st.error(str(e))
+        return
+    thermal = getattr(fpath, "thermal", None)
+    u = float(val("eq_u", eqd.get("u_geo", 8.0)))
+    u_seg = thermal.get("u_seg") if thermal is not None else None
+    sal = float(val("pvt_sal", INPUT_DEFAULTS["pvt_sal"]))
+    st.caption("Steam injector: the water (as steam) enters the wellhead with the enthalpy given and flows down; the "
+               "enthalpy falls with the heat lost to the formation (U by depth, Improved Approximation table in the "
+               "Equipment tab) and rises with the elevation drop; the steam quality and temperature follow from the "
+               "steam tables at each node, the water is the PVT tab's brine "
+               f"({sal:,.0f} ppm). Multiphase flow: PE2-style, steps of 20 ft (PROSPER's steam step length).")
+    c = st.columns(4)
+    whp = num(c[0], "First node pressure (psia)", "steam_whp", 2214.7, 14.7, 3200.0, 10.0)
+    q = num(c[1], "Liquid rate (STB/d of water)", "steam_q", 4000.0, 1.0, 1e5, 100.0)
+    choice = sel(c[2], "Steam choice", ["Enter enthalpy", "Enter quality"], "steam_choice")
+    if choice == "Enter enthalpy":
+        vals = num_list(c[3], "Steam enthalpy (BTU/lb) - one case each", "steam_h_list", "900, 950, 1000, 1050, 1100")
+    else:
+        vals = num_list(c[3], "Wellhead steam quality (fraction) - one case each", "steam_x_list", "0.5, 0.7, 0.9")
+    step = num(st.columns(4)[0], "Steam step length (ft)", "steam_step", 20.0, 2.0, 500.0, 5.0)
+    if not vals:
+        return
+    cases = []
+    with st.spinner("Marching the steam down the well..."):
+        for v_ in vals:
+            h0 = float(v_) if choice == "Enter enthalpy" else wsteam.enthalpy_of(whp, quality=float(v_))
+            cases.append((v_, h0, wsteam.traverse(path, whp, q, h0, u=u, u_seg=u_seg, step=step, salinity_ppm=sal)))
+    rows = []
+    for v_, h0, r in cases:
+        grav = float(np.sum(0.5 * (r.grav[1:] + r.grav[:-1]) * np.diff(r.md)))
+        fric = -float(np.sum(0.5 * (r.fric[1:] + r.fric[:-1]) * np.diff(r.md)))
+        rows.append({"Wellhead enthalpy (BTU/lb)": h0, "Wellhead quality (%)": 100 * r.x[0],
+                     "Wellhead temperature (°F)": r.t[0], "Bottom pressure (psia)": r.p[-1],
+                     "Bottom temperature (°F)": r.t[-1], "Bottom enthalpy (BTU/lb)": r.h[-1],
+                     "Bottom quality (%)": 100 * r.x[-1], "dP gravity (psi)": grav, "dP friction (psi)": fric})
+    st.dataframe(pd.DataFrame(rows).style.format(precision=2), hide_index=True, width="stretch")
+    cc = st.columns(3)
+    for k_, (lab_, fn_) in enumerate((("Pressure (psia)", lambda r: r.p), ("Steam quality (%)", lambda r: 100 * r.x),
+                                      ("Temperature (°F)", lambda r: r.t))):
+        fig, ax = plt.subplots(figsize=(5, 5.5))
+        for j_, (v_, h0, r) in enumerate(cases):
+            ax.plot(fn_(r), r.md, color=wplt.SERIES[j_ % len(wplt.SERIES)], lw=1.6, label=f"h {h0:,.0f}")
+        ax.invert_yaxis()
+        ax.set_xlabel(lab_)
+        ax.set_ylabel("Measured depth (ft)")
+        ax.grid(alpha=0.3, ls="--")
+        ax.legend(fontsize=7)
+        fig.tight_layout()
+        cc[k_].pyplot(fig, clear_figure=True)
+    pick = st.selectbox("Gradient table for", list(range(len(cases))),
+                        format_func=lambda i: f"Wellhead enthalpy {cases[i][1]:,.1f} BTU/lb", key="steam_pick")
+    gt_ = cases[pick][2].table()
+    st.dataframe(gt_.style.format(precision=4), hide_index=True, width="stretch", height=360)
+    st.download_button("Download gradient (CSV)", gt_.to_csv(index=False).encode(), "steam_gradient.csv")
+
+
 def injector_calc(o, mode, eqd):
     """Calculation tab for a water injector: system (tubing + injectivity) and gradient traverse."""
+    if getattr(o, "steam", "none") == "allow":
+        steam_injector_calc(o, mode, eqd)
+        return
     try:
         fpath = with_thermal(vlp_path(eqd, "tubing", ()))
         path = winj.from_flow_path(fpath)
@@ -1286,6 +1363,43 @@ def water_injector_pvt_panel():
         st.dataframe(tab.style.format({"Water compressibility (1/psi)": "{:.4e}"}, precision=5), hide_index=True,
                      width="stretch", height=320)
         st.download_button("Download water PVT table (CSV)", tab.to_csv(index=False).encode(), "water_pvt.csv")
+    o_ = ss.get("options")
+    if o_ is not None and getattr(o_, "steam", "none") == "allow":
+        steam_calculator_panel()
+
+
+def steam_calculator_panel():
+    """PROSPER PVT | Steam Calculator (Tutorial 42): single point from pressure and enthalpy (or temperature), and
+    saturation properties over a pressure range. IAPWS-95 steam tables."""
+    st.subheader("Steam calculator")
+    if not wsteam.available():
+        st.error("Steam calculations need the CoolProp package (pip install CoolProp).")
+        return
+    st.caption("Steam tables (IAPWS-95): saturation temperature at a pressure, and the phase, temperature and steam "
+               "quality for an enthalpy - the quality is the steam fraction of the mass, 0 all water and 1 all steam. "
+               "Enthalpy reference: saturated liquid at the triple point = 0 (as PROSPER). Pressures in psia.")
+    c = st.columns(4)
+    mode = sel(c[0], "Calculate", ["Single point", "Range (saturation)"], "steam_calc_mode")
+    if mode == "Single point":
+        by = sel(c[1], "Input", ["Pressure and enthalpy", "Pressure and temperature"], "steam_calc_by")
+        p_ = num(c[2], "Pressure (psia)", "steam_calc_p", 2214.7, 1.0, 3200.0, 10.0)
+        if by == "Pressure and enthalpy":
+            h_ = num(c[3], "Enthalpy (BTU/lb)", "steam_calc_h", 1100.0, 0.0, 1600.0, 10.0)
+            tab = wsteam.calculator(p_, h=h_)
+        else:
+            t_ = num(c[3], "Temperature (°F)", "steam_calc_t", 650.0, 33.0, 1500.0, 1.0)
+            tab = wsteam.calculator(p_, t_f=t_)
+        tab["Value"] = [f"{v_:,.6g}" if isinstance(v_, (int, float, np.floating)) else str(v_) for v_ in tab["Value"]]
+        st.dataframe(tab, hide_index=True, width="stretch", height=35 * (len(tab) + 1) + 3)
+    else:
+        c2 = st.columns(4)
+        p0 = num(c2[0], "First pressure (psia)", "steam_rng_p0", 100.0, 1.0, 3200.0, 10.0)
+        p1 = num(c2[1], "Last pressure (psia)", "steam_rng_p1", 3000.0, 1.0, 3200.0, 10.0)
+        n_ = int(num(c2[2], "Number of pressures", "steam_rng_n", 30.0, 2.0, 200.0, 1.0, "%.0f"))
+        if p1 > p0:
+            tab = wsteam.saturation_table(np.linspace(p0, p1, n_))
+            st.dataframe(tab.style.format(precision=4), hide_index=True, width="stretch", height=320)
+            st.download_button("Download steam table (CSV)", tab.to_csv(index=False).encode(), "steam_table.csv")
 
 
 def gas_pvt_panel(opts_now):
