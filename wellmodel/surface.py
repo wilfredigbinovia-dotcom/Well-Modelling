@@ -20,6 +20,7 @@ import pandas as pd
 from scipy.optimize import least_squares
 
 from . import vlp as V
+from . import mpump as MP
 from .equipment import FITTINGS, HeatCapacities, surface_rows, _f
 
 G = 32.174
@@ -31,16 +32,17 @@ CRIT_RATIO_EMPIRICAL = 0.588     # p2/p1 below which Gilbert-type correlations a
 
 @dataclass
 class Item:
-    kind: str            # "pipe" or "choke"
+    kind: str            # "pipe", "choke" or "pump"
     label: str
     length: float = 0.0  # ft (pipe)
     d_in: float = 0.0    # in (pipe ID or bean size)
     rough_in: float = 0.0006
     rise: float = 0.0    # ft, elevation gain in the flow direction (pipe)
     mult: float = 1.0    # rate multiplier (fraction of the well rate through this item)
+    pump: object = None  # mpump.MultiphasePump (pump items)
 
 
-def build_items(df: pd.DataFrame) -> tuple[float, list[Item]]:
+def build_items(df: pd.DataFrame, pump=None) -> tuple[float, list[Item]]:
     """Surface table (manifold first, then back towards the wellhead) -> manifold TVD and items in FLOW order
     (wellhead -> manifold). A pipe's 'TVD of End Point' is its end nearer the wellhead; its other end is the previous
     row's end (the manifold for the first pipe). Fittings become pipe of equivalent length with no elevation change."""
@@ -68,6 +70,8 @@ def build_items(df: pd.DataFrame) -> tuple[float, list[Item]]:
             out.append(Item("pipe", lab, ld * d / 12, d, 0.0006, 0.0, mult=m))
         elif t == "Choke":
             out.append(Item("choke", lab, d_in=d, mult=m))
+        elif t == "Pump":
+            out.append(Item("pump", lab, mult=m, pump=pump if pump is not None else MP.MultiphasePump()))
     return man_tvd, out[::-1]       # flow order: wellhead -> manifold
 
 
@@ -75,10 +79,20 @@ def has_choke(items):
     return any(i.kind == "choke" for i in items)
 
 
+def has_pump(items):
+    return any(i.kind == "pump" for i in items)
+
+
+def with_pump_power(items, power):
+    """Copy of the items with every pump's power available set to power (hp)."""
+    return [Item(i.kind, i.label, i.length, i.d_in, i.rough_in, i.rise, i.mult,
+                 i.pump.with_power(power) if i.kind == "pump" else i.pump) for i in items]
+
+
 def with_choke_size(items, size_64ths):
     """Copy of the items with every choke bean set to size_64ths."""
     return [Item(i.kind, i.label, i.length, size_64ths / 64.0 if i.kind == "choke" else i.d_in, i.rough_in, i.rise,
-                 i.mult) for i in items]
+                 i.mult, i.pump) for i in items]
 
 
 # ------------------------------------------------------------------ chokes
@@ -201,6 +215,12 @@ def wellhead_pressure(items, fluid, kind, p_manifold, case, t_wh, correlation, h
             rows.append({"Item": it.label, "Type": "Choke", "Size": size,
                          "Upstream pressure (psia)": p, "Downstream pressure (psia)": p_down, "dP (psi)": p - p_down,
                          "Temperature (°F)": t_in, "Regime": regime})
+        elif it.kind == "pump":
+            p = MP.intake_pressure(it.pump, fluid, c_it, p, t_in)
+            rows.append({"Item": it.label, "Type": "Pump", "Size": f"{it.pump.name}, {it.pump.power:g} hp",
+                         "Upstream pressure (psia)": p, "Downstream pressure (psia)": p_down, "dP (psi)": p - p_down,
+                         "Temperature (°F)": t_in, "Regime": "",
+                         "_pump": MP.details(it.pump, fluid, c_it, p, p_down, t_in, hc)})
         else:
             n_seg = max(1, int(np.ceil(it.length / 500.0)))
             path = _pipe_path(it, n_seg)
@@ -268,6 +288,8 @@ def manifold_pressure(items, fluid, kind, p_wellhead, case, t_wh, correlation, h
         p = np.where(bad, 1000.0, p)                  # placeholder so the property calls stay finite
         if it.kind == "choke":
             p, _ = choke_downstream(fluid, c_it, p, t_in, it.d_in, hc, cd, choke_method, kind)
+        elif it.kind == "pump":
+            p = MP.discharge_pressure(it.pump, fluid, c_it, p, t_in)
         else:
             n_seg = max(1, int(np.ceil(it.length / 500.0)))
             path = _pipe_path(it, n_seg)
@@ -316,7 +338,7 @@ def _calc_thp(items, fluid, kind, tests, t_wh, correlation, hc, t_surr, u_surf, 
     for it in items:
         if it.kind == "choke":
             d = np.where(np.isfinite(ch) & (ch > 0), ch / 64.0, it.d_in)
-            it = Item(it.kind, it.label, it.length, d, it.rough_in, it.rise, it.mult)
+            it = Item(it.kind, it.label, it.length, d, it.rough_in, it.rise, it.mult, it.pump)
         its.append(it)
     res = wellhead_pressure(its, fluid, kind, tests["pman"].to_numpy(float), V.case_of(tests, kind),
                             np.asarray(t_wh, float), correlation, hc, t_surr, u_surf, "Sachdeva", cd, 1.0, friction,

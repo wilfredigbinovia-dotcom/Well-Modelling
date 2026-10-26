@@ -90,7 +90,7 @@ def tvd_at(md_survey, tvd_survey, md):
 
 
 # --------------------------------------------------------- surface equipment
-SURFACE_TYPES = ["Manifold", "Line Pipe", "Choke", "Fitting"]
+SURFACE_TYPES = ["Manifold", "Line Pipe", "Choke", "Fitting", "Pump"]
 FITTINGS = {   # equivalent length in pipe diameters, L/D (Crane TP-410 typical values)
     "90° elbow (standard)": 30, "90° elbow (long radius)": 20, "45° elbow": 16,
     "Tee - flow through run": 20, "Tee - flow through branch": 60,
@@ -125,6 +125,8 @@ def surface_active_columns(row_type):
         return {d, rm}
     if row_type == "Fitting":
         return {"Fitting", d, rm}
+    if row_type == "Pump":           # surface multiphase pump: its data are in the Multiphase pump panel
+        return {rm}
     return set()
 
 
@@ -170,6 +172,10 @@ def check_surface(df, surrounding_t=None, u=None):
             if np.isnan(_f(r["TVD of End Point (ft)"])):
                 out.append(("error", f"{name}: enter the manifold TVD."))
             continue
+        if t == "Pump":
+            if sum(r_["Type"] == "Pump" for r_ in rows) > 1 and r is not next(r_ for r_ in rows if r_["Type"] == "Pump"):
+                out.append(("error", f"{name}: only one multiphase pump is allowed."))
+            continue
         if np.isnan(d) or d <= 0:
             out.append(("error", f"{name}: enter a positive inside diameter."))
             continue
@@ -214,6 +220,9 @@ def surface_summary(df) -> pd.DataFrame:
         elif t == "Choke":
             recs.append({"Item": r["Label"] or t, "Type": t, "Length (ft)": 0.0, "ID (in)": d,
                          "Equivalent length (ft)": 0.0, "Note": f"bean {d * 64:.0f}/64 in"})
+        elif t == "Pump":
+            recs.append({"Item": r["Label"] or t, "Type": t, "Length (ft)": 0.0, "ID (in)": np.nan,
+                         "Equivalent length (ft)": 0.0, "Note": "multiphase pump (data in the Multiphase pump panel)"})
         elif t == "Fitting":
             ld = FITTINGS.get(r.get("Fitting"), np.nan)
             recs.append({"Item": r["Label"] or r.get("Fitting") or t, "Type": t, "Length (ft)": 0.0, "ID (in)": d,

@@ -65,6 +65,7 @@ ARTIFICIAL_LIFT = {
     "hsp": "Hydraulic submersible pump (turbine driven, power fluid down the annulus)",
     "diluent_gl": "Diluent injection - annular injection with gas lift",
     "diluent": "Diluent injection - annular injection",
+    "mpump": "Multiphase pump (surface, OneSubsea H series)",
 }
 
 FIELDS = {  # field -> (display name, choices)
@@ -88,7 +89,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer", "water_injector", "gas_injector"},
     "artificial_lift": {"none", "gas_lift", "ct_gas_lift", "esp", "srp", "jet", "pcp_motor", "pcp_rod", "hsp",
-                        "diluent_gl", "diluent"},
+                        "diluent_gl", "diluent", "mpump"},
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
     "emulsions": {"none", "emulsion"},
@@ -253,6 +254,9 @@ class WellOptions:
                 add("error", ["artificial_lift", "flow_type"],
                     "Coiled tubing gas lift injects down a coiled tubing inside the tubing and produces up the coiled "
                     "tubing - tubing annulus: choose Tubing flow (the annulus is applied above the coiled tubing end).")
+        if self.artificial_lift == "mpump" and self.well_type != "producer":
+            add("error", ["artificial_lift", "well_type"],
+                "The surface multiphase pump boosts a producing well's flowline: choose a producer.")
         if self.water_vapour == "calculate" and not (self.fluid_type == "dry_wet_gas" and self.method == "black_oil"):
             add("warning", ["water_vapour", "fluid_type", "method"],
                 "Condensed water vapour is calculated for dry and wet gas with the black-oil method only; it is "
@@ -369,6 +373,9 @@ class WellOptions:
             eq += ["Diluent injection data: injection depth, diluent rate (or % of the water) and salinity"
                    + ("; lift gas gravity and impurities, GLR injected and gas lift valve depth"
                       if self.artificial_lift == "diluent_gl" else "")]
+        if self.artificial_lift == "mpump":
+            eq += ["Surface equipment with a Pump row at the pump's place in the flowline (manifold first), the "
+                   "power available to the pump, its wear factor and efficiency curve (OneSubsea H800/65 by default)"]
         if self.artificial_lift == "esp":
             eq += ["ESP: pump depth (the tubing ends at the pump; casing ID below it), pump, motor and cable "
                    "(or run the ESP design), number of stages, operating frequency, cable length, gas separator "

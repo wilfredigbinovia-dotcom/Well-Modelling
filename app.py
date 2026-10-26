@@ -50,6 +50,7 @@ from wellmodel import srp_cards as wsrpc
 from wellmodel import diluent as wdil
 from wellmodel import emulsion as wem
 from wellmodel import multilateral as wmlat
+from wellmodel import mpump as wmpump
 from wellmodel import intermittent as wigl
 from wellmodel import esp as wesp
 from wellmodel import srp as wsrp
@@ -466,7 +467,10 @@ CAPTIONS = {
                         "diluent_gl": "Diluent water down the annulus into the tubing, with lift gas at a valve above "
                                       "it (PROSPER Tutorial 30): Equipment, Calculation (system analysis)",
                         "diluent": "Diluent water down the annulus into the tubing: Equipment, Calculation (system "
-                                   "analysis)"},
+                                   "analysis)",
+                        "mpump": "Pump in the surface flowline driven by the power available (PROSPER Tutorial 31): "
+                                 "Pump row in the surface equipment and Multiphase pump data in Equipment, Calculation "
+                                 "with the manifold as the top node"},
 }
 STATUS_ICON = {wopt.MODELLED_NOW: "✅ Modelled", wopt.LUMPED_IN_PI: "↪️ Absorbed in matched PI",
                wopt.PVT_ONLY: "🧪 PVT only - flow calculations not built yet",
@@ -4359,6 +4363,60 @@ def diluent_data_panel(o, top_md, secs):
     return setup
 
 
+MPUMP_MODELS = ["OneSubsea H800/65 (FMPP500) - fitted", "Constant efficiency", "User coefficients"]
+
+
+def mpump_data_panel(o, surface_df):
+    """System | Multiphase Pump (PROSPER; Tutorial 31): a surface pump in the flowline, driven by the power available."""
+    st.subheader("Multiphase pump (surface)")
+    st.caption("The pump sits in the surface equipment where its **Pump** row is (manifold first, then back towards "
+               "the wellhead). It draws all the power available and adds dP = (1 - wear) x efficiency x power x 58,771 "
+               "/ Qd (psi, Qd = in-situ liquid + free gas at the discharge, RB/d); efficiency = A (Qd / 10,000)^B "
+               "(p_out / p_in)^C, clipped to its limits; the intake cannot fall below 0 psig. The power available can "
+               "be a system sensitivity variable. Use the manifold as the top node in the Calculation tab.")
+    has = any(r["Type"] == "Pump" for r in weq.surface_rows(surface_df)) if surface_df is not None else False
+    if not has:
+        st.warning("Add a **Pump** row to the surface equipment table at the pump's place in the flowline.")
+    c = st.columns(4)
+    power = num(c[0], "Power available (hp)", "mpump_power", 350.0, 1.0, 1e5)
+    wear = num(c[1], "Pump wear factor", "mpump_wear", 0.0, 0.0, 0.99, 0.01, "%.3f",
+               help="Fraction of the pressure gain lost to wear (0 = new pump).")
+    model = sel(c[2], "Efficiency", MPUMP_MODELS, "mpump_model",
+                help="OneSubsea H800/65 on the FMPP500 frame, single pump: coefficients fitted to PROSPER's "
+                     "Tutorial 31 pump (pump dP within 1.3 % from 7,400 to 27,800 RB/d at 250-600 hp).")
+    sel(c[3], "Pump configuration", ["Single pump"], "mpump_config", disabled=True)
+    d = wmpump.MultiphasePump()
+    c = st.columns(4)
+    if model == MPUMP_MODELS[0]:
+        a, b, cc = d.a, d.b, d.c
+        c[0].text_input("A (%)", f"{a:.2f}", disabled=True)
+        c[1].text_input("B (rate exponent)", f"{b:.4f}", disabled=True)
+        c[2].text_input("C (pressure-ratio exponent)", f"{cc:.4f}", disabled=True)
+    elif model == "Constant efficiency":
+        a, b, cc = num(c[0], "Efficiency (%)", "mpump_eta", 30.0, 1.0, 100.0), 0.0, 0.0
+    else:
+        a = num(c[0], "A (%)", "mpump_a", d.a, 0.01, 100.0, None, "%.4g")
+        b = num(c[1], "B (rate exponent)", "mpump_b", d.b, -3.0, 3.0, None, "%.4f")
+        cc = num(c[2], "C (pressure-ratio exponent)", "mpump_c", d.c, -3.0, 3.0, None, "%.4f")
+    c = st.columns(4)
+    lo = num(c[0], "Minimum efficiency (%)", "mpump_eta_min", d.eta_min if model != "Constant efficiency" else 1.0,
+             0.1, 100.0)
+    hi = num(c[1], "Maximum efficiency (%)", "mpump_eta_max", d.eta_max if model != "Constant efficiency" else 100.0,
+             0.1, 100.0)
+    pump = wmpump.MultiphasePump(power, a, b, cc, lo, hi, wear,
+                                 d.name if model == MPUMP_MODELS[0] else f"Multiphase pump ({model.lower()})")
+    iss = pump.check()
+    show_issues(iss)
+    ss["mpump_setup"] = pump
+    if not iss:
+        qd = np.array([5000.0, 7500.0, 10000.0, 15000.0, 20000.0, 30000.0])
+        st.dataframe(pd.DataFrame({"Discharge rate (RB/d)": qd,
+                                   **{f"Efficiency (%) at p_out/p_in {r_:g}": pump.efficiency(qd, r_) for r_ in (1.5, 3.0)},
+                                   **{f"dP (psi) at p_out/p_in {r_:g}": pump.dp(qd, r_) for r_ in (1.5, 3.0)}}
+                                  ).style.format(precision=1), hide_index=True, width="stretch")
+    return pump
+
+
 def gaslift_data_panel(o, top_md, secs):
     """System | Gas Lift Data: the installed continuous gas lift used by the Calculation tab."""
     st.subheader("Gas lift data (continuous)")
@@ -4808,6 +4866,11 @@ with tabs[3]:
         diluent_data_panel(o, top_md, secs)
     else:
         ss.pop("diluent_setup", None)
+    if o is not None and getattr(o, "artificial_lift", "none") == "mpump":
+        st.divider()
+        mpump_data_panel(o, ed_s)
+    else:
+        ss.pop("mpump_setup", None)
     if o is not None and getattr(o, "artificial_lift", "none") == "gas_lift":
         st.divider()
         gaslift_data_panel(o, top_md, secs)
@@ -4835,7 +4898,7 @@ def surface_items(eqd):
     if df is None or not len(weq.surface_rows(df)):
         return None
     try:
-        _, items = wsurf.build_items(df)
+        _, items = wsurf.build_items(df, ss.get("mpump_setup"))
     except (ValueError, TypeError, KeyError):
         return None
     return items or None
@@ -6501,6 +6564,10 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
                   "Max. velocity / erosional": det["Max. velocity / erosional velocity"]})
         if "dP choke (psi)" in det:
             r["dP choke (psi)"] = det["dP choke (psi)"]
+        for k_ in ("Surface pump intake pressure (psia)", "Surface pump discharge pressure (psia)",
+                   "Surface pump efficiency (%)"):
+            if k_ in det:
+                r[k_] = det[k_]
         for k_ in ("Gas lift gas injection rate (MMscf/d)", "Injection depth (ft MD)",
                    "Tubing pressure at injection (psia)", "Casing pressure at injection (psia)", "Multipoint flag",
                    "Pump discharge pressure (psia)", "Pump intake pressure (psia)", "Pump dP (psi)",
@@ -8540,6 +8607,8 @@ with tabs[5]:
                         var_defs.pop("tubing_id", None)
                     if surface is None or not wsurf.has_choke(surface.items):
                         var_defs.pop("choke", None)
+                    if surface is None or not wsurf.has_pump(surface.items):
+                        var_defs.pop("pump_power", None)
                     if surface is not None:
                         var_defs["whp"] = "Manifold pressure (psia)"
                     if ESP_ON:
@@ -8600,6 +8669,8 @@ with tabs[5]:
                             cur["esp_stages"] = ss["esp_equipment"]["stages"]
                         if surface is not None and wsurf.has_choke(surface.items):
                             cur["choke"] = round(next(i.d_in for i in surface.items if i.kind == "choke") * 64, 2)
+                        if surface is not None and wsurf.has_pump(surface.items):
+                            cur["pump_power"] = next(i.pump.power for i in surface.items if i.kind == "pump")
                         for v_ in chosen:
                             with st.container(border=True):
                                 u_lab_ = unit_of(var_defs[v_]).strip(" ()")

@@ -5133,3 +5133,91 @@ def test_multilateral_ipr_t12():
     assert c.aof / 1000 == pytest.approx(146.612, rel=0.01)
     pj = project.loads(open(Path(__file__).parent.parent / "examples" / "T12_Multilateral_Well_IPR.wellmodel.json").read())
     assert pj["inputs"]["ipr_model_gas"] == "Multilateral Well" and len(pj["tables"]["ipr_mlat_pf"]) == 4
+
+
+def _t31_surface_df():
+    rows = [{"Label": "Manifold", "Type": "Manifold", "TVD of End Point (ft)": 0.0}]
+    for L, t in [(250, 250), (500, 475), (1000, 475), (750, 600), (1000, 600)]:
+        rows.append({"Type": "Line Pipe", "Pipe Length (ft)": float(L), "TVD of End Point (ft)": float(t),
+                     "Pipe Inside Diameter (in)": 4.0, "Pipe Inside Roughness (in)": 0.0006, "Rate Multiplier": 1.0})
+    rows.append({"Label": "Multiphase pump", "Type": "Pump", "Rate Multiplier": 1.0})
+    rows.append({"Type": "Line Pipe", "Pipe Length (ft)": 250.0, "TVD of End Point (ft)": 600.0,
+                 "Pipe Inside Diameter (in)": 4.0, "Pipe Inside Roughness (in)": 0.0006, "Rate Multiplier": 1.0})
+    df = pd.DataFrame(rows)
+    df["Fitting"] = None
+    df["Label"] = df["Label"].astype(object)
+    return df
+
+
+def test_surface_multiphase_pump_t31():
+    """PROSPER Tutorial 31, the user's file: OneSubsea H800/65 (FMPP500, single pump, no wear) in the surface pipeline
+    250 ft downstream of the wellhead of the T19 Logie well (Tutorial 05 PVT, 23,000 ppm), Pr 4800 psig, 80 % water
+    cut, GOR 800, manifold 500 psig, Beggs & Brill surface, PE2 1.03 / 1.00, pipeline U 8.5 and 52 F; sensitivity on
+    the power available 250-600 hp. The pump draws all the power; its pressure gain follows the hydraulic power
+    balance on the discharge rate with the fitted efficiency (within 1.3 % of PROSPER's dP); intake at 0 psig where
+    the power would pull it lower; VLP within 2 % above 3000 STB/d (1 % where the intake is above 0 psig), and with PROSPER's IPR the eight solution rates
+    within 1.5 %, bottom-hole pressures within 0.6 %, pump intake within 5 psi."""
+    import json
+    from types import SimpleNamespace
+    from wellmodel import mpump as MP, system as SYS
+    G = 14.696
+    vt = pd.read_csv(Path(__file__).parent / "data" / "t31_vlp_ipr.csv")
+    sysr = pd.read_csv(Path(__file__).parent / "data" / "t31_system.csv")
+    pump = MP.MultiphasePump(350.0)
+    # pump curve alone: PROSPER's (intake, discharge, discharge rate) at every point with a real operating point
+    ok = vt[(vt.eff > 10.02) & (vt.pin > 50)]
+    for _, r in ok.iterrows():
+        pm = pump.with_power(r.hp)
+        dp = pm.dp(r.qd, (r.pout + 14.7) / (r.pin + 14.7))
+        assert dp == pytest.approx(r.pout - r.pin, rel=0.015), (r.case, r.q)
+    assert pump.efficiency(5000.0, 1.0) == pump.eta_min
+    _, items = wsurf.build_items(_t31_surface_df(), pump)
+    assert [i.kind for i in items] == ["pipe", "pump", "pipe", "pipe", "pipe", "pipe", "pipe"]
+    assert wsurf.has_pump(items) and [i.pump.power for i in wsurf.with_pump_power(items, 500) if i.kind == "pump"] == [500]
+    assert not any(l == "error" for l, _ in weq.check_surface(_t31_surface_df()))
+    fl, (path, _) = _t05_oil(), _t23_path()
+    hc = weq.HeatCapacities()
+    surf = SYS.SurfaceSetup(items, 52.0, 8.5, "beggs_brill")
+    U = 8.580277
+    for power in (250, 450, 600):
+        v = vt[(vt.power == power) & (vt.q > 3000)]
+        n = len(v)
+        cs = {"q": v.q.to_numpy(), "wc": np.full(n, 0.8), "gor": np.full(n, 800.0)}
+        w, cp = fl.mass_cp(cs, hc)
+        twh = wvlp.temperature_profile(path, w, cp, U)[:, 0]
+        pwh, rows, _, _ = wsurf.wellhead_pressure(surf.items_for({"pump_power": power}), fl, "oil", np.full(n, 500 + G),
+                                                  cs, twh, "beggs_brill", hc, 52.0, 8.5, detail=True)
+        pr = next(r for r in rows if r["Type"] == "Pump")
+        assert np.allclose(pr["Upstream pressure (psia)"] - G, v.pin, atol=10.0), power
+        assert np.allclose(pr["Downstream pressure (psia)"] - G, v.pout, atol=10.0), power
+        assert np.allclose(pr["_pump"]["Surface pump discharge rate (RB/d)"], v.qd, rtol=0.01)
+        P, _ = wvlp.traverse(path, fl, pwh, cs, "pe2_style", 1.03, 1.0, U, hc)
+        assert np.allclose(P[:, -1] - G, v.vlp, rtol=0.02), power
+    # forward march (top node): intake -> discharge inverts the backward march
+    c1 = {"q": np.array([7000.0]), "wc": np.array([0.8]), "gor": np.array([800.0])}
+    p_out = MP.discharge_pressure(pump, fl, c1, np.array([435.0]), 152.0)
+    assert MP.intake_pressure(pump, fl, c1, p_out, 152.0)[0] == pytest.approx(435.0, abs=0.05)
+    assert MP.intake_pressure(pump, fl, {k: v / 20 for k, v in c1.items()} | {"wc": c1["wc"], "gor": c1["gor"]},
+                              np.array([700.0]), 152.0)[0] == MP.P_ATM          # very low rate: intake at 0 psig
+    ip = vt[vt.power == 250].sort_values("q")
+    curve = SimpleNamespace(q=np.r_[0.0, ip.q.to_numpy()], pwf=np.r_[4800.0, ip.ipr.to_numpy()] + G, pr=4800 + G,
+                            aof=float(ip.q.max()), fluid="oil", model="PROSPER table")
+    res, _ = SYS.solve_cases(lambda tid: path, fl, "oil", {"whp": 500 + G, "u": U, "wc": 80.0, "gor": 800.0},
+                             [{"pump_power": float(p)} for p in sysr.power], lambda ch: curve, "pe2_style", 1.03, 1.0,
+                             surface=surf)
+    for r, (_, s) in zip(res, sysr.iterrows()):
+        assert r.q == pytest.approx(s.q, rel=0.015), s.power
+        assert r.pwf - G == pytest.approx(s.bhp, rel=0.006), s.power
+    det, _, _ = SYS.solution_details(path, fl, "oil", res[2].params, res[2].q, "pe2_style", 1.03, 1.0, hc, surface=surf)
+    assert det["Surface pump intake pressure (psia)"] - G == pytest.approx(421.3, abs=5.0)
+    assert det["Surface pump efficiency (%)"] == pytest.approx(16.13, abs=0.3)
+    assert det["Surface pump head (ft)"] == pytest.approx(1419.7, rel=0.03)
+    assert det["Surface pump power (hp)"] == 350.0
+    assert q_increasing(res)
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T31_Surface_Multiphase_Pump.wellmodel.json"))
+    assert proj["widgets"]["opt_artificial_lift"] == "mpump" and proj["widgets"]["sys_vars"] == ["pump_power"]
+
+
+def q_increasing(res):
+    q = [r.q for r in res]
+    return all(b > a for a, b in zip(q, q[1:]))

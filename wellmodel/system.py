@@ -37,6 +37,7 @@ OIL_VARIABLES = {
     "tubing_id": "Tubing ID (in)",
     "u": "Overall heat transfer coefficient (BTU/h/ft2/F)",
     "choke": "Choke size (64ths in)",
+    "pump_power": "Multiphase pump power available (hp)",
 }
 GAS_VARIABLES = {
     "whp": "Top node pressure (psia)",
@@ -47,8 +48,9 @@ GAS_VARIABLES = {
     "tubing_id": "Tubing ID (in)",
     "u": "Overall heat transfer coefficient (BTU/h/ft2/F)",
     "choke": "Choke size (64ths in)",
+    "pump_power": "Multiphase pump power available (hp)",
 }
-SURFACE_ONLY = ("choke",)     # variables that need surface equipment with a choke
+SURFACE_ONLY = ("choke", "pump_power")     # variables that need surface equipment with a choke / pump
 IPR_KEYS = ("pr", "j", "skin")
 
 
@@ -168,7 +170,16 @@ class SurfaceSetup:
 
     def items_for(self, params):
         c = params.get("choke")
-        return SF.with_choke_size(self.items, float(c)) if c is not None and SF.has_choke(self.items) else self.items
+        items = SF.with_choke_size(self.items, float(c)) if c is not None and SF.has_choke(self.items) else self.items
+        pw = params.get("pump_power")
+        if pw is not None and SF.has_pump(items):
+            items = SF.with_pump_power(items, float(pw))
+        return items
+
+
+def _surface_key(params):
+    """Cases sharing a surface key march through identical surface items."""
+    return params.get("choke"), params.get("pump_power")
 
 
 def _wellhead(kind, path, fluid, plist, qlist, u, surface: SurfaceSetup | None, hc, curves=None):
@@ -180,7 +191,7 @@ def _wellhead(kind, path, fluid, plist, qlist, u, surface: SurfaceSetup | None, 
     out = [None] * len(plist)
     by_choke = {}
     for j, p in enumerate(plist):
-        by_choke.setdefault(p.get("choke"), []).append(j)
+        by_choke.setdefault(_surface_key(p), []).append(j)
     for _, js in by_choke.items():
         q = np.concatenate([qlist[j] for j in js])
         flu = {}
@@ -430,7 +441,7 @@ def _top_node_inflow(results, paths, fluid, kind, correlation, p1, p2, hc, surfa
             by_choke = {}
             pos = 0
             for r, q in zip(rs, qs):
-                by_choke.setdefault(r.params.get("choke"), []).append((pos, len(q), r))
+                by_choke.setdefault(_surface_key(r.params), []).append((pos, len(q), r))
                 pos += len(q)
             out = np.full_like(top, np.nan)
             for _, members in by_choke.items():
@@ -501,6 +512,9 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         dpl = sum(float(r["dP (psi)"][0]) for r in surf_rows if r["Type"] == "Pipe")
         surf_det = {"Manifold pressure (psia)": whp, "Manifold temperature (°F)": float(t_man[0]),
                     "dP choke (psi)": dpc, "dP flowline and fittings (psi)": dpl}
+        for r in surf_rows:
+            if r["Type"] == "Pump":
+                surf_det.update({k: float(np.atleast_1d(v)[0]) for k, v in r["_pump"].items()})
         whp = float(pwh[0])
     P, T = V.traverse(path, fluid, whp, case, correlation, p1, p2, u, hc, t_bottom)
     P, T = P[0], T[0]
