@@ -50,6 +50,7 @@ from wellmodel import srp_cards as wsrpc
 from wellmodel import diluent as wdil
 from wellmodel import emulsion as wem
 from wellmodel import rheology as wrh
+from wellmodel import cbm as wcbm
 from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
@@ -308,7 +309,8 @@ def track(store_key, edited):
 # ================================================================ project files
 PROJECT_WIDGETS = ("eq_filter_on", "sys_sens_on", "sys_vars", "sys_rates", "vlp_cmp_corrs", "vlp_match_corrs",
                    "vlp_sfit")
-PROJECT_WIDGET_PREFIXES = ("opt_", "sys_how_", "sys_vals_", "trav_rates_", "vfp_thp_", "vfp_wfr_", "vfp_gfr_")
+PROJECT_WIDGET_PREFIXES = ("opt_", "sys_how_", "sys_vals_", "trav_rates_", "vfp_thp_", "vfp_wfr_", "vfp_gfr_", "vfp_alq",
+                           "vfp_levels")
 PROJECT_EXTRAS = ("prp_text", "prp_name", "surf_matched", "vlp_selected", "vlp_u_accepted", "vlp_adj_accepted")
 
 
@@ -433,7 +435,8 @@ TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 
 tabs = st.tabs(TAB_NAMES, key="main_tabs")
 
 CAPTIONS = {
-    "fluid_type": {"oil": "Oil with associated gas and water",
+    "fluid_type": {"cbm": "Coalbed methane: water with desorbed gas (de-watering, PROSPER Tutorial 45)",
+                   "oil": "Oil with associated gas and water",
                    "dry_wet_gas": "Gas, with or without condensed liquid at surface",
                    "retrograde_condensate": "Gas that drops liquid in the reservoir below its dew point"},
     "method": {"black_oil": "Correlations from gravities and GOR/CGR",
@@ -1374,6 +1377,89 @@ def water_injector_pvt_panel():
         steam_calculator_panel()
 
 
+def cbm_inputs():
+    """Gas and water inputs of the CBM PVT panel (PVTInputs: the oil fields are unused)."""
+    g = lambda k, d: float(val(k, d))
+    return bo.PVTInputs(rsb=1.0, api=40.0, gas_sg=g("pvt_gg", 0.6), salinity_ppm=g("pvt_sal", 100000.0),
+                        h2s=g("pvt_h2s", 0.0), co2=g("pvt_co2", 0.0), n2=g("pvt_n2", 0.0))
+
+
+def cbm_pvt_panel():
+    """PROSPER PVT input for a CBM producer: gas gravity, CBM GLR, water salinity and impurities."""
+    st.subheader("Input parameters")
+    st.caption("Coalbed methane (PROSPER Tutorial 45): the well produces water with desorbed gas. All the gas is "
+               "free gas (no dissolved gas); the water uses PROSPER's water properties and the gas the gas "
+               "correlations (Z factor, Lee viscosity).")
+    c = st.columns(4)
+    num(c[0], "Gas Gravity (sp. gravity)", "pvt_gg", 0.6, 0.55, 2.0, 0.01, "%.3f")
+    num(c[1], "CBM GLR (scf/STB)", "pvt_cbm_glr", 10.0, 0.0, 1e6, 1.0)
+    num(c[2], "Water Salinity (ppm)", "pvt_sal", 100000.0, 0.0, 300000.0, 1000.0, "%.0f")
+    t_ = num(c[3], "Temperature for the table (deg F)", "pvt_t", 100.0, 32.0, 600.0, 1.0)
+    c = st.columns(4)
+    num(c[0], "Mole Percent H2S (percent)", "pvt_h2s", 0.0, 0.0, 100.0, 0.1)
+    num(c[1], "Mole Percent CO2 (percent)", "pvt_co2", 0.0, 0.0, 100.0, 0.1)
+    num(c[2], "Mole Percent N2 (percent)", "pvt_n2", 0.0, 0.0, 100.0, 0.1)
+    inp = cbm_inputs()
+    pp = np.linspace(14.7, 3014.7, 16)
+    z, bg, rho_g, mu_g = bo.gas_props(inp, pp, np.full_like(pp, float(t_)))
+    bw, rho_w, mu_w = bo.water_props(inp, pp, float(t_))
+    tab = pd.DataFrame({"Pressure (psia)": pp, "Z factor": z, "Gas FVF (ft3/scf)": bg, "Gas density (lb/ft3)": rho_g,
+                        "Gas viscosity (cp)": mu_g, "Water FVF (RB/STB)": np.broadcast_to(bw, pp.shape),
+                        "Water density (lb/ft3)": np.broadcast_to(rho_w, pp.shape),
+                        "Water viscosity (cp)": np.broadcast_to(mu_w, pp.shape)})
+    st.subheader("Calculated properties")
+    st.dataframe(tab.style.format(precision=5).format("{:,.1f}", subset=["Pressure (psia)"]), hide_index=True,
+                 width="stretch", height=320)
+    st.download_button("Download CBM PVT table (CSV)", tab.to_csv(index=False).encode(), "cbm_pvt.csv")
+
+
+def cbm_ipr_panel(o):
+    """PROSPER's CBM Producer IPR (Tutorial 45): water PI x krw at the saturation that gives the CBM GLR."""
+    st.caption("CBM Producer: the water rate is PI x krw(Sw) x (Pr - Pwf), where Sw is the water saturation whose "
+               "fractional flow gives the CBM GLR, (krg / mu_g Bg) / (krw / mu_w Bw) = GLR, at the average of Pr and "
+               f"Pwf (Corey relative permeabilities). Pressures in {ss['_units']['pressure']}.")
+    st.subheader("Reservoir data")
+    c = st.columns(4)
+    pr = num(c[0], "Reservoir pressure (psia)", "ipr_pr", 814.7, 15.0, 30000.0, 10.0)
+    t_f = num(c[1], "Reservoir temperature (deg F)", "ipr_t", 100.0, 32.0, 500.0, 1.0)
+    glr = num(c[2], "CBM GLR (scf/STB)", "ipr_cbm_glr", float(val("pvt_cbm_glr", 10.0)), 0.0, 1e6, 1.0)
+    pi = num(c[3], "Productivity index (STB/d/psi)", "ipr_j", 2.0, 1e-6, 1e5, 0.1, "%.4g")
+    st.subheader("Relative permeability")
+    c = st.columns(6)
+    swr = num(c[0], "Residual water saturation", "ipr_cbm_swr", 0.2, 0.0, 0.95, 0.01, "%.3g")
+    sgr = num(c[1], "Residual gas saturation", "ipr_cbm_sgr", 0.0, 0.0, 0.95, 0.01, "%.3g")
+    kw = num(c[2], "Water end-point krw", "ipr_cbm_krw", 0.8, 0.01, 1.0, 0.05, "%.3g")
+    kg = num(c[3], "Gas end-point krg", "ipr_cbm_krg", 0.8, 0.01, 1.0, 0.05, "%.3g")
+    nw = num(c[4], "Corey exponent (water)", "ipr_cbm_nw", 1.5, 0.1, 10.0, 0.1, "%.3g")
+    ng = num(c[5], "Corey exponent (gas)", "ipr_cbm_ng", 2.0, 0.1, 10.0, 0.1, "%.3g")
+    inp = cbm_inputs()
+    if swr + sgr >= 1.0:
+        st.error("The residual saturations must add to less than 1.")
+        ss.pop("ipr_curve", None)
+        return
+    args_ = (inp.gas_sg, inp.salinity_ppm, inp.h2s, inp.co2, inp.n2, pr, t_f, glr, pi, swr, sgr, kw, kg, nw, ng)
+    try:
+        curve = wcbm.cbm_ipr(*args_)
+    except (ValueError, RuntimeError) as e:
+        st.warning(f"IPR failed: {e}")
+        ss.pop("ipr_curve", None)
+        return
+    ss["ipr_curve"] = curve
+    ss["ipr_recipe"], ss["ipr_sc_dp"], ss["ipr_pvt_ctx"] = (wcbm.cbm_ipr, args_, {}), None, None
+    ss["ipr_meta"] = {"model": "CBM Producer", "fluid": "oil", "skin_parts": {}, "pb": None}
+    st.subheader("Results")
+    m = st.columns(4)
+    m[0].metric("AOF", f"{curve.aof:,.1f} STB/d")
+    m[1].metric("Sw at Pr", f"{curve.params['Sw at Pr']:.4f}")
+    m[2].metric("krw at Pr", f"{curve.params['krw at Pr']:.4f}")
+    m[3].metric("Gas at AOF", f"{curve.aof * glr / 1e6:.4f} MMscf/d")
+    st.pyplot(ipr_plot(curve, None), clear_figure=True)
+    tab = pd.DataFrame({"Water rate (STB/d)": curve.q, "Gas rate (MMscf/d)": curve.q * glr / 1e6,
+                        "Pwf (psia)": curve.pwf})
+    st.dataframe(tab.style.format(precision=4), hide_index=True, width="stretch")
+    st.download_button("Download IPR (CSV)", tab.to_csv(index=False).encode(), "cbm_ipr.csv")
+
+
 def steam_calculator_panel():
     """PROSPER PVT | Steam Calculator (Tutorial 42): single point from pressure and enthalpy (or temperature), and
     saturation properties over a pressure range. IAPWS-95 steam tables."""
@@ -1849,6 +1935,8 @@ with tabs[1]:
         render_eos(opts_now)
     elif retro_bo_on(opts_now):
         retro_pvt_panel(opts_now)
+    elif opts_now is not None and opts_now.fluid_type == "cbm":
+        cbm_pvt_panel()
     elif opts_now is not None and opts_now.fluid_type != "oil":
         gas_pvt_panel(opts_now)
     else:
@@ -2867,6 +2955,10 @@ def vlp_fluid(o, kind, p_max, t_min, t_max):
         water.salinity_ppm = float(eos_parse(ss["prp_text"], ss.get("prp_name", "")).salinity_ppm or 0.0)
         return wvlp.EOSTableFluid(kind, grid, mw, scf, stb, rho, water), \
             f"Equation of state ({ss.get('prp_name', 'PRP file')}): flashed on a pressure-temperature grid"
+    if getattr(o, "fluid_type", "") == "cbm":
+        return wcbm.CBMFluid(cbm_inputs()), ("Coalbed methane: water (salinity "
+                                            f"{float(val('pvt_sal', 100000.0)):,.0f} ppm) with free gas of gravity "
+                                            f"{float(val('pvt_gg', 0.6)):g} at the CBM GLR")
     if kind == "oil":
         model = blackoil_model(o)
         if model is None:
@@ -2910,6 +3002,8 @@ with tabs[2]:
         st.info("Fix the configuration in the Options summary first.")
     elif o.is_injector:
         injector_ipr_panel(o)
+    elif o.fluid_type == "cbm":
+        cbm_ipr_panel(o)
     else:
         gas = o.is_gas
         fluid = "gas" if gas else "oil"
@@ -3630,8 +3724,17 @@ def esp_equipment_panel(top_md, secs):
     c = st.columns(4)
     sep = num(c[0], "Gas separator efficiency (%)", "espq_sep", 0.0, 0.0, 100.0)
     wear = num(c[1], "Pump wear factor (fraction)", "espq_wear", 0.0, -0.5, 0.9, None, "%.3g")
-    chp = num(c[2], "Casing head pressure (psia)", "espq_chp", 264.7, 14.7, 20000.0,
-              help="For the annulus liquid level (PROSPER: Casing Head Pressure). No gas is vented up the annulus.")
+    o_ = ss.get("options")
+    cbm_ = o_ is not None and getattr(o_, "fluid_type", "") == "cbm"
+    if cbm_:
+        level = num(c[2], "Liquid level (ft TVD)", "espq_level", 2000.0, 0.0, 60000.0,
+                    help="PROSPER Liquid Level Method = Entered (CBM producer): the annulus liquid level; the casing "
+                         "head pressure is the result (intake pressure less the water column up to the level and "
+                         "the gas column above it).")
+        chp = 264.7
+    else:
+        chp = num(c[2], "Casing head pressure (psia)", "espq_chp", 264.7, 14.7, 20000.0,
+                  help="For the annulus liquid level (PROSPER: Casing Head Pressure). No gas is vented up the annulus.")
     meth = sel(c[3], "Pump calculation", ["Stage by stage", "Average rate"], "espq_meth",
                help="Stage by stage: each stage at its own in-situ rate and density as the gas is compressed "
                     "(closest to PROSPER's system results). Average rate: all stages at the average rate.")
@@ -3641,6 +3744,8 @@ def esp_equipment_panel(top_md, secs):
     out = {"pump_md": md, "freq": f, "stages": int(n), "cable_len": ln, "pump": pumps[pn], "motor": motors[mn],
            "cable": cables[cn], "sep": sep / 100.0, "wear": wear, "chp": chp,
            "method": "stages" if meth == "Stage by stage" else "average"}
+    if cbm_:
+        out["level"] = level
     ss["esp_equipment"] = out
     return out
 
@@ -5406,6 +5511,9 @@ def rebuild_ipr(changes):
         changes.pop("wc")                          # models without a water-cut input ignore it
     gor_new = changes.pop("gor", None)
     params0 = inspect.signature(fn).parameters
+    if gor_new is not None and "glr" in params0:          # CBM Producer: the GLR sets the water saturation
+        changes["glr"] = float(gor_new)
+        gor_new = None
     if gor_new is not None and "mu" in params0 and "bo" in params0 and ss.get("ipr_pvt_ctx") is not None:
         # PROSPER re-evaluates a Darcy-type PI with the oil at the calculation's GOR (and its bubble point)
         o_, t_ = ss["ipr_pvt_ctx"]
@@ -6870,6 +6978,13 @@ def esp_traverse(path, fluid, kind, base, q, corr, p1, p2, hc, surface, esp):
     det["Pump discharge pressure (psia)"], det["Pump intake pressure (psia)"] = pdp, pip
     det["Pump dP (psi)"] = pdp - pip
     det["Pump intake temperature (°F)"], det["Pump discharge temperature (°F)"] = float(out["t_intake"][0]), t_dis
+    if "level" in esp:                        # CBM: the liquid level is entered, the casing head pressure follows
+        det["Liquid level in annulus (ft TVD)"] = float(esp["level"])
+        det["Casing head pressure (psia)"] = wcbm.casing_head_pressure(
+            fluid, pip, float(out["t_intake"][0]), float(det.get("Wellhead temperature (°F)", path.t_form[0])),
+            float(np.interp(md_p, path.md, path.tvd)), float(esp["level"]))
+        det["Gas rate up the annulus (MMscf/d)"] = q * float(base["gor"]) / 1e6
+        return det, reg, prof
     det["Liquid level in annulus (ft TVD)"] = wesp.liquid_level(
         fluid, pip, float(out["t_intake"][0]), case, float(np.interp(md_p, path.md, path.tvd)), esp.get("chp", 264.7),
         float(path.tvd[0]))
@@ -7133,7 +7248,8 @@ def traverse_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=Non
                    "Tubing pressure at injection (psia)", "Casing pressure at injection (psia)", "Multipoint flag",
                    "Pump discharge pressure (psia)", "Pump intake pressure (psia)", "Pump dP (psi)",
                    "Pump intake temperature (°F)", "Pump discharge temperature (°F)",
-                   "Liquid level in annulus (ft TVD)", "Nozzle injection pressure (psia)", "Power fluid static (psi)",
+                   "Liquid level in annulus (ft TVD)", "Casing head pressure (psia)", "Gas rate up the annulus (MMscf/d)",
+                   "Nozzle injection pressure (psia)", "Power fluid static (psi)",
                    "Power fluid friction (psi)", "Flow ratio M", "Head ratio H", "PCP head (ft)",
                    "PCP average rate (RB/d)", "HSP power fluid rate (STB/d)", "HSP pump power (hp)",
                    "Power fluid injection pressure (psia)", "Delta P across turbine (psi)"):
@@ -7746,7 +7862,21 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
         thp = num_list(st, "Top node pressures (psia)", f"vfp_thp_{kind}",
                        _default_list(np.round(whp0 * np.array([0.5, 0.75, 1.0, 1.5, 2.0, 3.0]), 0)),
                        "comma separated" + (" - at the manifold" if surface is not None else ""))
-        if kind == "oil":
+        cbm_ = getattr(o, "fluid_type", "") == "cbm"
+        levels = []
+        if cbm_:
+            wfr = [100.0]
+            g0 = float(base["gor"])
+            gfr = num_list(st, "CBM GLRs (scf/STB)", "vfp_gfr_cbm",
+                           _default_list(sorted({0.1, round(g0, 4), round(g0 * 10, 4), round(g0 * 100, 4)})))
+            if esp:
+                l0 = float(esp.get("level", 2000.0))
+                levels = num_list(st, "Annulus liquid levels (ft)", "vfp_levels",
+                                  _default_list(sorted({max(l0 - 500, 0.0), l0, l0 + 400})),
+                                  "comma separated; they set the casing head pressure only (PROSPER's fourth "
+                                  "variable)")
+                levels = sorted({v for v in levels if v >= 0})
+        elif kind == "oil":
             wfr = parse_values(st.text_input("Water cuts (%)", key=f"vfp_wfr_{kind}", **dflt(f"vfp_wfr_{kind}", value="0, 20, 40, 60, 80, 95")))
             g0 = float(base["gor"])
             gfr = num_list(st, "Total GORs (scf/STB)", f"vfp_gfr_{kind}",
@@ -7817,7 +7947,7 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
         c2[1].caption(f"{npts:,} points ({len(flo)} rates x {len(set(thp))} pressures x {len(set(wfr))} x "
                       f"{len(set(gfr))}" + (f" x {n_alq} " + ("ALQ values" if (gl is not None or jet or pcp or hsp or srp) else "frequencies")
                                             if len(alq) > 1 else "") + ").")
-        if kind == "oil" and any(v >= 100 for v in wfr):
+        if kind == "oil" and not cbm_ and any(v >= 100 for v in wfr):
             st.error("Water cut must be below 100 %.")
             wfr = [v for v in wfr if v < 100]
         if esp:
@@ -7856,7 +7986,28 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
            None if not jet else (tuple(sorted((k_, repr(v_)) for k_, v_ in jet.items())), jet_alq),
            None if not pcp else tuple(sorted((k_, repr(v_)) for k_, v_ in pcp.items())),
            None if not hsp else tuple(sorted((k_, repr(v_)) for k_, v_ in hsp.items())),
-           None if not srp else tuple(sorted((k_, repr(v_)) for k_, v_ in srp.items())))
+           None if not srp else tuple(sorted((k_, repr(v_)) for k_, v_ in srp.items())), tuple(levels))
+    if go and cbm_ and esp:
+        try:
+            path = vlp_path(eqd, o.flow_type, (esp["pump_md"],))
+            with st.spinner(f"Calculating {npts:,} traverses..."):
+                res_ = wcbm.lift_curves(path, fluid, esp, corr, p1, p2, float(base["u"]), hc, flo,
+                                        levels or [float(esp.get("level", 2000.0))], gfr, thp,
+                                        alq or [float(esp["freq"])])
+            b_ = res_["bhp"][:, :, :, 0, :]                         # (freq, thp, glr, rate)
+            a_ = res_["axes"]
+            if len(a_["freqs"]) > 1:
+                axes = (a_["thps"], np.array([100.0]), a_["glrs"], a_["freqs"], a_["rates"])
+                bhp = np.transpose(b_, (1, 2, 0, 3))[:, None]
+            else:
+                axes = (a_["thps"], np.array([100.0]), a_["glrs"], a_["rates"])
+                bhp = b_[0][:, None]
+            ss["vfp_res"] = {"sig": sig, "axes": axes, "bhp": bhp, "wh": None, "alq_kind": "esp",
+                             "datum": float(path.tvd[-1]), "md": float(path.md[-1]), "tno": tno,
+                             "label": f"{VLP_LABELS[corr]} P1 {p1:.4f} P2 {p2:.4f}", "cbm": res_}
+        except (ValueError, KeyError, TypeError) as e:
+            st.error(f"Lift curves failed: {e}")
+        go = False
     if go:
         try:
             path = vlp_path(eqd, o.flow_type, (esp["pump_md"],) if esp else ((jet["pump_md"],) if jet else (
@@ -7967,6 +8118,13 @@ def vfp_mode(col, kind, fluid, eqd, o, base, corr, p1, p2, surface, esp=None, gl
       "srp_speed": "ALQ = rod pump speed (strokes/min); set the ALQ type in the simulator."}[alq_kind]
                     if alq_a is not None else "no artificial lift ALQ axis (ALQ 0).") +
                    (" THP is the manifold pressure (surface equipment included)." if vr["wh"] is not None else ""))
+        if vr.get("cbm") is not None:
+            tpd = wcbm.write_tpd(vr["cbm"], float(val("pvt_gg", 0.6)), vr["datum"], ss.get("proj_name", ""))
+            st.download_button("Download PROSPER lift curves for GAP / MBAL (.tpd)", tpd.encode(),
+                               f"lift_curves_{vr['tno']}.tpd", width="stretch")
+            st.caption("The .tpd file carries PROSPER's four CBM variables (liquid level, CBM GLR, boundary "
+                       "pressure, frequency) with the bottom-hole pressure, the pump results and the casing head "
+                       "pressure; pressures in psig.")
         with st.expander("Preview VFPPROD"):
             st.code("\n".join(ecl.splitlines()[:40]) + ("\n..." if len(ecl.splitlines()) > 40 else ""),
                     language=None)
@@ -8880,6 +9038,14 @@ def esp_system_calc(go, fluid, eqd, base, corr, p1, p2, sens, ipr_for, labels):
                         sol.update(wesp.operate(sol["Pump power (hp)"], motor, cable, f_, esp["cable_len"],
                                                 sol["Average cable temperature (F)"]))
                         sol["Pump min. rate (RB/d)"], sol["Pump max. rate (RB/d)"] = pump.range_at(f_)
+                        if "level" in esp:
+                            sol["Liquid level in annulus (ft TVD)"] = float(esp["level"])
+                            sol["Casing head pressure (psia)"] = wcbm.casing_head_pressure(
+                                fluid, sol["Pump intake pressure (psia)"], sol["Pump intake temperature (F)"],
+                                float(path.t_form[0]), float(np.interp(esp["pump_md"], path.md, path.tvd)),
+                                float(esp["level"]))
+                            results.append((ch, f_, n_, sol, crv))
+                            continue
                         sol["Casing head pressure (psia)"] = esp.get("chp", 264.7)
                         sol["Liquid level in annulus (ft TVD)"] = wesp.liquid_level(
                             fluid, sol["Pump intake pressure (psia)"], sol["Pump intake temperature (F)"],
@@ -9052,7 +9218,13 @@ with tabs[5]:
                               float(t0_["thp"]) if t0_ is not None else (250.0 if kind == "oil" else 1500.0), 14.7,
                               2e4)
                 base = {"whp": whp, "u": float(val("eq_u", eqd.get("u_geo", 8.0)))}
-                if kind == "oil":
+                if o.fluid_type == "cbm":
+                    base["wc"] = 100.0
+                    base["gor"] = num(st, "CBM GLR (scf/STB)", "sys_gor", float(val("pvt_cbm_glr", 10.0)), 0.0, 1e6,
+                                      help="Gas-liquid ratio of the produced water (all free gas).")
+                    st.caption("Coalbed methane: water only (water cut 100 %); the gas leaves through the ESP gas "
+                               "separator up the annulus.")
+                elif kind == "oil":
                     base["wc"] = num(st, "Water cut (%)", "sys_wc",
                                      float(t0_["wc"] * 100) if t0_ is not None else float(val("ipr_wc", 0.0)),
                                      0.0, 99.0)

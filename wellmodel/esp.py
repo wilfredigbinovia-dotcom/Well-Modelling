@@ -429,6 +429,19 @@ def outlet_temperature(t_intake, loss_hp, mass_lbd, cp_btu_lbf=0.85):
 
 
 MOTOR_EFF_DEFAULT = 0.85      # motor efficiency when no motor is given (heat to the fluid only)
+PUMP_T_FRACTION = 0.25        # fluid temperature in the stages: intake + this x the rise to the discharge
+PUMP_DT_MAX = 300.0           # PROSPER caps the pump temperature rise (T45 lift curves: 300 F at a few STB/d)
+
+
+def discharge_loss_hp(hyd_hp, pump_hp, motor=None, freq=60.0):
+    """Motor and pump losses (hp) heating the produced fluid: motor input power less the hydraulic power."""
+    pump_hp = np.asarray(pump_hp, float)
+    if motor is not None:
+        load = 100.0 * pump_hp / (motor.hp * np.asarray(freq, float) / 60.0)
+        eff = np.interp(np.nan_to_num(load), motor.load, motor.eff) / 100.0
+    else:
+        eff = MOTOR_EFF_DEFAULT
+    return np.maximum(pump_hp / np.maximum(eff, 0.05) - np.asarray(hyd_hp, float), 0.0)
 
 
 def discharge_temperature(t_intake, hyd_hp, pump_hp, w_lbh, cp, motor=None, freq=60.0):
@@ -442,8 +455,8 @@ def discharge_temperature(t_intake, hyd_hp, pump_hp, w_lbh, cp, motor=None, freq
     else:
         eff = MOTOR_EFF_DEFAULT
     loss = np.maximum(pump_hp / np.maximum(eff, 0.05) - np.asarray(hyd_hp, float), 0.0)
-    return np.asarray(t_intake, float) + loss * 2544.43 / np.maximum(np.asarray(w_lbh, float) * np.asarray(cp, float),
-                                                                       1e-9)
+    dt = loss * 2544.43 / np.maximum(np.asarray(w_lbh, float) * np.asarray(cp, float), 1e-9)
+    return np.asarray(t_intake, float) + np.minimum(dt, PUMP_DT_MAX)
 
 
 # ================================================================ the pump in the well (system analysis)
@@ -683,19 +696,28 @@ def bhp_with_pump(path, fluid, top_p, case, esp: dict, correlation="hagedorn_bro
     gor = np.asarray(case["gor"], float)
     case_a = dict(case)
     t_dis = t_in.copy()
+    t_pump = t_in.copy()
     pump, n_st, wear = esp["pump"], esp["stages"], esp.get("wear", 0.0)
     for _ in range(3):
         with np.errstate(all="ignore"):
             P, _ = V.traverse(above, fluid, top_p, case_a, correlation, p1, p2, u, hc, t_dis)
             pdp = P[:, -1]
-            pip = intake_from_discharge(fluid, pdp, t_in, case_a, pump, n_st, f, wear, groups)
+            pip = intake_from_discharge(fluid, pdp, t_pump, case_a, pump, n_st, f, wear, groups)
             ok = np.isfinite(pip)
-            _, hyd, pw, _ = pump_gain(fluid, np.where(ok, pip, 1000.0), t_in, case_a, pump, n_st, f, wear, groups)
+            _, hyd, pw, _ = pump_gain(fluid, np.where(ok, pip, 1000.0), t_pump, case_a, pump, n_st, f, wear, groups)
         if sep > 0 and hasattr(fluid, "_props"):
             rs = np.asarray(fluid._props(np.where(ok, pip, 1000.0), t_in, gor)[0], float)
             case_a = {**case, "gor": gor - sep * np.maximum(gor - rs, 0.0)}
         w_a, cp_a = fluid.mass_cp(case_a, hc)
         t_new = np.where(ok, discharge_temperature(t_in, hyd, pw, w_a, cp_a, esp.get("motor"), f), t_in)
+        # the fluid in the stages is warmer than at the intake: PROSPER's T45 lift curves (water, all gas separated) at a
+        # few STB/d (temperature rise up to 300 F) put it a quarter of the way to the discharge
+        # only for a pump handling liquid alone: with free gas through the stages PROSPER's T26 lift curves (80 Hz,
+        # GOR 800) keep the intake temperature
+        rs_in = np.asarray(fluid._props(np.where(ok, pip, 1000.0), t_in, np.asarray(case_a["gor"], float))[0], float) \
+            if hasattr(fluid, "_props") else np.zeros_like(t_in)
+        liquid = np.asarray(case_a["gor"], float) <= rs_in + 1e-6
+        t_pump = np.where(ok & liquid, t_in + PUMP_T_FRACTION * (t_new - t_in), t_in)
         if np.nanmax(np.abs(t_new - t_dis)) < 0.2 and not sep:
             t_dis = t_new
             break
@@ -703,7 +725,7 @@ def bhp_with_pump(path, fluid, top_p, case, esp: dict, correlation="hagedorn_bro
     with np.errstate(all="ignore"):
         Pb, _ = V.traverse(below, fluid, np.where(ok, pip, 1000.0), case, correlation, p1, p2, u, hc)
     nan = lambda a: np.where(ok, a, np.nan)
-    return {"bhp": nan(Pb[:, -1]), "pip": pip, "pdp": pdp, "t_intake": t_in, "t_discharge": t_dis,
+    return {"bhp": nan(Pb[:, -1]), "pip": pip, "pdp": pdp, "t_intake": t_in, "t_discharge": t_dis, "t_pump": t_pump,
             "gor_above": np.asarray(case_a["gor"], float) * np.ones_like(pip), "pump_hp": nan(pw), "hyd_hp": nan(hyd)}
 
 

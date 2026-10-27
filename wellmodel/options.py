@@ -13,6 +13,7 @@ FLUID_TYPES = {
     "oil": "Oil and water",
     "dry_wet_gas": "Dry and wet gas",
     "retrograde_condensate": "Retrograde condensate",
+    "cbm": "Coalbed methane (CBM)",
 }
 METHODS = {
     "black_oil": "Black oil",
@@ -103,7 +104,7 @@ FIELDS = {  # field -> (display name, choices)
 # What the calculation engine models today. Anything else is accepted as a
 # setup choice but blocks calculations until the matching module exists.
 MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calculate
-    "fluid_type": {"oil", "dry_wet_gas", "retrograde_condensate"},
+    "fluid_type": {"oil", "dry_wet_gas", "retrograde_condensate", "cbm"},
     "method": {"black_oil", "eos"},
     "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer", "water_injector", "gas_injector"},
@@ -215,8 +216,22 @@ class WellOptions:
             add("info", ["completion", "sand_control"],
                 "Cased-hole gravel pack: most of the extra pressure drop is in the "
                 "gravel-filled perforation tunnels, so perforation details matter.")
+        if self.fluid_type == "cbm":
+            if self.well_type != "producer":
+                add("error", ["fluid_type", "well_type"], "Coalbed methane is modelled for producers (PROSPER's CBM "
+                    "Producer well type).")
+            if self.method != "black_oil":
+                add("error", ["fluid_type", "method"], "Coalbed methane uses black-oil (water and gas) properties.")
+            if self.flow_type != "tubing":
+                add("error", ["fluid_type", "flow_type"], "A CBM producer produces water up the tubing: choose Tubing "
+                    "flow (the gas goes up the annulus).")
+            add("info", ["fluid_type"],
+                "CBM producer (PROSPER Tutorial 45, de-watering): water with desorbed gas. PVT: gas gravity, CBM GLR "
+                "and water salinity; IPR: CBM Producer (water PI scaled by the water relative permeability at the GLR). "
+                "With an ESP and a gas separator, the annulus liquid level gives the casing head pressure, and the "
+                "lift curves export to GAP / MBAL (.tpd).")
         if self.artificial_lift == "esp":
-            if self.well_type != "producer" or self.fluid_type != "oil":
+            if self.well_type != "producer" or self.fluid_type not in ("oil", "cbm"):
                 add("error", ["artificial_lift", "fluid_type", "well_type"],
                     "An electrical submersible pump applies to oil (and water) producers.")
             if self.flow_type != "tubing":
@@ -392,6 +407,8 @@ class WellOptions:
                 if self.viscosity_model == "non_newtonian" and self.method == "black_oil":
                     pvt.append("Rheological parameters (yield stress, consistency index K, shear thinning index n) "
                                "against temperature and pressure, and the maximum viscosity")
+            elif self.fluid_type == "cbm":
+                pvt += ["Gas gravity and impurities (H2S, CO2, N2)", "CBM gas-liquid ratio", "Water salinity"]
             elif self.fluid_type == "dry_wet_gas":
                 pvt += ["Separator gas gravity and impurities (H2S, CO2, N2)",
                         "Condensate-gas ratio and condensate gravity (wet gas)",
@@ -459,6 +476,9 @@ class WellOptions:
             if self.fluid_type == "oil":
                 ipr += ["Productivity index, or k, h, skin and drainage area",
                         "Water cut and producing GOR"]
+            elif self.fluid_type == "cbm":
+                ipr += ["Water productivity index and CBM GLR",
+                        "Water-gas relative permeabilities: residual saturations, end points, Corey exponents"]
             else:
                 ipr += ["Back-pressure C and n, or k, h, skin and drainage area "
                         "(with non-Darcy coefficient)",

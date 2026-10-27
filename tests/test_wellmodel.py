@@ -1986,7 +1986,7 @@ def test_artificial_lift_databases_from_prosper():
     from wellmodel import esp as E, pcp as PC, gaslift as GL
     d = Path(E.__file__).parent / "data"
     db = E.database_pumps()
-    assert len(db) == 773 and int(db.h6.notna().sum()) == 53
+    assert len(db) == 774 and int(db.h6.notna().sum()) == 54     # + CENTRILIFT R7 (T45, fitted)
     p = E.PUMPS["ALNAS L6050 (4.48 in)"]                         # 60 Hz, one stage
     q = 5600.0
     hc = [3.691e-18, -1.0168e-13, 9.0728e-10, -3.2186e-6, 0.0015281, 39.235]
@@ -2053,7 +2053,7 @@ def test_esp_pump_in_traverse_and_lift_curves():
     o = E.bhp_with_pump(path, fluid, 300.0, case, esp, "hagedorn_brown")
     assert np.all(np.isfinite(o["bhp"])) and np.all(o["pdp"] > o["pip"]) and np.all(o["bhp"] > o["pip"])
     # the intake solve inverts the stage march
-    pdp, *_ = E.pump_gain(fluid, o["pip"], o["t_intake"], case, esp["pump"], 60, 60.0)
+    pdp, *_ = E.pump_gain(fluid, o["pip"], o["t_pump"], case, esp["pump"], 60, 60.0)
     assert np.allclose(pdp, o["pdp"], atol=0.5)
     # the pump lowers the BHP needed against natural flow at the same top pressure
     P, _ = wvlp.traverse(path, fluid, np.array([300.0, 300.0]), case, "hagedorn_brown")
@@ -3714,7 +3714,7 @@ def test_pcp_database_and_pump_model_prosper_t29():
     and pressures: rate = head gradient x speed + intercept(head), power = power gradient(dP/0.433) x speed."""
     from wellmodel import pcp
     assert len(pcp.PUMPS) == 3 and len(pcp.CABLES) == 13 and len(pcp.RODS) >= 10
-    assert len({(m.manufacturer, m.series) for m in pcp.MOTORS.values()}) == 150
+    assert len({(m.manufacturer, m.series) for m in pcp.MOTORS.values()}) == 151   # + Centrilift 562 KMH (T45)
     p = pcp.PUMPS["OilLift Technology Inc 3.5 in 120-600 (Max Head 2125 feet)"]
     assert abs(p.head_grad - 7.5378) < 1e-9 and abs(float(p.intercept(0.0))) < 0.1
     for (wc, n), (q, pip, pdis, head, pw, eff, qavg, amps) in _T29_RUNS.items():
@@ -5556,3 +5556,61 @@ def test_non_newtonian_oil_t44():
                                            "examples/T44_Modelling_NonNewtonian_Fluids.wellmodel.json")))
     assert proj["widgets"]["opt_viscosity_model"] == "non_newtonian"
     assert len(proj["tables"]["pvt_rheology"]["__df__"]["data"]) == 4
+
+
+def test_cbm_dewatering_well_t45():
+    """PROSPER Tutorial 45 (the user's file): CBM producer, gas gravity 0.6, 100,000 ppm water. CBM Producer IPR
+    (Pr 800 psig, 100 F, PI 2, Swr 0.2, krw/krg end points 0.8, Corey 1.5 / 2): PROSPER's IPR at GLR 1 / 10 / 100 /
+    1000 within 0.5 %. ESP CENTRILIFT R7 x 58 at 2500 ft, 100 % gas separator, PE2, 200 psig wellhead: PROSPER's lift
+    curves (50 / 60 / 70 Hz, GLR 10 / 100 / 1000, liquid level 1500 / 2000 / 2400 ft) - bottom-hole pressure within
+    5.3 % at every rate (2 % above 40 STB/d), the casing head pressure within 5 psi above 40 STB/d; the .tpd export
+    reads back."""
+    import json
+    from wellmodel import cbm as C, esp as E, liftcurves as LC
+    G = 14.696
+    d = Path(__file__).parent / "data"
+    inp = wbo.PVTInputs(rsb=1, api=40, gas_sg=0.6, salinity_ppm=100000)
+    ipr_ref = pd.read_csv(d / "t45_ipr.csv")
+    for g, grp in ipr_ref.groupby("glr"):
+        m = C.CBMInflow(inp, 800 + G, 100.0, float(g), 2.0)
+        q = m.rate(grp["pwf"].to_numpy() + G)
+        ok = grp["q"].to_numpy() > 1
+        assert np.allclose(q[ok], grp["q"].to_numpy()[ok], rtol=0.005), (g, q[ok][-3:], grp["q"].to_numpy()[ok][-3:])
+    assert abs(C.CBMInflow(inp, 800 + G, 100.0, 10.0, 2.0).aof / 1222.4 - 1) < 0.005
+    pump = E.PUMPS["CENTRILIFT R7 (4 in)"]
+    assert abs(pump.head_stage(600.0) * 58 - 1710.3) < 1.0                  # PROSPER: 1710.3 ft at 600 RB/d, 60 Hz
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 2500, "Tubing Inside Diameter (in)": 2.875,
+             "Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Diameter (in)": 3.25,
+             "Tubing Outside Roughness (in)": 0.0006, "Casing Inside Diameter (in)": 6.1,
+             "Casing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 2600, "Casing Inside Diameter (in)": 6.1,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 2600], [0, 2600], [0, 2600], [60, 100])
+    esp_ = {"pump": pump, "stages": 58, "pump_md": 2500.0, "sep": 1.0, "freq": 60.0, "wear": 0.0,
+            "motor": E.MOTORS["Centrilift 562 KMH 38HP 435V 53A (58.3 Hz)"]}
+    ref = pd.read_csv(d / "t45_lift_curves.csv")
+    fl = C.CBMFluid(inp)
+    res = C.lift_curves(path, fl, esp_, "pe2_style", 1.0, 1.0, 8.0, weq.HeatCapacities(), sorted(ref["rate"].unique()),
+                        [1500, 2000, 2400], [10, 1000], [200 + G], [60, 70])
+    ax = res["axes"]
+    for i, f in enumerate(ax["freqs"]):
+        for j, g in enumerate(ax["glrs"]):
+            for k, lv in enumerate(ax["levels"]):
+                r = ref[(ref.freq == f) & (ref.glr == g) & (ref.level == lv)].sort_values("rate")
+                bhp = res["bhp"][i, 0, j, k] - G
+                e = np.abs(bhp / r["bhp"].to_numpy() - 1)
+                big = r["rate"].to_numpy() > 40
+                assert e.max() < 0.055 and e[big].max() < 0.02, (f, g, lv, e.max(), e[big].max())
+                chp = res["chp"][i, 0, j, k] - G
+                assert np.nanmax(np.abs(chp - r["chp"].to_numpy())[big]) < 5.0
+                assert np.allclose(res["pdp"][i, 0, j, k] - G, r["pdp"], rtol=0.003)
+    print("T45 60 Hz GLR 10 level 2000 BHP", (res["bhp"][0, 0, 0, 1, [12, 16, 18]] - G).round(1))
+    back = LC.read_tpd(C.write_tpd(res, 0.6, 2600.0))
+    assert back["results"].shape == (2, 1, 2, 3, 20, len(C.TPD_COLUMNS))
+    assert np.allclose(back["results"][..., 0], np.where(np.isfinite(res["bhp"]), res["bhp"] - G, 3.4e35), rtol=1e-5)
+    prosper = LC.read_tpd((d / "t45_cbm_lift_curves.tpd").read_text())
+    assert prosper["results"].shape == (3, 1, 3, 3, 20, 37)
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T45_CBM_Dewatering_Well.wellmodel.json"))
+    assert proj["widgets"]["opt_fluid_type"] == "cbm" and proj["inputs"]["espq_level"] == 2000.0
