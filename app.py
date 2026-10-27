@@ -52,6 +52,7 @@ from wellmodel import emulsion as wem
 from wellmodel import rheology as wrh
 from wellmodel import cbm as wcbm
 from wellmodel import foam as wfoam
+from wellmodel import fracture as wfrac
 from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
@@ -1378,6 +1379,159 @@ def water_injector_pvt_panel():
     o_ = ss.get("options")
     if o_ is not None and getattr(o_, "steam", "none") == "allow":
         steam_calculator_panel()
+
+
+FRAC_FLUID_COLS = ["Temperature (°F)", "Flow behaviour index n", "Consistency index K (lbf.s^n/ft2)"]
+
+
+def _frac_well(o):
+    """(TVD ft and MD ft of the bottom node, last tubing ID in) from the Equipment tab, or None."""
+    eqd = ss.get("equipment", {})
+    if not eqd.get("valid") or eqd.get("survey") is None:
+        return None
+    md_s, tvd_s = eqd["survey"]
+    top_md, secs, _ = eqd["downhole"]
+    if secs is None or not len(secs):
+        return None
+    bottom = float(secs["MD bottom (ft)"].max())
+    tub = secs[secs["Type"] == "Tubing"]
+    tid = float(tub["Flow ID (in)"].iloc[-1]) if len(tub) else 4.0
+    return float(np.interp(bottom, md_s, tvd_s)), bottom, tid
+
+
+def frac_panel(o):
+    """PROSPER Stimulation | Hydraulic Fracturing (Tutorial 49): screening of treatment volume and pump rate."""
+    st.subheader("Hydraulic fracturing (stimulation screening)")
+    st.caption("PROSPER's Stimulation | Hydraulic Fracturing (Tutorial 49): a linear/vertical (KGD) fracture of the "
+               "gross thickness grown with a power-law fluid and Carter leak-off, PROSPER's 100-stage treatment (pad, "
+               "proppant ramp) with the proppant bank that settles behind it, and the PI after from the propped "
+               "length and conductivity. A screening tool, as PROSPER says - not a fracture simulator. See "
+               "fracture.py for what was reconstructed and how closely.")
+    well = _frac_well(o)
+    if well is None:
+        st.info("Complete the Equipment Data tab (deviation survey and downhole equipment) first.")
+        return
+    tvd, md_b, tid = well
+    curve = ss.get("ipr_curve")
+    pr = float(val("ipr_pr", 3000.0))
+    pi0 = None
+    if curve is not None and curve.fluid == "oil":
+        pi0 = float(curve.rate(curve.pr - 50.0)) / 50.0
+    d = wfrac.FracInputs()
+    tabs_ = st.tabs(["Options", "Reservoir", "Well", "Rock", "Proppant", "Fracture fluid"])
+    with tabs_[0]:
+        c = st.columns(4)
+        vmin = num(c[0], "Minimum treatment volume (bbl)", "frac_vmin", d.v_min, 10.0, 1e6, 100.0)
+        vmax = num(c[1], "Maximum treatment volume (bbl)", "frac_vmax", d.v_max, 10.0, 1e6, 100.0)
+        qmin = num(c[2], "Minimum treatment rate (bbl/min)", "frac_qmin", d.q_min, 1.0, 1e4, 10.0)
+        qmax = num(c[3], "Maximum treatment rate (bbl/min)", "frac_qmax", d.q_max, 1.0, 1e4, 10.0)
+        c = st.columns(4)
+        wall = num(c[0], "Part of fracture wall taking fluid (%)", "frac_wall", 75.0, 0.0, 100.0, 5.0)
+        inc = num(c[1], "Wall area increase due to irregularities (%)", "frac_inc", 50.0, 0.0, 500.0, 5.0)
+        tsur = num(c[2], "Surface temperature (°F)", "frac_tsur", d.t_surface, -20.0, 200.0, 1.0)
+        sloss = num(c[3], "Surface pressure losses (psi)", "frac_sloss", d.surface_losses, 0.0, 1e4, 10.0)
+    with tabs_[1]:
+        c = st.columns(4)
+        hg = num(c[0], "Gross thickness (ft)", "frac_h", d.h_gross, 1.0, 5000.0, 5.0)
+        obg = num(c[1], "Overburden gradient (psi/ft)", "frac_obg", d.overburden_grad, 0.5, 2.0, 0.01, "%.5f")
+        area = num(c[2], "Drainage area (acres)", "frac_area", d.area_acres, 1.0, 1e5, 10.0)
+        c[3].metric("Reservoir pressure", f"{pr:,.1f} psia")
+    with tabs_[2]:
+        c = st.columns(4)
+        bh = num(c[0], "Borehole diameter (in)", "frac_bh", d.borehole_d, 1.0, 40.0, 0.1, "%.4g")
+        pint = num(c[1], "Perforated interval (ft)", "frac_pint", d.perf_interval, 1.0, 5000.0, 5.0)
+        spf = num(c[2], "Shot density (1/ft)", "frac_spf", d.spf, 0.1, 50.0, 1.0)
+        pd_ = num(c[3], "Perforation tunnel diameter (in)", "frac_pd", d.perf_d, 0.05, 3.0, 0.01)
+        st.caption(f"From the model: bottom node {md_b:,.0f} ft MD / {tvd:,.1f} ft TVD, tubing ID {tid:g} in.")
+    with tabs_[3]:
+        c = st.columns(4)
+        phi = num(c[0], "Porosity (fraction)", "frac_phi", d.porosity, 0.01, 0.6, 0.01)
+        kf = num(c[1], "Formation permeability (md)", "frac_k", d.k, 1e-4, 1e5, 1.0)
+        ten = num(c[2], "Rock tensile strength (psi)", "frac_ten", d.tensile, 0.0, 1e4, 50.0)
+        nu = num(c[3], "Poisson's ratio", "frac_nu", d.poisson, 0.01, 0.49, 0.01)
+        c = st.columns(4)
+        ym = num(c[0], "Young's modulus (psi)", "frac_E", d.youngs, 1e4, 1e8, 1e5, "%.4g")
+    with tabs_[4]:
+        c = st.columns(4)
+        cw = num(c[0], "Fluid loss coefficient (ft/sqrt(min))", "frac_cw", d.c_wall, 1e-5, 0.1, 0.0005, "%.5g")
+        rho = num(c[1], "Fluid density (lb/gal)", "frac_rho", d.fluid_density, 6.0, 20.0, 0.1)
+        cmax = num(c[2], "Maximum proppant concentration (lb/gal)", "frac_cmax", d.c_max, 0.1, 20.0, 0.1)
+        c[3].text_input("Proppant", "Graded sand 8-12", disabled=True,
+                        help="The proppant PROSPER's tutorial uses; its conductivity against concentration is taken "
+                             "from the T49 file (other proppants are not available).")
+    with tabs_[5]:
+        key = "frac_fluid"
+        if key not in ss:
+            ss[key] = pd.DataFrame(list(d.fluid_table), columns=FRAC_FLUID_COLS)
+        tf = track(key, st.data_editor(ss[key], key=key + "_ed", num_rows="dynamic", width="stretch"))
+    c = st.columns(4)
+    pi_b = num(c[0], "Productivity index before (STB/d/psi)", "frac_pi0", round(pi0, 4) if pi0 else 5.0, 1e-4, 1e5,
+               0.1, "%.5g", help="Defaults to the PI of the IPR tab's curve.")
+    go = c[1].button("Calculate fracturing", type="primary")
+    try:
+        ftab = tuple(map(tuple, pd.DataFrame(tf)[FRAC_FLUID_COLS].apply(pd.to_numeric, errors="coerce")
+                         .dropna().to_numpy()))
+    except KeyError:
+        ftab = d.fluid_table
+    fi = wfrac.FracInputs(vmin, vmax, qmin, qmax, wall / 100.0, inc / 100.0, tsur, sloss, hg, obg, area, bh, pint, spf,
+                          pd_, phi, kf, ten, nu, ym, cw, 0.0, rho, cmax, ftab or d.fluid_table, tvd, pr,
+                          default_temperature(o), pi_b, tid, md_b)
+    if go:
+        with st.spinner("Calculating the treatments..."):
+            fr = wfrac.Fracture(fi)
+            tab, cases = fr.sensitivity()
+            ss["frac_res"] = {"tab": tab, "cases": cases, "fr": fr}
+    res = ss.get("frac_res")
+    if not res:
+        return
+    tab, cases, fr = res["tab"], res["cases"], res["fr"]
+    st.markdown(f"**Treatment results** - fluid at {fr.t_fluid:g} °F (n {fr.n:.4g}, K {fr.K:.4g} lbf.s^n/ft2)")
+    cc = st.columns(2)
+    for col_, (ycol, lab) in zip(cc, (("Final fracture length (ft)", "Final fracture length (ft)"),
+                                      ("Final fracture width (in)", "Final fracture width (in)"))):
+        fig, ax = plt.subplots(figsize=(5.5, 3.4))
+        for i, (q_, g_) in enumerate(tab.groupby("Pump rate (bbl/min)")):
+            ax.plot(g_["Treatment volume (bbl)"], g_[ycol], "-o", ms=3, color=wplt.SERIES[i % len(wplt.SERIES)],
+                    label=f"{q_:g} bbl/min")
+        ax.set_xlabel("Treatment volume (bbl)")
+        ax.set_ylabel(lab)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7)
+        fig.tight_layout()
+        col_.pyplot(fig, clear_figure=True)
+    st.dataframe(tab.style.format(precision=4), width="stretch", height=280)
+    st.download_button("Download treatment results (CSV)", tab.to_csv().encode(), "fracture_treatments.csv")
+    k = int(st.number_input("Detailed results - case", 1, len(tab), min(38, len(tab)), key="frac_case"))
+    pad, sch, eff, pr_ = cases[k - 1]
+    q_, v_ = tab.loc[k, "Pump rate (bbl/min)"], tab.loc[k, "Treatment volume (bbl)"]
+    t1, t2, t3, t4, t5 = st.tabs(["Treatment", "Fracture dimensions", "Productivity improvement", "Pumping schedule",
+                                  "Pad"])
+    with t1:
+        tr = fr.treatment(q_, v_)
+        st.dataframe(pd.DataFrame({"Result": list(tr), "Value": list(tr.values())}), hide_index=True, width="stretch")
+        st.caption("Tubing friction: Colebrook with the apparent viscosity - PROSPER's differs by about 15 % (at these "
+                   "rates through production tubing the figure is not meaningful). Apparent viscosity and bottom-hole "
+                   "temperature during the job: not PROSPER's method.")
+    with t2:
+        st.dataframe(pd.DataFrame({"Result": list(eff), "Value": list(eff.values())}), hide_index=True, width="stretch")
+    with t3:
+        st.dataframe(pd.DataFrame({"Result": list(pr_), "Value": list(pr_.values())}), hide_index=True,
+                     width="stretch")
+        pia = float(pr_["Productivity index - after (STB/d/psi)"])
+
+        def _use_pi(v=pia):
+            put("ipr_model_oil", "P.I. Entry")
+            put("ipr_j", round(v, 4))
+        st.button(f"Use PI {pia:.4f} in the IPR (P.I. Entry)", on_click=_use_pi, key="frac_use_pi",
+                  help="Sets the IPR to P.I. Entry with this PI; compare the system before and after (Calculation tab, "
+                       "a sensitivity on the PI).")
+    with t4:
+        st.dataframe(sch.style.format(precision=4), hide_index=True, width="stretch", height=320)
+        st.download_button("Download pumping schedule (CSV)", sch.to_csv(index=False).encode(),
+                           f"pumping_schedule_case_{k}.csv")
+    with t5:
+        st.dataframe(pd.DataFrame({"Result": list(pad), "Value": list(pad.values())}), hide_index=True,
+                     width="stretch")
 
 
 def cbm_inputs():
@@ -3463,6 +3617,11 @@ with tabs[2]:
                     with st.expander("Modified isochronal corrections", expanded=True):
                         st.dataframe(curve.isochronal.style.format(precision=4), hide_index=True, width="stretch")
                 st.download_button("Download IPR (CSV)", table.to_csv(index=False).encode(), "ipr.csv")
+    if o is not None and not o.errors and not o.is_injector and o.fluid_type == "oil":
+        st.divider()
+        with st.expander("Stimulation - hydraulic fracturing (PROSPER Tutorial 49)",
+                         expanded=bool(ss.get("frac_res"))):
+            frac_panel(o)
 
 
 

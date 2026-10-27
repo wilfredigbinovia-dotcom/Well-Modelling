@@ -5669,3 +5669,37 @@ def test_foam_lift_t48():
     assert abs(det["Wellhead temperature (°F)"] - 130.9) < 1.5         # heat transfer at the annulus hydraulic diameter
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T48_Foam_Lift.wellmodel.json"))
     assert proj["widgets"]["opt_artificial_lift"] == "foam_lift" and proj["inputs"]["sys_corr"] == "foam_homogeneous"
+
+
+def test_hydraulic_fracturing_t49():
+    """PROSPER Tutorial 49 (the user's file): Stimulation | Hydraulic Fracturing on the Logie well (9000 ft TVD,
+    Pr 5200 psig, PI 5), 66 treatments (1000-4000 bbl, 200-400 bbl/min). Stresses exact; initial length and width
+    within 0.5 %, effective length within 3.5 %, effective width within 2 %, PI after within 1 %; five detailed cases
+    (pad, effective dimensions, rw')."""
+    from wellmodel import fracture as FR
+    import json
+    fr = FR.Fracture(FR.FracInputs())
+    st_ = FR.stresses(fr.f)
+    assert abs(st_["Fracture propagation pressure (psig)"] - 6262.57) < 0.05
+    assert abs(st_["Initial closing pressure (psig)"] - 1047.89) < 0.05
+    assert abs(st_["Actual closing pressure (psig)"] - 2351.56) < 0.05
+    assert abs(st_["Fracture initiation pressure (psig)"] - 6502.72) < 0.5
+    assert abs(st_["Fracture breakdown gradient (psi/ft)"] - 0.72416) < 1e-4
+    tab, cases = fr.sensitivity()
+    ref = pd.read_csv(Path(__file__).parent / "data" / "t49_frac_results.csv")
+    for col, rc, tol in (("Fracture length (ft)", "L0", 0.005), ("Fracture width (in)", "w0", 0.005),
+                         ("Final fracture length (ft)", "Leff", 0.035), ("Final fracture width (in)", "weff", 0.02),
+                         ("Productivity index - after (STB/d/psi)", "pi_after", 0.01)):
+        e = np.abs(tab[col].to_numpy() / ref[rc].to_numpy() - 1)
+        assert e.max() < tol, (col, e.max())
+    # detailed cases: pad volume, effective height, rw'
+    for k, pad_v, h_eff, rwp in ((1, 550, 82.3181, 33.9481), (11, 560, 93.1674, 57.0057), (38, 352, 88.7606, 50.6206),
+                                 (56, 300, 81.4451, 45.03), (66, 320, 90.2403, 61.7663)):
+        pad, sch, eff, pr = cases[k - 1]
+        assert abs(pad["Pad volume (bbl)"] - pad_v) < 1e-6 * pad_v + 1e-9, (k, pad["Pad volume (bbl)"])
+        assert abs(eff["Effective fracture height (ft)"] / h_eff - 1) < 0.01, (k, eff["Effective fracture height (ft)"])
+        assert abs(pr["Effective wellbore radius (ft)"] / rwp - 1) < 0.03, (k, pr["Effective wellbore radius (ft)"])
+    assert abs(fr.treatment(200, 1000)["Perforation friction losses (psi)"] - 1.40117) < 0.002
+    assert abs(fr.treatment(400, 1000)["Pump power requirement (hp)"] / 5097359 - 1) < 0.2   # tubing friction ~15 %
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T49_Stimulation_Hydraulic_Fracturing.wellmodel.json"))
+    assert proj["inputs"]["ipr_j"] == 5.0 and proj["widgets"]["sys_vals_j"] == "5, 11.2449"
