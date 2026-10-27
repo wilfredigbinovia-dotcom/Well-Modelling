@@ -5646,7 +5646,9 @@ def test_foam_lift_t48():
                                 [45, 75, 166], flow_type="annular")
     fl = FO.FoamFluid(wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.58, salinity_ppm=100000, co2=0.5, n2=2),
                                        50.0, "lee", inp),
-                      FO.FoamModel(density=((0.02, 57.8), (0.05, 53), (0.1, 45), (0.25, 33), (0.5, 30.5))), 0.02)
+                      FO.FoamModel(density=((0.0, 68.0), (0.05, 53), (0.1, 45), (0.25, 33), (0.5, 30.5))), 0.02)
+    # PROSPER ignores the zero-concentration row: 57.8 at 0.02 % (its traverse), 31.567 at 0.39333 %
+    assert abs(float(fl.model.foam_density(0.02)) - 57.8) < 1e-9 and abs(float(fl.model.foam_density(0.39333)) - 31.567) < 1e-3
     ref = pd.read_csv(Path(__file__).parent / "data" / "t48_foam_vlp.csv")
     q = ref["q"].to_numpy()
     case = {"q": q, "wgr": np.full_like(q, 100.0), "cgr": np.full_like(q, 1.0), "surf": ref["surf"].to_numpy()}

@@ -3,7 +3,7 @@
 A surfactant injected at the bottom of a liquid-loading gas well (here down a coiled tubing to the perforations, the
 gas produced up the annulus) turns the water into foam. PROSPER's default surfactant model (Petroleum Society paper
 2007-118, Yang and Zhang) tabulates the water-gas surface tension and the foam density against the surfactant mass
-percent; both are interpolated linearly in the concentration (held at the table ends).
+percent; both are interpolated linearly in the concentration (see FoamModel._lookup for PROSPER's table ends).
 
 The Foam-Homogeneous vertical lift correlation (correlations.foam_homogeneous): no-slip mixture of the gas and the
 foam - the liquid taken at the foam density - for the gravity gradient, and no wall friction (PROSPER reports
@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 SIGMA_DEFAULT = ((0.02, 66.0), (0.05, 59.0), (0.1, 52.0), (0.15, 46.0), (0.2, 44.0), (0.5, 36.0))
-DENSITY_DEFAULT = ((0.0, 58.0), (0.05, 53.0), (0.1, 45.0), (0.25, 33.0), (0.5, 30.5))
+DENSITY_DEFAULT = ((0.0, 68.0), (0.05, 53.0), (0.1, 45.0), (0.25, 33.0), (0.5, 30.5))     # the user's T48 file
 
 
 @dataclass
@@ -36,13 +36,25 @@ class FoamModel:
                 raise ValueError(f"The foam {name} table needs at least one point.")
             setattr(self, name, tuple(map(tuple, t)))
 
+    @staticmethod
+    def _lookup(table, c):
+        """PROSPER's table lookup: rows at zero concentration are ignored, linear interpolation between the others,
+        linear extrapolation below the first (through the first two points), held beyond the last. Found on the user's
+        T48 file: foam density (0, 68), (0.05, 53), (0.1, 45) ... gives 57.8 lb/ft3 at 0.02 % (not 62.0)."""
+        t = np.array(table, float)
+        t = t[t[:, 0] > 0] if (t[:, 0] > 0).any() else t
+        c = np.asarray(c, float)
+        out = np.interp(c, t[:, 0], t[:, 1])
+        if len(t) >= 2:
+            slope = (t[1, 1] - t[0, 1]) / max(t[1, 0] - t[0, 0], 1e-12)
+            out = np.where(c < t[0, 0], t[0, 1] + slope * (c - t[0, 0]), out)
+        return np.maximum(out, 0.0)
+
     def surface_tension(self, c):
-        t = np.array(self.sigma)
-        return np.interp(np.asarray(c, float), t[:, 0], t[:, 1])
+        return self._lookup(self.sigma, c)
 
     def foam_density(self, c):
-        t = np.array(self.density)
-        return np.interp(np.asarray(c, float), t[:, 0], t[:, 1])
+        return self._lookup(self.density, c)
 
 
 class FoamFluid:
