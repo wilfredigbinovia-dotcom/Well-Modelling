@@ -53,6 +53,7 @@ from wellmodel import rheology as wrh
 from wellmodel import cbm as wcbm
 from wellmodel import foam as wfoam
 from wellmodel import fracture as wfrac
+from wellmodel import mudacid as wacid
 from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
@@ -1532,6 +1533,112 @@ def frac_panel(o):
     with t5:
         st.dataframe(pd.DataFrame({"Result": list(pad), "Value": list(pad.values())}), hide_index=True,
                      width="stretch")
+
+
+ACID_DAMAGE = {"No damaged zone exists (the mud acid removes minerals in the matrix)": "none",
+               "Shallow damaged zone caused by mud filtrate invasion exists": "shallow"}
+ACID_FORM = {"Calculate optimum formulation based on ionic equilibrium": "optimum",
+             "Use standard mud acid formulation (3 % HF and 12 % HCl)": "standard"}
+
+
+def _pi_at_test(curve, q_test):
+    """PROSPER's PI before: the test rate over its drawdown on the IPR curve."""
+    if curve is None or getattr(curve, "fluid", "") != "oil" or q_test <= 0:
+        return None
+    lo, hi = 0.0, float(curve.pr)
+    if float(curve.rate(lo)) < q_test:
+        return None
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if float(curve.rate(mid)) > q_test else (lo, mid)
+    return q_test / (float(curve.pr) - 0.5 * (lo + hi))
+
+
+def mudacid_panel(o):
+    """PROSPER Stimulation | Mud Acidization of Sandstones (Tutorial 50)."""
+    st.subheader("Mud acidization of sandstones (stimulation screening)")
+    st.caption("PROSPER's Stimulation | Mud Acidization of Sandstones (Tutorial 50): the rock's composition sets the "
+               "HF / HCl formulation, the porosity and permeability gained, the pumping schedule and limits, and the "
+               "PI after treatment. A screening tool, as PROSPER says. See mudacid.py for what was reconstructed and "
+               "how closely (fitted to the T50 file's runs).")
+    well = _frac_well(o)
+    if well is None:
+        st.info("Complete the Equipment Data tab (deviation survey and downhole equipment) first.")
+        return
+    tvd, md_b, _ = well
+    pr = float(val("ipr_pr", 3000.0))
+    d = wacid.MudAcidInputs()
+    tabs_ = st.tabs(["Options", "Reservoir", "Well", "Latest well test", "Rock", "Formation composition"])
+    with tabs_[0]:
+        c = st.columns(3)
+        dmg = sel(c[0], "Damage type", list(ACID_DAMAGE), "acid_damage")
+        frm = sel(c[1], "Calculation type", list(ACID_FORM), "acid_form")
+        vol = num(c[2], "Volume of acid available (gal)", "acid_vol", d.volume_gal, 100.0, 1e7, 1000.0)
+    with tabs_[1]:
+        c = st.columns(3)
+        obg = num(c[0], "Overburden gradient (psi/ft)", "acid_obg", d.overburden_grad, 0.5, 2.0, 0.01, "%.5f")
+        area = num(c[1], "Drainage area (acres)", "acid_area", d.area_acres, 1.0, 1e5, 10.0)
+        c[2].metric("Reservoir pressure", f"{pr:,.1f} psia")
+    with tabs_[2]:
+        c = st.columns(4)
+        bh = num(c[0], "Borehole diameter (in)", "acid_bh", d.borehole_d, 1.0, 40.0, 0.1, "%.4g")
+        pint = num(c[1], "Perforated interval (ft)", "acid_pint", d.perf_interval, 1.0, 5000.0, 5.0)
+        spf = num(c[2], "Shot density (1/ft)", "acid_spf", d.spf, 0.1, 50.0, 1.0)
+        pd_ = num(c[3], "Perforation tunnel diameter (in)", "acid_pd", d.perf_d, 0.05, 3.0, 0.01)
+        st.caption(f"From the model: bottom node {md_b:,.0f} ft MD / {tvd:,.1f} ft TVD. Shot density and tunnel "
+                   "diameter do not change PROSPER's results.")
+    with tabs_[3]:
+        c = st.columns(3)
+        qt = num(c[0], "Liquid production rate (STB/d)", "acid_qt", d.q_test, 0.0, 1e7, 100.0)
+        wct = num(c[1], "Test water cut (%)", "acid_wct", d.wc_test, 0.0, 100.0, 1.0)
+        kt = num(c[2], "Permeability from test (md)", "acid_k", d.k, 1e-4, 1e5, 1.0)
+    with tabs_[4]:
+        c = st.columns(4)
+        phi = num(c[0], "Porosity (fraction)", "acid_phi", d.porosity, 0.01, 0.6, 0.01)
+        rb = num(c[1], "Rock bulk density (lb/ft3)", "acid_rb", d.bulk_density, 50.0, 300.0, 1.0,
+                 help="Shown in the results; PROSPER calculates the density from the composition.")
+        ten = num(c[2], "Rock tensile strength (psi)", "acid_ten", d.tensile, 0.0, 1e4, 50.0)
+        nu = num(c[3], "Poisson's ratio", "acid_nu", d.poisson, 0.01, 0.49, 0.01)
+    with tabs_[5]:
+        comp = {}
+        cols = st.columns(4)
+        for i, (m, lab) in enumerate(wacid.MINERAL_LABELS.items()):
+            comp[m] = num(cols[i % 4], f"{lab} (weight %)", "acid_m_" + m, d.composition[m], 0.0, 100.0, 1.0)
+        tot = sum(comp.values())
+        (st.caption if abs(tot - 100) < 1e-6 else st.warning)(f"Total {tot:g} weight %.")
+    pi0 = _pi_at_test(ss.get("ipr_curve"), qt)
+    c = st.columns(4)
+    pi_b = num(c[0], "Productivity index before (STB/d/psi)", "acid_pi0", round(pi0, 5) if pi0 else 5.0, 1e-4, 1e5,
+               0.1, "%.5g", help="Defaults to the test rate over its drawdown on the IPR tab's curve (PROSPER's).")
+    go = c[1].button("Calculate mud acidization", type="primary")
+    if go:
+        if tot <= 0:
+            st.error("Enter the formation composition.")
+            return
+        fi = wacid.MudAcidInputs(ACID_DAMAGE[dmg], ACID_FORM[frm], vol, obg, area, bh, pint, spf, pd_, qt, wct, kt,
+                                 phi, rb, ten, nu, comp, tvd, pr, pi_b,
+                                 wacid.water_density(float(val("pvt_sal", 0.0))))
+        ss["acid_res"] = wacid.MudAcid(fi).results()
+    res = ss.get("acid_res")
+    if not res:
+        return
+    for w_ in res["warnings"]:
+        st.warning(w_)
+    t1, t2, t3, t4 = st.tabs(["Calculated rock properties", "Treatment results", "Pumping schedule", "Damage removal"])
+    for tab_, key in zip((t1, t2, t3, t4), ("rock", "treatment", "pumping", "damage")):
+        with tab_:
+            dd = res[key]
+            st.dataframe(pd.DataFrame({"Result": list(dd), "Value": [None if (isinstance(v, float) and np.isnan(v))
+                                                                      else v for v in dd.values()]}),
+                         hide_index=True, width="stretch")
+    pia = res["damage"]["Productivity index after treatment (STB/d/psi)"]
+    if np.isfinite(pia):
+        def _use_pi(v=pia):
+            put("ipr_model_oil", "P.I. Entry")
+            put("ipr_j", round(float(v), 5))
+        st.button(f"Use PI {pia:.5f} in the IPR (P.I. Entry)", on_click=_use_pi, key="acid_use_pi",
+                  help="Sets the IPR to P.I. Entry with this PI; compare the system before and after (Calculation "
+                       "tab, a sensitivity on the PI).")
 
 
 def cbm_inputs():
@@ -3622,6 +3729,9 @@ with tabs[2]:
         with st.expander("Stimulation - hydraulic fracturing (PROSPER Tutorial 49)",
                          expanded=bool(ss.get("frac_res"))):
             frac_panel(o)
+        with st.expander("Stimulation - mud acidization of sandstones (PROSPER Tutorial 50)",
+                         expanded=bool(ss.get("acid_res"))):
+            mudacid_panel(o)
 
 
 

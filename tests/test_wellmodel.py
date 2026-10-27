@@ -5733,3 +5733,50 @@ def test_hydraulic_fracturing_t49():
             assert e.max() < tol, (fn, col, e.max())
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T49_Stimulation_Hydraulic_Fracturing.wellmodel.json"))
     assert proj["inputs"]["ipr_j"] == 5.0 and proj["widgets"]["sys_vals_j"] == "5, 11.2449"
+
+
+def test_mud_acidization_t50():
+    """PROSPER Tutorial 50 (the user's file): Stimulation | Mud Acidization of Sandstones on the Logie well - 38
+    one-at-a-time runs (volume, permeability, porosity, tensile, Poisson, bulk density, damage type, formulation, every
+    mineral). Rock and formulation exact; porosity increase within 0.4 %, permeability after 0.2 %, injection rate,
+    pump power and treated radius 0.15 %, THP 0.5 psi, PI after 0.05 %."""
+    from wellmodel import mudacid as MA
+    import json
+    runs = json.load(open(Path(__file__).parent / "data" / "t50_mudacid_runs.json"))
+    chk = {"Calculated matrix density": ("rock", "Calculated matrix density (lb/ft3)", 1e-5),
+           "Calculated bulk density(Sw=100%)": ("rock", "Calculated bulk density, Sw = 100 % (lb/ft3)", 2e-5),
+           "Aluminium in bulkrock": ("rock", "Aluminium in bulk rock (g/L)", 1e-5),
+           "Calcium in bulkrock": ("rock", "Calcium in bulk rock (g/L)", 1e-5),
+           "Na,K,Mg etc. in bulkrock": ("rock", "Na, K, Mg etc. in bulk rock", 1e-9),
+           "Concentration of HF": ("treatment", "Concentration of HF (%)", 1e-9),
+           "Concentration of HCl": ("treatment", "Concentration of HCl (%)", 1e-5),
+           "Porosity increase": ("treatment", "Porosity increase (%)", 0.004),
+           "Permeability after treatment": ("treatment", "Permeability after treatment (md)", 0.002),
+           "Total dissolved minerals": ("treatment", "Total dissolved minerals (g/L)", 0.004),
+           "Ammmonium BiFluoride (ABF)": ("treatment", "Ammonium bifluoride ABF (lbm per 1000 gal)", 1e-6),
+           "1000gals Hcl Concentration": ("treatment", "HCl for 1000 gal of mud acid (%)", 1e-5),
+           "Maximum Injection Rate": ("pumping", "Maximum injection rate (bbl/min)", 0.0015),
+           "Fracture Gradient": ("pumping", "Fracture gradient (psi/ft)", 1e-5),
+           "Pump Requirement": ("pumping", "Pump requirement (hp)", 0.0015),
+           "- 3 HCl PreFlush": ("pumping", "3 HCl preflush (gal)", 1e-9),
+           "- 6 Gasoil": ("pumping", "6 Gasoil (gal)", 1e-9),
+           "Radius treated zone": ("damage", "Radius treated zone (in)", 0.0015),
+           "Permeability damaged zone": ("damage", "Permeability damaged zone (md)", 1e-5),
+           "Productivity index after treatment": ("damage", "Productivity index after treatment (STB/d/psi)", 5e-4),
+           "Skin factor after treatment": ("damage", "Skin factor after treatment", 0.004)}
+    for r in runs:
+        res = MA.MudAcid(MA.MudAcidInputs(**r["inputs"])).results()
+        ref = r["prosper"]
+        assert abs(res["pumping"]["Maximum tubing head pressure (psig)"] - ref["Maximum Tubing Head Pressure"]) < 0.5, r["run"]
+        for pk, (grp, key, tol) in chk.items():
+            v = res[grp][key]
+            if ref.get(pk) is None:                       # PROSPER returns nothing (no calcium in the rock)
+                assert np.isnan(v), (r["run"], pk, v)
+                continue
+            assert (abs(v) < 1e-9 if ref[pk] == 0 else abs(v / ref[pk] - 1) < tol), (r["run"], pk, v, ref[pk])
+    # PI before from the IPR (PI 5, Vogel below Pb 3439 psig): PROSPER's 4.95562
+    from wellmodel import ipr
+    pwf = ipr.pwf(10627.8, 5214.696, 5.0, 3439.195 + 14.696)
+    assert abs(10627.8 / (5214.696 - pwf) / 4.95562 - 1) < 2e-4
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T50_Stimulation_Mud_Acidization_Sandstone.wellmodel.json"))
+    assert proj["inputs"]["sys_whp"] == 514.696 and proj["widgets"]["sys_vals_j"] == "5, 5.38858"
