@@ -2316,5 +2316,65 @@
 "Productivity index after treatment": 5.42732,
 "Skin factor after treatment": -0.77384
 }
+},
+{
+"run": "clays5",
+"inputs": {
+"damage": "none",
+"formulation": "optimum",
+"volume_gal": 10000.0,
+"k": 50.0,
+"porosity": 0.2,
+"bulk_density": 166.0,
+"tensile": 500.0,
+"poisson": 0.2,
+"composition": {
+"quartz": 74.0,
+"kaolinite": 0.0,
+"illite": 0.0,
+"montmorillonite": 0.0,
+"muscovite": 2.0,
+"mixed_clays": 5.0,
+"albite": 0.0,
+"microcline": 0.0,
+"mixed_feldspars": 1.0,
+"calcite": 18.0,
+"dolomite": 0.0
+}
+},
+"prosper": {
+"Calculated matrix density": 166.021,
+"Calculated bulk density(Sw=100%)": 145.5,
+"Aluminium in bulkrock": 31.2533,
+"Na,K,Mg etc. in bulkrock": 6.15,
+"Calcium in bulkrock": 153.181,
+"Concentration of HF": 5,
+"Concentration of HCl": 35.7794,
+"Porosity increase": 24.6109,
+"Porosity before treatment": 0.2,
+"Porosity after treatment": 0.24922,
+"Permeability increase": 71.3427,
+"Permeability before treatment": 50,
+"Permeability after treatment": 85.6713,
+"Total dissolved minerals": 654.502,
+"Ammmonium BiFluoride (ABF)": 594.5,
+"1000gals Hcl Concentration": 40.3419,
+"Number Of Stages": 1,
+"Maximum Injection Rate": 6.31886,
+"Maximum Tubing Head Pressure": 4901.87,
+"Fracture Gradient": 0.8711,
+"Pump Requirement": 789.83,
+"Recommended flushes per stage 1 Gasoil": 2000,
+"- 2 Alcohol(IPA)": 2000,
+"- 3 HCl PreFlush": 2000,
+"- 4 MudAcid": 10000,
+"- 5 Alcohol(IPA)": 800,
+"- 6 Gasoil": 800,
+"Radius treated zone": 23.2554,
+"Permeability damaged zone": 49.9944,
+"Productivity index before treatment": 4.95562,
+"Productivity index after treatment": 5.38369,
+"Skin factor after treatment": -0.70787
+}
 }
 ]

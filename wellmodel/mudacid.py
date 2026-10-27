@@ -1,7 +1,7 @@
 """Mud acid stimulation of sandstones - PROSPER's Stimulation | Mud Acidization of Sandstones (Tutorial 50).
 
 Reconstructed from the user's T50 file (the Logie well of Tutorial 01: 9000 ft TVD, Pr 5200 psig, 100 ft perforated,
-k 50 md, porosity 0.2) and 38 one-at-a-time runs (acid volume, permeability, porosity, tensile strength, Poisson's
+k 50 md, porosity 0.2) and 39 one-at-a-time runs (acid volume, permeability, porosity, tensile strength, Poisson's
 ratio, bulk density, damage type, formulation, and every mineral). What was found, and how well it reproduces PROSPER:
 
 Rock (exact): matrix density = weight-fraction average of the mineral densities (MINERALS); bulk density at
@@ -10,8 +10,7 @@ Sw = 100 % = (1 - phi) rho_matrix + phi rho_water (the formation water's density
 The Na, K, Mg line is a constant 6.15 in PROSPER whatever the minerals. The entered rock bulk density is not used.
 
 Formulation (exact): optimum HCl = max(7, 7.3 Ca/Al) %; optimum HF 5 % with 5 % clays or more, 2.5 % with
-less, 0.5 % with none (clays = kaolinite + illite + montmorillonite + mixed clays; PROSPER switches between 4 and
-6 %, taken here at 5 %). The standard formulation is 3 % HF / 12 % HCl. ABF 118.9 lbm per % HF (per 1000 gal);
+less, 0.5 % with none (clays = kaolinite + illite + montmorillonite + mixed clays; PROSPER: 2.5 % at 4 %, 5 % at 5 %). The standard formulation is 3 % HF / 12 % HCl. ABF 118.9 lbm per % HF (per 1000 gal);
 the HCl for 1000 gal of mud acid = HCl + 0.9125 HF (what the ABF consumes).
 
 Dissolution (fitted, within 0.35 % on the 33 runs that return it): porosity increase (%) =
@@ -66,7 +65,7 @@ SIL = {"quartz": 0.043659, "kaolinite": 0.0314, "illite": 0.056526, "montmorillo
        "mixed_clays": 0.04598}
 CLAY_STEP = 0.614805
 H_HF = {5.0: 1.0, 3.0: 0.645066, 2.5: 0.466457, 0.5: -0.028725}
-HF_CLAY_SWITCH = 5.0                   # wt% clays for 5 % HF (PROSPER: between 4 and 6)
+HF_CLAY_SWITCH = 5.0                   # wt% clays for 5 % HF (PROSPER: 4 % -> 2.5 % HF, 5 % -> 5 %)
 KD_RATIO = {"none": 0.999888, "shallow": 0.998754}
 Q_CAP = 8.0                            # bbl/min
 INJ = (21.19946, 0.0388652, 0.000462890)   # uncapped rate at k 50 md, h 100 ft, T49 well; viscosity (1 + a w + b w^2)

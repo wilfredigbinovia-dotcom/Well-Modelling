@@ -5736,7 +5736,7 @@ def test_hydraulic_fracturing_t49():
 
 
 def test_mud_acidization_t50():
-    """PROSPER Tutorial 50 (the user's file): Stimulation | Mud Acidization of Sandstones on the Logie well - 38
+    """PROSPER Tutorial 50 (the user's file): Stimulation | Mud Acidization of Sandstones on the Logie well - 39
     one-at-a-time runs (volume, permeability, porosity, tensile, Poisson, bulk density, damage type, formulation, every
     mineral). Rock and formulation exact; porosity increase within 0.4 %, permeability after 0.2 %, injection rate,
     pump power and treated radius 0.15 %, THP 0.5 psi, PI after 0.05 %."""
