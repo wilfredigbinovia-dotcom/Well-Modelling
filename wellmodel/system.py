@@ -549,7 +549,8 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         rho_ns = lam * float(s["rho_l"][0]) + (1 - lam) * float(s["rho_g"][0])
         mu_ns = lam * float(s["mu_l"][0]) + (1 - lam) * float(s["mu_g"][0])
         cv = CX.node_values(kind, vm, vsg, rho_ns, mu_ns, float(s["rho_l"][0]), float(s["rho_g"][0]),
-                            float(s["sig"][0]), path.d_h[i] * 12, _free_gas(fluid, kind, s, case, pm, tm), comp_)
+                            float(s["sig"][0]), path.d_h[i] * 12, _free_gas(fluid, kind, s, case, pm, tm), comp_,
+                            float(s["mu_l"][0]), float(s["mu_g"][0]), float(path.sin_t[i]))
         cv.update(CX.path_values(path, i, fluid, kind, case, s, pm, tm, comp_))
         if comp_.hydrate is not None:                    # PVT warnings: hydrate curve at the node below
             cv["Hydrate Formation"] = CX.hydrate_flag(P[i + 1], T[i + 1], comp_.hydrate)

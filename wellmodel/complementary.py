@@ -120,27 +120,42 @@ def turner_velocity(sig_dyncm, rho_l, rho_g, c=2.04):
 
 
 # ------------------------------------------------------------------ PE5-style stability
-# PROSPER's PE5 stability flag (Tutorial 43): "unstable" where the PE5 momentum balance has the liquid flowing back
-# down. Not published; reproduced as a liquid-film reversal (flooding) criterion: unstable where the Kutateladze
-# number of the gas Ku = vsg rho_g^0.5 / (g sigma (rho_l - rho_g))^0.25 is below 1.637 D*^0.32, D* = D (g (rho_l -
-# rho_g) / sigma)^0.5 the Bond diameter. Calibrated on the user's T43 file (black-oil condensate, WGR 50): every VLP
-# flag at 1000 and 100 psig (unstable to 10.5-10.7 MMscf/d, stable from 12-15.3, set at the 6.4 in casing at the
-# bottom) and the gradient's node flags at 4 MMscf/d (casing unstable; the tubing, stable in PROSPER, sits at the
-# threshold here - ratio 0.999). Liquid-continuous flow (no-slip
-# liquid fraction above 0.5) is reported stable.
-PE5_STAB = (1.637, 0.32)
-SIG_POUNDAL = 6.852e-5 * 32.174     # dyne/cm -> poundal/ft
+# PROSPER's PE5 stability flag (Tutorial 43; manual: from the PE5 momentum balance, unstable where the liquid is
+# calculated to flow back down the pipe). Reproduced with the mechanistic film momentum balance of Barnea (1986): the
+# gas core and the liquid film share the pressure gradient; with the film carrying all the liquid upward,
+#     Y = (1 + K H) / ((1 - H)^2.5 H) - X^2 / H^3
+# (X^2 = (dp/dz)_SL / (dp/dz)_SG Lockhart-Martinelli, Y = (rho_l - rho_g) g sin(theta) / (dp/dz)_SG, H the film
+# holdup, K the interfacial-friction coefficient: Wallis's f_i = 0.005 (1 + 4 K delta/D)). If Y exceeds the largest
+# value of the right-hand side over H, no upward film can hold against gravity: the liquid falls back - unstable.
+# The ratio max(RHS) / Y (> 1 stable) is reported. K = 55 (Wallis: 75) from the user's T43 VLP runs: every flag at
+# 1000 psig (unstable to 10.5 MMscf/d, stable from 12) and at 100 psig except 10.66 MMscf/d (ratio 1.13, PROSPER
+# unstable); with PROSPER's own node properties every PE5 node flag of the T41, T43 and T47 gradient exports is
+# reproduced (casing nodes 0.03-0.16 unstable, tubing nodes 1.2-1.9 stable, T41 Run 2A casing 1.04 stable). Liquid-continuous flow (no-slip liquid fraction above 0.5) and
+# horizontal / downward flow are reported stable.
+PE5_FILM_K = 55.0
+_FILM_H = np.geomspace(1e-5, 0.6, 2000)
+_CP_LBFTS = 6.7197e-4
 
 
-def pe5_stability_ratio(vsl, vsg, rho_l, rho_g, sig_dyncm, d_ft):
-    """Ku / Ku_critical (> 1 stable). nan where not applicable (no gas, liquid-continuous, single phase)."""
+def _dpdz_superficial(rho, v, mu, d_ft):
+    re = rho * v * d_ft / (mu * _CP_LBFTS)
+    f = 16.0 / re if re < 2100 else 0.046 * re ** -0.2          # Fanning
+    return 2 * f * rho * v * v / (G_FT * d_ft)                  # lbf/ft3
+
+
+def pe5_stability_ratio(vsl, vsg, rho_l, rho_g, mu_l, mu_g, d_ft, sin_t=1.0):
+    """max over the film holdup of Barnea's film momentum balance / gravity term (> 1: an upward liquid film exists,
+    stable; < 1: film reversal, unstable). nan where not applicable."""
     vm = vsl + vsg
-    if not (vm > 0 and vsg > 0 and vsl > 0 and rho_l > rho_g > 0 and sig_dyncm > 0) or vsl / vm > 0.5:
+    if not (vm > 0 and vsg > 0 and vsl > 0 and rho_l > rho_g > 0 and mu_l > 0 and mu_g > 0) or vsl / vm > 0.5:
         return np.nan
-    sp = sig_dyncm * SIG_POUNDAL
-    ku = vsg * np.sqrt(rho_g) / (G_FT * sp * (rho_l - rho_g)) ** 0.25
-    ds = d_ft * np.sqrt(G_FT * (rho_l - rho_g) / sp)
-    return float(ku / (PE5_STAB[0] * ds ** PE5_STAB[1]))
+    if sin_t <= 1e-6:
+        return np.inf
+    dl, dg = _dpdz_superficial(rho_l, vsl, mu_l, d_ft), _dpdz_superficial(rho_g, vsg, mu_g, d_ft)
+    x2, y = dl / dg, (rho_l - rho_g) * sin_t / dg
+    h = _FILM_H
+    rhs = (1 + PE5_FILM_K * h) / ((1 - h) ** 2.5 * h) - x2 / h ** 3
+    return float(rhs.max() / y)
 
 
 def hydrate_flag(p_psia, t_f, curve):
@@ -154,7 +169,8 @@ def hydrate_flag(p_psia, t_f, curve):
 
 
 # ------------------------------------------------------------------ per node
-def node_values(kind, vm, vsg, rho_ns, mu_ns, rho_l, rho_g, sig, d_in, free_gas_mmscfd, opts: CompOptions):
+def node_values(kind, vm, vsg, rho_ns, mu_ns, rho_l, rho_g, sig, d_in, free_gas_mmscfd, opts: CompOptions,
+                mu_l=None, mu_g=None, sin_t=1.0):
     """Complementary results at one node. kind 'oil' or 'gas' selects the grain-size equation."""
     dmax = (grain_diameter_gas(vm, rho_ns, opts.sand_density) if kind == "gas"
             else grain_diameter_oil(vm, mu_ns, rho_ns, opts.sand_density))
@@ -165,7 +181,8 @@ def node_values(kind, vm, vsg, rho_ns, mu_ns, rho_l, rho_g, sig, d_in, free_gas_
     # Turner is a gas-well criterion (droplets carried by the gas core); not reported for oil wells
     vt = turner_velocity(sig, rho_l, rho_g, opts.turner) if kind == "gas" and has_gas and vsg < vm else np.nan
     q_crit = free_gas_mmscfd * vt / vsg if (np.isfinite(vt) and vsg > 0 and np.isfinite(free_gas_mmscfd)) else np.nan
-    stab = pe5_stability_ratio(vm - vsg, vsg, rho_l, rho_g, sig, d_in / 12.0)
+    stab = (pe5_stability_ratio(vm - vsg, vsg, rho_l, rho_g, mu_l, mu_g, d_in / 12.0, sin_t)
+            if mu_l is not None and mu_g is not None else np.nan)
     return {"Turner Velocity Flag": bool(np.isfinite(vt) and vm < vt),
             "Erosional Velocity Flag": bool(ve > 0 and vm > ve),
             "PE5 Stability Ratio": stab,

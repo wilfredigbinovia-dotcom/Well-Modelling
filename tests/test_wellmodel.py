@@ -5458,15 +5458,15 @@ def _t43_run(q, whp, comp=None):
 def test_flow_assurance_flags_t43():
     """PROSPER Tutorial 43, the user's file: VLP flags at 1000 and 100 psig (50 rates). Turner (no-slip velocity below
     the Turner velocity, PROSPER's oil-weighted gas-liquid interfacial tension), erosional velocity (API 14E, C 400)
-    and the PE5 stability flag (film-reversal criterion Ku < 1.637 D*^0.32, calibrated on these runs) agree with
-    PROSPER at every rate except the erosional flag at 45.6 and 65.7 MMscf/d at 100 psig (PROSPER's wellhead is
-    30-50 F colder there); the hydrate flag is "No hydrates" throughout with the Water 2 curve. VLP pressures within
+    and the PE5 stability flag (Barnea's film momentum balance: no upward liquid film -> unstable, interfacial
+    friction K = 55) agree with PROSPER at every rate except the erosional flag at 45.6 and 65.7 MMscf/d at 100 psig
+    (PROSPER's wellhead is 30-50 F colder there) and the PE5 flag at 10.66 MMscf/d at 100 psig (film ratio 1.13); the hydrate flag is "No hydrates" throughout with the Water 2 curve. VLP pressures within
     5 % from 2.5 to 46 MMscf/d at 1000 psig (PE5's low-velocity drift, Tutorials 41/43); the maximum Turner velocity
     within 4 %."""
     from wellmodel import complementary as CX
     data = pd.read_csv(Path(__file__).parent / "data" / "t43_vlp_flags.csv")
     sub = data[((data.run == "2") & data.q.isin([1.5, 4.5, 10.5, 12.0])) | ((data.run == "3A") & data.q.isin(
-        [2.491, 3.584, 5.154, 15.34, 45.65, 94.449])) | ((data.run == "4") & data.q.isin([2.491, 3.584, 10.664, 15.34]))]
+        [2.491, 3.584, 5.154, 15.34, 45.65, 94.449])) | ((data.run == "4") & data.q.isin([2.491, 3.584, 7.414, 15.34]))]
     for _, r in sub.iterrows():
         det, _, prof = _t43_run(r.q, r.whp)
         assert det["Turner velocity flag"] == r.turner, (r.run, r.q)
@@ -5475,11 +5475,20 @@ def test_flow_assurance_flags_t43():
         if r.whp == 1000 and 2.4 < r.q < 46:
             assert abs((det["Bottom node pressure (psia)"] - 14.696) / r.vlp - 1) < 0.05, (r.run, r.q)
             assert abs(det["Max. Turner velocity (ft/s)"] / r.turner_max - 1) < 0.04, (r.run, r.q)
-    # node flags at 4 MMscf/d: PROSPER's tubing nodes stable, the 6.4 in casing at the bottom unstable - the tubing is
-    # at the threshold here (ratio within 1 % of 1), the casing far below it
+    # node flags at 4 MMscf/d: PROSPER's tubing nodes stable, the 6.4 in casing at the bottom unstable
     det, _, prof = _t43_run(4.0, 1000)
     tub = prof[(prof["MD (ft)"] > 0) & (prof["MD (ft)"] < 11800)]
-    assert tub["PE5 stability ratio"].min() > 0.99 and prof["PE5 stability ratio"].iloc[-1] < 0.5
+    assert (tub["PE5 stability"] == "Stable").all() and prof["PE5 stability"].iloc[-1] == "Unstable"
+    assert tub["PE5 stability ratio"].min() > 1.2 and prof["PE5 stability ratio"].iloc[-1] < 0.3
+    # PROSPER's own node properties of its gradient exports (T43 4 MMscf/d, T41 Run 2A, T47 unlifted at 350 psig):
+    # vsl, vsg, rho_l, rho_g, mu_l, mu_g, d_in | PE5 flag
+    for row, flag_ in (((0.180, 2.024, 49.272, 7.713, 0.368, 0.018, 6.4), "Unstable"),
+                       ((0.598, 8.444, 49.893, 4.153, 0.521, 0.013, 3.99), "Stable"),
+                       ((0.145, 2.841, 37.183, 15.426, 0.162, 0.028, 6.4), "Stable"),
+                       ((0.359, 1.299, 56.128, 5.384, 0.199, 0.017, 8.3), "Unstable"),
+                       ((1.545, 6.648, 56.349, 4.550, 0.207, 0.016, 3.99), "Stable")):
+        r_ = CX.pe5_stability_ratio(*row[:6], row[6] / 12)
+        assert (r_ < 1) == (flag_ == "Unstable"), (row, r_)
     # hydrate flag against a curve
     w2 = ((137.075, 1291.9, 4028.83, 21657.5), (35, 62, 71, 95))
     curve = (tuple(np.array(w2[0]) + 14.696), w2[1])

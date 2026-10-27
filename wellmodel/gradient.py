@@ -221,7 +221,8 @@ def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.na
             mu_ns = lam * ph["mu_l"] + (1 - lam) * (ph["mu_g"] if np.isfinite(ph["mu_g"]) else 0.0)
             fg = ph["free_gas"] if np.isfinite(ph["free_gas"]) else rates.get("Gas Rate (MMscf/day)", np.nan)
             rec.update(node_values(kind, s_["vsl"] + s_["vsg"], s_["vsg"], rho_mix_ns, mu_ns, s_["rho_l"],
-                                   s_["rho_g"], s_["sig"], path.d_h[i] * 12, fg, comp))
+                                   s_["rho_g"], s_["sig"], path.d_h[i] * 12, fg, comp, ph["mu_l"],
+                                   ph["mu_g"] if np.isfinite(ph["mu_g"]) else None, float(path.sin_t[i])))
             from .complementary import path_values
             st_ = fluid.state(np.array([s_["pm"]]), np.array([s_["tm"]]), case)
             rec.update(path_values(path, i, fluid, kind, case, st_, s_["pm"], s_["tm"], comp))
