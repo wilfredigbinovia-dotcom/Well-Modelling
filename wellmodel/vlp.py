@@ -192,10 +192,11 @@ class BlackOilFluid:
     """Oil well, matched black oil. Case keys: q (liquid STB/d), wc (fraction), gor (scf/STB, total)."""
     kind = "oil"
 
-    def __init__(self, model: bo.BlackOilModel, emulsion=None):
+    def __init__(self, model: bo.BlackOilModel, emulsion=None, rheology=None):
         self.m = model
         self.inp = model.inp
         self.emulsion = emulsion          # emulsion.EmulsionModel (tubing occurrence) or None
+        self.rheology = rheology          # rheology.Rheology (non-Newtonian oil viscosity) or None
 
     def pb_at(self, t, gor):
         """Bubble point (psia) of the wellstream at temperature t and total GOR."""
@@ -240,9 +241,12 @@ class BlackOilFluid:
             mu_l = em.viscosity(wc if EMULSION_WC == "stock tank" else 1 - fo, mu_o, mu_w)
         else:
             mu_l = fo * mu_o + (1 - fo) * mu_w
-        return dict(ql=ql, qg=q_g, rho_l=fo * rho_o + (1 - fo) * rho_w, rho_g=rho_g,
-                    mu_l=mu_l, mu_g=mu_g,
-                    sig=sigma_liquid(sigma_oil_prosper(inp.api, t, rs), sigma_water_oilwell(rho_w, rho_g), wc))
+        out = dict(ql=ql, qg=q_g, rho_l=fo * rho_o + (1 - fo) * rho_w, rho_g=rho_g,
+                   mu_l=mu_l, mu_g=mu_g,
+                   sig=sigma_liquid(sigma_oil_prosper(inp.api, t, rs), sigma_water_oilwell(rho_w, rho_g), wc))
+        if getattr(self, "rheology", None) is not None:     # non-Newtonian: apply_rheology needs the pipe velocity
+            out.update(_fo=fo, _mu_w=mu_w, _p=np.asarray(p, float), _t=np.asarray(t, float))
+        return out
 
     def mass_cp(self, case, hc: HeatCapacities):
         inp = self.inp
@@ -467,8 +471,21 @@ def temperature_profile(path: FlowPath, w_lbh, cp, u, t_bottom=None):
 
 
 # ================================================================ traverse
+def apply_rheology(fluid, s, area, d_ft):
+    """Non-Newtonian oil (fluid.rheology): the oil viscosity at the pipe's wall shear rate 8 vm / D replaces the
+    Newtonian one in s['mu_l'] (in place; returns s)."""
+    rh = getattr(fluid, "rheology", None)
+    if rh is None or "_fo" not in s:
+        return s
+    vm = (np.asarray(s["ql"], float) + np.asarray(s["qg"], float)) / area
+    mu_o = rh.apparent_viscosity(s["_p"], s["_t"], vm, d_ft)
+    s["mu_l"] = s["_fo"] * mu_o + (1 - s["_fo"]) * s["_mu_w"]
+    s["mu_o_app"] = mu_o
+    return s
+
+
 def _gradient(path, fluid, i, p, t, case, corr, p1, p2):
-    s = fluid.state(p, t, case)
+    s = apply_rheology(fluid, fluid.state(p, t, case), path.area[i], path.d_h[i])
     a = path.area[i]
     vsl, vsg = np.maximum(s["ql"] / a, 1e-12), np.maximum(s["qg"] / a, 0.0)
     args = (vsl, vsg, s["rho_l"], np.maximum(s["rho_g"], 1e-4), s["mu_l"], np.maximum(s["mu_g"], 1e-4),

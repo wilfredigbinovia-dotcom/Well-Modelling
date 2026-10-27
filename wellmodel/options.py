@@ -53,6 +53,11 @@ EMULSIONS = {
     "emulsion": "Emulsion + pump viscosity correction",
 }
 
+VISCOSITY_MODELS = {
+    "newtonian": "Newtonian fluid",
+    "non_newtonian": "Non-Newtonian fluid",
+}
+
 ARTIFICIAL_LIFT = {
     "none": "None",
     "gas_lift": "Gas lift (continuous)",
@@ -85,6 +90,7 @@ FIELDS = {  # field -> (display name, choices)
     "separator": ("Separator", SEPARATORS),
     "water_vapour": ("Water vapour", WATER_VAPOUR),
     "emulsions": ("Emulsions", EMULSIONS),
+    "viscosity_model": ("Viscosity model", VISCOSITY_MODELS),
     "flow_type": ("Flow type", FLOW_TYPES),
     "well_type": ("Well type", WELL_TYPES),
     "completion": ("Completion", COMPLETIONS),
@@ -106,6 +112,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
     "emulsions": {"none", "emulsion"},
+    "viscosity_model": {"newtonian", "non_newtonian"},
     "temp_model": {"rough", "improved", "enthalpy"},
     "steam": {"none", "allow"},
 }
@@ -131,6 +138,7 @@ class WellOptions:
     separator: str = "single_stage"
     water_vapour: str = "none"
     emulsions: str = "none"
+    viscosity_model: str = "newtonian"
     flow_type: str = "tubing"
     well_type: str = "producer"
     completion: str = "cased_hole"
@@ -311,6 +319,19 @@ class WellOptions:
                 add("info", ["emulsions"],
                     "Emulsion viscosity (PROSPER Tutorial 46): match it to measured emulsion viscosities in the PVT "
                     "Input Data tab; it replaces the oil-water liquid viscosity where the emulsion occurs.")
+        if self.viscosity_model == "non_newtonian":
+            if self.fluid_type != "oil" or self.method != "black_oil":
+                add("warning", ["viscosity_model", "fluid_type", "method"],
+                    "The non-Newtonian (Herschel-Bulkley) oil viscosity applies to oil with black-oil PVT; it is "
+                    "ignored for this fluid.")
+            else:
+                add("info", ["viscosity_model"],
+                    "Non-Newtonian oil (PROSPER Tutorial 44): enter the rheological parameters (yield stress, "
+                    "consistency index K, shear thinning index n against temperature and pressure) in the PVT Input "
+                    "Data tab; the oil viscosity in the tubing is the apparent viscosity at the wall shear rate.")
+            if self.emulsions == "emulsion":
+                add("warning", ["viscosity_model", "emulsions"],
+                    "Choose either emulsion or non-Newtonian viscosity: the non-Newtonian oil viscosity is used.")
         if self.uses_annulus and self.well_type == "producer" and self.fluid_type == "oil":
             add("info", ["flow_type"],
                 "Oil flowing up the annulus has a large flow area: expect higher liquid "
@@ -368,6 +389,9 @@ class WellOptions:
                 if self.emulsions == "emulsion" and self.method == "black_oil":
                     pvt.append("Emulsion viscosity against water cut (one pressure and temperature), the water "
                                "cuts bounding the maximum viscosity, and where the emulsion occurs")
+                if self.viscosity_model == "non_newtonian" and self.method == "black_oil":
+                    pvt.append("Rheological parameters (yield stress, consistency index K, shear thinning index n) "
+                               "against temperature and pressure, and the maximum viscosity")
             elif self.fluid_type == "dry_wet_gas":
                 pvt += ["Separator gas gravity and impurities (H2S, CO2, N2)",
                         "Condensate-gas ratio and condensate gravity (wet gas)",

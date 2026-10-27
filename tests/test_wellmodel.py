@@ -5515,3 +5515,44 @@ def test_hydrate_curve_salts_t43():
     assert m2.ln_aw < m1.ln_aw < 0
     assert H.HydrateModel(f).pressure(50) < m1.pressure(50) < m2.pressure(50)
     assert abs(H.ln_water_activity({"NaCl": 5.52}) - np.log(0.9669)) < 0.002     # 1 molal NaCl, a_w 0.9669
+
+
+def test_non_newtonian_oil_t44():
+    """PROSPER Tutorial 44 (the user's file): 12 API heavy oil, 7500 STB/d, WC 0, GOR 10, PE2; 3.2 in tubing to 1800 ft,
+    6.4 in casing to 2000 ft, 80-120 F, U 8. Vazquez-Beggs / Egbogah matched at 120 F (Pb 170 psig, Bo 1.025, 700 cp).
+    Herschel-Bulkley rheology (K 1 / 0.5 Pa.s^n, n 0.9 / 0.95 at 60 / 120 F, no yield stress): apparent viscosity
+    400.56 cp in the tubing and 425.0 cp in the casing; the bottom pressure falls from PROSPER's Newtonian
+    1871.87 / 2121.89 / 2621.93 psig to 1498.25 / 1748.30 / 2248.49 psig at 250 / 500 / 1000 psig wellhead."""
+    import json
+    from wellmodel import rheology as R, system as wsys
+    G = 14.696
+    inp = wbo.PVTInputs(rsb=10, api=12, gas_sg=0.58, salinity_ppm=75000)
+    tab = pd.DataFrame({c: [np.nan] for c in wbo.TABLE_COLUMNS})
+    tab.loc[0, ["Pressure", "Gas Oil Ratio", "Oil FVF", "Oil Viscosity"]] = [170 + G, 10, 1.025, 700]
+    r = wbo.match_all(inp, wbo.MatchData(120.0, 170 + G, tab))
+    m = r.matches[("visc", "egbogah")]
+    assert abs(m.p1 - 0.99064) < 2e-4 and abs(m.p2 + 6.68016) < 2e-3          # PROSPER's match parameters
+    model = wbo.BlackOilModel(inp, "vazquez_beggs", "egbogah",
+                              {p: r.matches[(p, "vazquez_beggs")] for p in ("pb", "rs", "bo")} | {"visc": m})
+    rh = R.Rheology([(60, 100, 0, 1, 0.9), (60, 5000, 0, 1, 0.9), (120, 100, 0, 0.5, 0.95), (120, 5000, 0, 0.5, 0.95)])
+    assert abs(rh.apparent_viscosity(360.95 + G, 116.12, 8.929, 3.2 / 12) - 400.56) < 0.2
+    assert abs(rh.apparent_viscosity(1827.54 + G, 119.95, 2.233, 6.4 / 12) - 425.00) < 0.2
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1800, "Tubing Inside Diameter (in)": 3.2,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 2000, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 2000], [0, 2000], [0, 2000], [80, 120])
+    ref = {(None, 250): 1871.87, (None, 1000): 2621.93, (rh, 250): 1498.25, (rh, 1000): 2248.49}
+    for (rr, whp), pb in ref.items():
+        det, _, prof = wsys.solution_details(path, wvlp.BlackOilFluid(model, rheology=rr), "oil",
+                                             {"whp": whp + G, "u": 8.0, "wc": 0.0, "gor": 10.0}, 7500.0, "pe2_style")
+        dp = det["Bottom node pressure (psia)"] - G - whp
+        print("T44", rr is not None, whp, det["Bottom node pressure (psia)"] - G, pb)
+        assert abs(dp / (pb - whp) - 1) < 0.01
+        assert abs(det["dP friction - production string (psi)"] / (412.8 if rr else 786.0) - 1) < 0.01
+    proj = json.load(open(__file__.replace("tests/test_wellmodel.py",
+                                           "examples/T44_Modelling_NonNewtonian_Fluids.wellmodel.json")))
+    assert proj["widgets"]["opt_viscosity_model"] == "non_newtonian"
+    assert len(proj["tables"]["pvt_rheology"]["__df__"]["data"]) == 4

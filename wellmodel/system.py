@@ -530,7 +530,7 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
     comp_rows = []
     for i in range(len(path.md) - 1):
         pm, tm, L = 0.5 * (P[i] + P[i + 1]), 0.5 * (T[i] + T[i + 1]), path.seg_len[i]
-        s = fluid.state(np.array([pm]), np.array([tm]), case)
+        s = V.apply_rheology(fluid, fluid.state(np.array([pm]), np.array([tm]), case), path.area[i], path.d_h[i])
         a = path.area[i]
         vsl, vsg = max(float(s["ql"][0]) / a, 1e-12), max(float(s["qg"][0]) / a, 0.0)
         args = (np.array([vsl]), np.array([vsg]), s["rho_l"], np.maximum(s["rho_g"], 1e-4), s["mu_l"],

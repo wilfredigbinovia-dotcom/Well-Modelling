@@ -49,6 +49,7 @@ from wellmodel import hsp_quicklook as whql
 from wellmodel import srp_cards as wsrpc
 from wellmodel import diluent as wdil
 from wellmodel import emulsion as wem
+from wellmodel import rheology as wrh
 from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
@@ -452,6 +453,9 @@ CAPTIONS = {
     "separator": {"single_stage": "Surface rates at one separator stage"},
     "emulsions": {"none": "Liquid viscosity: oil and water by volume",
                   "emulsion": "Oil-water emulsion viscosity against water cut (PROSPER Tutorial 46): data in PVT"},
+    "viscosity_model": {"newtonian": "Oil viscosity from the PVT correlation (matched)",
+                        "non_newtonian": "Herschel-Bulkley oil: apparent viscosity at the wall shear rate (PROSPER "
+                                         "Tutorial 44): rheological parameters in PVT"},
     "water_vapour": {"none": "Water produced as liquid only",
                      "calculate": "Dry and wet gas: water vaporised in the gas condenses up the well"},
     "temp_model": {"rough": "Temperature from the geothermal gradient and one U value (heat loss only)",
@@ -493,7 +497,8 @@ with tabs[0]:
     st.caption("Describe the well first. These choices decide what the setup tabs ask for "
                "and which calculations apply.")
     sel_opts = {}
-    groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour", "emulsions"]),
+    groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour", "emulsions",
+                                     "viscosity_model"]),
               ("Well", ["well_type", "flow_type", "artificial_lift", "temp_model", "steam"]),
               ("Completion", ["completion", "sand_control"])]
     cols = st.columns(3, gap="large")
@@ -1665,6 +1670,63 @@ def emulsion_panel(model):
                 "oil-water viscosity.")
 
 
+# ---------------------------------------------------------------- non-Newtonian oil (PROSPER Tutorial 44)
+RHEO_DEFAULT = pd.DataFrame({wrh.COLUMNS[0]: [60.0, 60.0, 120.0, 120.0],
+                             wrh.COLUMNS[1]: [100.0, 5000.0, 100.0, 5000.0],
+                             wrh.COLUMNS[2]: [0.0, 0.0, 0.0, 0.0],
+                             wrh.COLUMNS[3]: [1.0, 1.0, 0.5, 0.5],
+                             wrh.COLUMNS[4]: [0.9, 0.9, 0.95, 0.95]})
+
+
+def rheology_current():
+    """The Herschel-Bulkley model of the PVT tab, or None when the table is empty."""
+    df = ss.get("_tables", {}).get("pvt_rheology", ss.get("pvt_rheology"))
+    if df is None:
+        return None
+    try:
+        return wrh.Rheology.from_table(pd.DataFrame(df), float(val("rheo_mu_max", 10000.0)))
+    except ValueError:
+        return None
+
+
+def rheology_panel(model):
+    """Rheological parameters (PVT Input Data, Non-Newtonian). Stores the table in ss["pvt_rheology"]."""
+    st.subheader("Non-Newtonian rheology")
+    st.caption("Herschel-Bulkley oil: shear stress τ = τo + K·γⁿ. The apparent viscosity at the wall shear rate of "
+               "laminar pipe flow (Metzner-Reed, γ = 8v/D) is μ = K·((3n+1)/4n)ⁿ·γⁿ⁻¹ + τo/γ, capped at the maximum "
+               "viscosity. K in Pa·sⁿ, τo in psi; the parameters are interpolated linearly in pressure, then in "
+               "temperature. The apparent viscosity replaces the oil viscosity in the tubing.")
+    c = st.columns(4)
+    num(c[0], "Maximum viscosity (cp)", "rheo_mu_max", 10000.0, 1.0, 1e7, 100.0)
+    key = "pvt_rheology"
+    if key not in ss:
+        ss[key] = RHEO_DEFAULT.copy()
+    tbl = track(key, st.data_editor(ss[key], key=key + "_ed", num_rows="dynamic", width="stretch"))
+    try:
+        rh = wrh.Rheology.from_table(pd.DataFrame(tbl), float(val("rheo_mu_max", 10000.0)))
+    except ValueError as e:
+        st.warning(str(e))
+        return
+    c2 = st.columns(4)
+    t_r = num(c2[0], "Temperature for the plot (°F)", "rheo_t", 120.0, None, None, 5.0)
+    p_r = num(c2[1], "Pressure for the plot (psig)", "rheo_p", 500.0, 0.0, None, 50.0)
+    d_r = num(c2[2], "Pipe inside diameter (in)", "rheo_d", 3.2, 0.1, 60.0, 0.1)
+    v = np.geomspace(0.05, 50, 120)
+    mu_n = float(model.table(t_r, [p_r + 14.696])["Oil viscosity (cp)"].iloc[0])
+    mu = [rh.apparent_viscosity(p_r + 14.696, t_r, x, d_r / 12.0) for x in v]
+    fig, ax = plt.subplots(figsize=(7, 3.4))
+    ax.plot(v, mu, color=wplt.SERIES[0], lw=2, label="non-Newtonian (apparent)")
+    ax.axhline(mu_n, color=wplt.SERIES[1], lw=1.5, ls="--", label="Newtonian (PVT correlation)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Mixture velocity (ft/s)")
+    ax.set_ylabel("Oil viscosity (cp)")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+
 HYD_COLUMNS = ["Pressure (psig)", "Temperature (°F)"]
 SALT_COLUMNS = ["Salt", "Weight %"]
 
@@ -1927,6 +1989,8 @@ with tabs[1]:
                                "calculated_pvt.csv")
             if opts_now is not None and getattr(opts_now, "emulsions", "none") == "emulsion":
                 emulsion_panel(model)
+            if opts_now is not None and getattr(opts_now, "viscosity_model", "newtonian") == "non_newtonian":
+                rheology_panel(model)
     if opts_now is not None and opts_now.well_type == "producer":
         hydrate_panel(opts_now)
 
@@ -2808,6 +2872,13 @@ def vlp_fluid(o, kind, p_max, t_min, t_max):
         if model is None:
             return None, "Complete the PVT Input Data tab (black oil)."
         fam = f"{bo.PB_FAMILIES[model.family]} / {bo.VISC_FAMILIES[model.visc_family]}"
+        if getattr(o, "viscosity_model", "newtonian") == "non_newtonian":
+            rh = rheology_current()
+            if rh is None:
+                return None, "Enter the rheological parameters in the PVT Input Data tab (non-Newtonian oil)."
+            return wvlp.BlackOilFluid(model, rheology=rh), (
+                f"Black oil ({fam}{', matched' if model.params else ', not matched'}), non-Newtonian "
+                f"(Herschel-Bulkley) oil viscosity in the tubing")
         em = ss.get("emulsion_model") if getattr(o, "emulsions", "none") == "emulsion" else None
         if em is not None and em.in_tubing:
             return wvlp.BlackOilFluid(model, em), (f"Black oil ({fam}{', matched' if model.params else ', not matched'}"

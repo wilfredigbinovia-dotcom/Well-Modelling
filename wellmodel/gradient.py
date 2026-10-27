@@ -58,10 +58,13 @@ def flow_regime(correlation, vsl, vsg, rho_l, rho_g, sig, d_ft, sin_t):
 
 
 # ------------------------------------------------------------------ phase detail
-def _phases(fluid, p, t, case):
-    """Per-phase properties at (p, t) for one case (arrays of length 1). NaN where the fluid model has none."""
+def _phases(fluid, p, t, case, area=None, d_ft=None):
+    """Per-phase properties at (p, t) for one case (arrays of length 1). NaN where the fluid model has none. With
+    the pipe (area, d_ft) a non-Newtonian oil takes its apparent viscosity there."""
     p, t = np.atleast_1d(np.asarray(p, float)), np.atleast_1d(np.asarray(t, float))
     s = fluid.state(p, t, case)
+    if area is not None:
+        s = V.apply_rheology(fluid, s, area, d_ft)
     nan = np.full_like(p, np.nan)
     out = {"ql": s["ql"], "qg": s["qg"], "rho_l": s["rho_l"], "rho_g": s["rho_g"], "mu_l": s["mu_l"],
            "mu_g": s["mu_g"], "sig_l": s["sig"]}
@@ -74,6 +77,8 @@ def _phases(fluid, p, t, case):
         _, bg, rho_g, mu_g = bo.gas_props(inp, p, t)
         bw, rho_w, mu_w = V._water(inp, p, t)
         free = qo * np.maximum(gor - rs, 0.0)                       # scf/d
+        if "mu_o_app" in s:
+            mu_o = s["mu_o_app"]
         out.update(rho_o=rho_o, rho_w=rho_w, mu_o=mu_o, mu_w=mu_w, bo=bo_, bw=bw, bg=bg,
                    sig_go=V._sigma_oil(inp.api, p, t), sig_gw=V._sigma_water(p, t),
                    m_oil=qo * (RB_LB(inp.gamma_o) + LB_PER_SCF_AIR * inp.gas_sg * rs),
@@ -140,7 +145,7 @@ def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.na
               if node in path.restrictions else P[node])
         pm, tm = 0.5 * (P[i] + pn), 0.5 * (T[i] + T[node])
         L = path.seg_len[i]
-        ph = _phases(fluid, np.array([pm]), np.array([tm]), case)
+        ph = _phases(fluid, np.array([pm]), np.array([tm]), case, path.area[i], path.d_h[i])
         a = path.area[i]
         vsl, vsg = max(float(ph["ql"][0]) / a, 1e-12), max(float(ph["qg"][0]) / a, 0.0)
         rho_l, rho_g = float(ph["rho_l"][0]), max(float(ph["rho_g"][0]), 1e-4)
