@@ -5675,6 +5675,7 @@ def test_hydraulic_fracturing_t49():
     """PROSPER Tutorial 49 (the user's file): Stimulation | Hydraulic Fracturing on the Logie well (9000 ft TVD,
     Pr 5200 psig, PI 5), 66 treatments (1000-4000 bbl, 200-400 bbl/min). Stresses exact; initial length and width
     within 0.5 %, effective length within 3.5 %, effective width within 2 %, PI after within 1 %; five detailed cases
+    (rw' within 5 %, following the effective length); treatment screens of the six one-at-a-time runs; the fluid-loss and surface-temperature tables
     (pad, effective dimensions, rw')."""
     from wellmodel import fracture as FR
     import json
@@ -5698,8 +5699,37 @@ def test_hydraulic_fracturing_t49():
         pad, sch, eff, pr = cases[k - 1]
         assert abs(pad["Pad volume (bbl)"] - pad_v) < 1e-6 * pad_v + 1e-9, (k, pad["Pad volume (bbl)"])
         assert abs(eff["Effective fracture height (ft)"] / h_eff - 1) < 0.01, (k, eff["Effective fracture height (ft)"])
-        assert abs(pr["Effective wellbore radius (ft)"] / rwp - 1) < 0.03, (k, pr["Effective wellbore radius (ft)"])
+        assert abs(pr["Effective wellbore radius (ft)"] / rwp - 1) < 0.05, (k, pr["Effective wellbore radius (ft)"])
     assert abs(fr.treatment(200, 1000)["Perforation friction losses (psi)"] - 1.40117) < 0.002
-    assert abs(fr.treatment(400, 1000)["Pump power requirement (hp)"] / 5097359 - 1) < 0.2   # tubing friction ~15 %
+    assert abs(fr.treatment(400, 1000)["Pump power requirement (hp)"] / 5097359 - 1) < 0.002
+    # the user's one-at-a-time runs: treatment screen (200 bbl/min, 1000 bbl)
+    for inp, refs in ((dict(), {"Tubing head pressure (psig)": 133643, "Pump power requirement (hp)": 654924,
+                                "Tubing hydrostatic head (psi)": 3901.05, "Total fluid loss coefficient (ft/sqrt(min))": 0.0028838,
+                                "Bottom hole temperature during job (F)": 207}),
+                      (dict(c_wall=0.0062), {"Fracture initiation pressure (psig)": 6671.08,
+                                             "Total fluid loss coefficient (ft/sqrt(min))": 0.005299}),
+                      (dict(poisson=0.25), {"Initial closing pressure (psig)": 1402.09, "Actual closing pressure (psig)": 2705.76,
+                                            "Fracture initiation pressure (psig)": 6915.98, "Tubing head pressure (psig)": 133997,
+                                            "Fracture breakdown gradient (psi/ft)": 0.77008}),
+                      (dict(tensile=1000.0), {"Fracture initiation pressure (psig)": 6502.72, "Tubing head pressure (psig)": 133643}),
+                      (dict(t_surface=100.0), {"Bottom hole temperature during job (F)": 207.8}),
+                      (dict(fluid_density=10.0), {"Perforation friction losses (psi)": 1.56721, "Tubing friction losses (psi)": 142237,
+                                                  "Tubing hydrostatic head (psi)": 4363.3, "Tubing head pressure (psig)": 144638,
+                                                  "Pump power requirement (hp)": 708798})):
+        t = FR.Fracture(FR.FracInputs(**inp)).treatment(200, 1000)
+        for k_, v_ in refs.items():
+            assert abs(t[k_] / v_ - 1) < 5e-4, (inp, k_, t[k_], v_)
+    # the user's fluid-loss 0.0062 and 100 F surface-temperature result tables
+    for inp, fn, tols in ((dict(c_wall=0.0062), "run1", (0.005, 0.005, 0.025, 0.02, 0.03)),
+                          (dict(t_surface=100.0), "run5", (0.01, 0.015, 0.035, 0.04, 0.01))):
+        tab1, _ = FR.Fracture(FR.FracInputs(**inp)).sensitivity()
+        ref1 = pd.read_csv(Path(__file__).parent / "data" / f"t49_frac_results_{fn}.csv")
+        for (col, rc), tol in zip((("Fracture length (ft)", "L0"), ("Fracture width (in)", "w0"),
+                                   ("Final fracture length (ft)", "Leff"), ("Final fracture width (in)", "weff"),
+                                   ("Productivity index - after (STB/d/psi)", "pi_after")), tols):
+            r_ = ref1[rc].to_numpy()
+            m_ = np.isfinite(r_)
+            e = np.abs(tab1[col].to_numpy()[m_] / r_[m_] - 1)
+            assert e.max() < tol, (fn, col, e.max())
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T49_Stimulation_Hydraulic_Fracturing.wellmodel.json"))
     assert proj["inputs"]["ipr_j"] == 5.0 and proj["widgets"]["sys_vals_j"] == "5, 11.2449"
