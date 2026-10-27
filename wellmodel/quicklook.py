@@ -92,7 +92,7 @@ def _traverse_up(path, fluid, p_bottom, case, gas_seg, T, correlation, p1, p2):
     for i in range(n - 2, -1, -1):
         c = {**case, "gor": case["gor"] + gas_seg[i] * 1e6 / qo}
         if (i + 1) in path.restrictions:
-            dp = V._restriction_dp(fluid.state(p, T[[i + 1]], c), path.restrictions[i + 1])
+            dp = V._restriction_dp(fluid.state(p, T[[i + 1]], c), path.restrictions[i + 1], p=p)
             p = np.maximum(p - dp, 14.7)
         L = path.seg_len[i]
         g0, _ = V._gradient(path, fluid, i, p, T[[i + 1]], c, corr, p1, p2)

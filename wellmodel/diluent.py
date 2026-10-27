@@ -186,6 +186,6 @@ def traverse(path, fluid, top_p, case, setup: DiluentSetup, correlation="pe2_sty
             g1, _ = V._gradient(path, fl, i, np.maximum(p + g0 * L, 14.7), T[:, i + 1], cs, corr, p1, p2)
             p = np.maximum(p + 0.5 * (g0 + g1) * L, 14.7)
             if (i + 1) in path.restrictions:
-                p = p + V._restriction_dp(fl.state(p, T[:, i + 1], cs), path.restrictions[i + 1])
+                p = p + V._restriction_dp(fl.state(p, T[:, i + 1], cs), path.restrictions[i + 1], p=p)
             P[:, i + 1] = p
     return P, T

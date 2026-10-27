@@ -114,7 +114,9 @@ def build_flow_path(top_md, secs: pd.DataFrame, points: pd.DataFrame, survey_md,
             else:
                 a_ = np.pi / 4 * (di ** 2 + dc ** 2 - do ** 2)
                 dh_ = 4 * a_ / (np.pi * (di + do + dc))
-            area[j], dh[j], rough[j], dht[j] = a_, dh_, e, dc
+            # heat-transfer diameter: annular flow - the hydraulic diameter (PROSPER's T48 foam lift wellhead
+            # temperatures, coiled tubing in 3.958 in tubing, within 0.5 F against 10 F low with the casing ID)
+            area[j], dh[j], rough[j], dht[j] = a_, dh_, e, (dh_ if flow_type == "annular" else dc)
         else:
             d = r["Flow ID (in)"] / 12
             area[j], dh[j], rough[j], dht[j] = np.pi / 4 * d * d, d, e, d
@@ -484,11 +486,18 @@ def apply_rheology(fluid, s, area, d_ft):
     return s
 
 
+def corr_rho_l(s, corr):
+    """Liquid density the correlation sees: the foam density for Foam-Homogeneous (foam lift), else the liquid's."""
+    if getattr(corr, "__name__", "") == "foam_homogeneous" and "rho_foam" in s:
+        return s["rho_foam"]
+    return s["rho_l"]
+
+
 def _gradient(path, fluid, i, p, t, case, corr, p1, p2):
     s = apply_rheology(fluid, fluid.state(p, t, case), path.area[i], path.d_h[i])
     a = path.area[i]
     vsl, vsg = np.maximum(s["ql"] / a, 1e-12), np.maximum(s["qg"] / a, 0.0)
-    args = (vsl, vsg, s["rho_l"], np.maximum(s["rho_g"], 1e-4), s["mu_l"], np.maximum(s["mu_g"], 1e-4),
+    args = (vsl, vsg, corr_rho_l(s, corr), np.maximum(s["rho_g"], 1e-4), s["mu_l"], np.maximum(s["mu_g"], 1e-4),
             np.maximum(s["sig"], 0.5), path.d_h[i], path.rough[i], path.sin_t[i], p)
     ql, qg = np.maximum(s["ql"], 0.0), np.maximum(s["qg"], 0.0)
     lam = ql / np.maximum(ql + qg, 1e-30)
@@ -515,14 +524,21 @@ def _glr(case, kind):
     return 1e6 / liq
 
 
-def _restriction_dp(s, d_in, cd=0.9):
-    """Homogeneous orifice pressure drop (psi) through a restriction of ID d_in."""
+def _restriction_dp(s, d_in, cd=0.9, p=None):
+    """Homogeneous orifice pressure drop (psi) through a restriction of ID d_in, from the state s at the outlet
+    (downstream) pressure p (psia). With p, the gas expands through the restriction (isothermal, Bernoulli
+    v dv = -dp / rho with rho ~ p): dP = p (exp(dP0 / p) - 1) for the gas fraction - PROSPER's SSSV drop in the T48
+    gas well (0.95 in SSSV, 88 psi at 6.8 MMscf/d: 87.8 against 86.4; the foam lift VLPs to 10 MMscf/d)."""
     ar = np.pi / 4 * (d_in / 12) ** 2
     q = s["ql"] + s["qg"]
     lam = s["ql"] / np.maximum(q, 1e-15)
     rho = lam * s["rho_l"] + (1 - lam) * s["rho_g"]
     v = q / ar
-    return rho * v * v / (2 * 32.174 * cd * cd) / 144.0
+    dp0 = rho * v * v / (2 * 32.174 * cd * cd) / 144.0
+    if p is None:
+        return dp0
+    p = np.maximum(np.asarray(p, float), 14.7)
+    return lam * dp0 + (1 - lam) * p * np.expm1(np.minimum(dp0 / p, 50.0))
 
 
 def _broadcast_case(case):
@@ -558,7 +574,7 @@ def traverse(path: FlowPath, fluid, whp, case, correlation="beggs_brill", p1=1.0
             g1, s1 = _gradient(path, fluid, i, pp, T[:, i + 1], case, corr, p1, p2)
             p = np.maximum(p + 0.5 * (g0 + g1) * L, 14.7)
             if (i + 1) in path.restrictions:
-                p = p + _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1])
+                p = p + _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1], p=p)
             P[:, i + 1] = p
         return P
     P = down(T)
@@ -704,9 +720,9 @@ def traverse_up(path: FlowPath, fluid, p_bottom, case, correlation="beggs_brill"
         P[:, -1] = np.where(bad, np.nan, p)
         for i in range(n - 2, -1, -1):
             if (i + 1) in path.restrictions:            # restriction at node i+1: pressure above it is lower
-                dp = _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1])
+                dp = _restriction_dp(fluid.state(p, T[:, i + 1], case), path.restrictions[i + 1], p=p)
                 p = p - _restriction_dp(fluid.state(np.maximum(p - dp, 14.7), T[:, i + 1], case),
-                                        path.restrictions[i + 1])
+                                        path.restrictions[i + 1], p=np.maximum(p - dp, 14.7))
                 bad |= p < 14.7
                 p = np.where(bad, 1000.0, p)
             L = path.seg_len[i]

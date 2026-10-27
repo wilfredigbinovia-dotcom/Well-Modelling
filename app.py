@@ -51,6 +51,7 @@ from wellmodel import diluent as wdil
 from wellmodel import emulsion as wem
 from wellmodel import rheology as wrh
 from wellmodel import cbm as wcbm
+from wellmodel import foam as wfoam
 from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
@@ -487,6 +488,8 @@ CAPTIONS = {
                                       "it (PROSPER Tutorial 30): Equipment, Calculation (system analysis)",
                         "diluent": "Diluent water down the annulus into the tubing: Equipment, Calculation (system "
                                    "analysis)",
+                        "foam_lift": "Surfactant injected at the perforations turns the water into foam (PROSPER "
+                                     "Tutorial 48): surfactant data in Equipment, Foam-Homogeneous in Calculation",
                         "mpump": "Pump in the surface flowline driven by the power available (PROSPER Tutorial 31): "
                                  "Pump row in the surface equipment and Multiphase pump data in Equipment, Calculation "
                                  "with the manifold as the top node"},
@@ -2941,6 +2944,17 @@ def eos_vlp_grid(text, name, p_max, t_min, t_max):
 
 
 def vlp_fluid(o, kind, p_max, t_min, t_max):
+    """Fluid model for the tubing from the PVT tab (with the surfactant for foam lift). Returns (fluid, description)
+    or (None, reason)."""
+    fl_, note_ = _vlp_fluid(o, kind, p_max, t_min, t_max)
+    fs = ss.get("foam_setup")
+    if fl_ is not None and getattr(o, "artificial_lift", "none") == "foam_lift" and fs is not None:
+        fl_ = wfoam.FoamFluid(fl_, fs["model"], fs["conc"])
+        note_ += f"; foam lift, surfactant {fs['conc']:g} %"
+    return fl_, note_
+
+
+def _vlp_fluid(o, kind, p_max, t_min, t_max):
     """Fluid model for the tubing from the PVT tab. Returns (fluid, description) or (None, reason)."""
     water = bo.PVTInputs(rsb=1, api=40, gas_sg=0.7, salinity_ppm=float(val("pvt_sal", 50000.0)),
                          h2s=float(val("pvt_h2s", 0.0)), co2=float(val("pvt_co2", 0.0)), n2=float(val("pvt_n2", 0.0)))
@@ -3699,6 +3713,56 @@ def _esp_copy_design():
     for k_ in ("cable", "sep", "wear"):
         if f"esp_{k_}" in ss.get("_esp_design_inputs", {}):
             put({"cable": "espq_len", "sep": "espq_sep", "wear": "espq_wear"}[k_], ss["_esp_design_inputs"][f"esp_{k_}"])
+
+
+FOAM_SIG_COLS = ["Surfactant concentration (%)", "Surface tension (dyne/cm)"]
+FOAM_RHO_COLS = ["Surfactant concentration (%)", "Foam density (lb/ft3)"]
+
+
+def foam_data_panel():
+    """PROSPER Foam Input Data (foam lift, Tutorial 48): surfactant tables and the surfactant mass percent."""
+    st.subheader("Foam lift - surfactant")
+    st.caption("PROSPER's default surfactant model (Petroleum Society paper 2007-118, Yang and Zhang): surface tension "
+               "and foam density against the surfactant mass percent, interpolated linearly. With the Foam-Homogeneous "
+               "correlation the gas and the foam flow as a no-slip mixture (the liquid at the foam density) with no "
+               "wall friction; the surface tension is also used by the other correlations and the Turner check.")
+    c = st.columns(3)
+    conc = num(c[0], "Surfactant mass percent (%)", "foam_conc", 0.2, 0.0, 100.0, 0.01, "%.5g")
+    for key, cols, dflt_ in (("foam_sigma", FOAM_SIG_COLS, wfoam.SIGMA_DEFAULT),
+                             ("foam_density", FOAM_RHO_COLS, wfoam.DENSITY_DEFAULT)):
+        if key not in ss:
+            ss[key] = pd.DataFrame(list(dflt_), columns=cols)
+    cc = st.columns(2)
+    with cc[0]:
+        st.markdown("**Surface tension**")
+        t_s = track("foam_sigma", st.data_editor(ss["foam_sigma"], key="foam_sigma_ed", num_rows="dynamic",
+                                                  width="stretch"))
+    with cc[1]:
+        st.markdown("**Foam density**")
+        t_d = track("foam_density", st.data_editor(ss["foam_density"], key="foam_density_ed", num_rows="dynamic",
+                                                    width="stretch"))
+    try:
+        m = wfoam.FoamModel(tuple(map(tuple, pd.DataFrame(t_s)[FOAM_SIG_COLS].apply(pd.to_numeric, errors="coerce")
+                                      .dropna().to_numpy())),
+                            tuple(map(tuple, pd.DataFrame(t_d)[FOAM_RHO_COLS].apply(pd.to_numeric, errors="coerce")
+                                      .dropna().to_numpy())))
+    except ValueError as e:
+        st.warning(str(e))
+        ss.pop("foam_setup", None)
+        return
+    ss["foam_setup"] = {"model": m, "conc": float(conc)}
+    c[1].metric("Surface tension", f"{float(m.surface_tension(conc)):.3f} dyne/cm")
+    c[2].metric("Foam density", f"{float(m.foam_density(conc)):.3f} lb/ft3")
+    x = np.linspace(0.0, max(0.5, max(r[0] for r in m.sigma + m.density)), 200)
+    fig, ax = plt.subplots(figsize=(7, 3.2))
+    ax.plot(x, m.surface_tension(x), color=wplt.SERIES[0], lw=2, label="Surface tension (dyne/cm)")
+    ax.plot(x, m.foam_density(x), color=wplt.SERIES[1], lw=2, label="Foam density (lb/ft3)")
+    ax.axvline(conc, color=wplt.INK, lw=1, ls="--")
+    ax.set_xlabel("Surfactant concentration (%)")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
 
 
 def esp_equipment_panel(top_md, secs):
@@ -5430,6 +5494,11 @@ with tabs[3]:
         diluent_data_panel(o, top_md, secs)
     else:
         ss.pop("diluent_setup", None)
+    if o is not None and getattr(o, "artificial_lift", "none") == "foam_lift":
+        st.divider()
+        foam_data_panel()
+    else:
+        ss.pop("foam_setup", None)
     if o is not None and getattr(o, "artificial_lift", "none") == "mpump":
         st.divider()
         mpump_data_panel(o, ed_s)
@@ -9104,7 +9173,8 @@ with tabs[5]:
     PCP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("pcp_motor", "pcp_rod"))
     HSP_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "hsp")
     DIL_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") in ("diluent", "diluent_gl"))
-    LIFT_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") != "none")
+    FOAM_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") == "foam_lift")
+    LIFT_ON = bool(_o is not None and getattr(_o, "artificial_lift", "none") not in ("none", "foam_lift"))
     _modes = CALC_MODES[:2] + ([VLPC_MODE] if not LIFT_ON and _o is not None and not _o.is_injector else []) + \
         CALC_MODES[2:] + ([QL_MODE] if GL_ON else []) + ([ESPQL_MODE] if ESP_ON else []) + ([HSPQL_MODE] if HSP_ON else []) + \
         ([EQC_MODE] if GL_ON and getattr(_o, "artificial_lift", "") == "gas_lift" else [])
@@ -9242,6 +9312,10 @@ with tabs[5]:
                     base["sep_gor"] = num(st, "Separator GOR (scf/STB)", "sys_sep_gor",
                                           round(1e6 / cg_) if cg_ > 0 else 0.0, 0.0, 1e8,
                                           help="Separator gas per barrel of condensate; 0 = dry gas.")
+                    if FOAM_ON and ss.get("foam_setup"):
+                        base["surf"] = float(ss["foam_setup"]["conc"])
+                        st.caption(f"Foam lift: surfactant {base['surf']:g} % (Equipment tab; a sensitivity "
+                                   "variable in the system analysis).")
                     if getattr(ipr_curve, "mix", None) is not None:
                         st.caption("Multilayer IPR: the WGR and separator GOR above are not used - at each rate they "
                                    "follow the layer contributions.")
@@ -9287,6 +9361,8 @@ with tabs[5]:
                                   "Not used - the top node is the wellhead" if s_items is not None else
                                   "Not used - no surface equipment entered", disabled=True)
                 corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+                if FOAM_ON:
+                    corr_opts = ["foam_homogeneous"] + corr_opts
                 corr = sel(st, "Vertical lift correlation", corr_opts, "sys_corr",
                            sel_c if sel_c in corr_opts else "hagedorn_brown", format_func=VLP_LABELS.get)
                 m_fit = ms.get(corr)
@@ -9369,6 +9445,8 @@ with tabs[5]:
                         var_defs.update(SRP_VARS)
                     if GL_ON:
                         var_defs.update(wgls.variables_for(gl_setup))
+                    if FOAM_ON:
+                        var_defs["surf"] = "Surfactant mass percent (%)"
                     if DIL_ON:
                         var_defs.update(DIL_VARS if ss["diluent_setup"].gas_lift else
                                         {k_: v_ for k_, v_ in DIL_VARS.items() if k_ != "glr_dil"})
@@ -9399,6 +9477,8 @@ with tabs[5]:
                                         "pcp_wear": ss["pcp_equipment"]["wear"]})
                         if SRP_ON and ss.get("srp_equipment"):
                             cur.update({k_: ss["srp_equipment"][k_] for k_ in SRP_VARS})
+                        if FOAM_ON and ss.get("foam_setup"):
+                            cur["surf"] = ss["foam_setup"]["conc"]
                         if ESP_ON and ss.get("esp_equipment"):
                             cur["esp_freq"] = ss["esp_equipment"]["freq"]
                             cur["esp_stages"] = ss["esp_equipment"]["stages"]

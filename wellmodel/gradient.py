@@ -68,6 +68,8 @@ def _phases(fluid, p, t, case, area=None, d_ft=None):
     nan = np.full_like(p, np.nan)
     out = {"ql": s["ql"], "qg": s["qg"], "rho_l": s["rho_l"], "rho_g": s["rho_g"], "mu_l": s["mu_l"],
            "mu_g": s["mu_g"], "sig_l": s["sig"]}
+    if "rho_foam" in s:
+        out["rho_foam"] = s["rho_foam"]
     if isinstance(fluid, V.BlackOilFluid):
         inp = fluid.inp
         q, wc, gor = case["q"], np.clip(case["wc"], 0, 0.9999), np.maximum(case["gor"], 0.0)
@@ -115,7 +117,7 @@ def _restriction_split(fluid, case, p_in, t, d_in):
     p_in: vlp.traverse adds dP(p_out) to p_out, so solve p_out + dP(p_out) = p_in."""
     p_out = p_in
     for _ in range(30):
-        dp = float(V._restriction_dp(fluid.state(np.array([p_out]), np.array([t]), case), d_in)[0])
+        dp = float(V._restriction_dp(fluid.state(np.array([p_out]), np.array([t]), case), d_in, p=p_out)[0])
         new = p_in - dp
         if abs(new - p_out) < 1e-6:
             break
@@ -150,7 +152,8 @@ def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.na
         vsl, vsg = max(float(ph["ql"][0]) / a, 1e-12), max(float(ph["qg"][0]) / a, 0.0)
         rho_l, rho_g = float(ph["rho_l"][0]), max(float(ph["rho_g"][0]), 1e-4)
         sig = max(float(ph["sig_l"][0]), 0.5)
-        args = (np.array([vsl]), np.array([vsg]), np.array([rho_l]), np.array([rho_g]), ph["mu_l"],
+        rho_c = V.corr_rho_l(ph, corr)
+        args = (np.array([vsl]), np.array([vsg]), np.atleast_1d(rho_c), np.array([rho_g]), ph["mu_l"],
                 np.maximum(ph["mu_g"], 1e-4), np.array([sig]), path.d_h[i], path.rough[i], path.sin_t[i],
                 np.array([pm]))
         lam = vsl / max(vsl + vsg, 1e-30)

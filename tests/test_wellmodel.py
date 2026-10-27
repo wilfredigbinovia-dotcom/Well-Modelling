@@ -5614,3 +5614,56 @@ def test_cbm_dewatering_well_t45():
     assert prosper["results"].shape == (3, 1, 3, 3, 20, 37)
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T45_CBM_Dewatering_Well.wellmodel.json"))
     assert proj["widgets"]["opt_fluid_type"] == "cbm" and proj["inputs"]["espq_level"] == 2000.0
+
+
+def test_foam_lift_t48():
+    """PROSPER Tutorial 48 (the user's file): the T02 gas well at Pr 1200 psig, WGR 100, CGR 1, 500 psig wellhead,
+    produced up the annulus between a 1.125 in coiled tubing and the 3.958 in tubing (0.95 in SSSV at 1000 ft).
+    Foam-Homogeneous with the surfactant tables: the VLP tables of the ten cases (0.02-0.5 %, 0.01-10 MMscf/d)
+    within 1 %, the system rates (6.789-6.945 MMscf/d) within 1 %; friction ~0 (PROSPER 0.05 psi)."""
+    from wellmodel import gaspvt as gp, inflow as winf, system as wsys, foam as FO
+    import json
+    G = 14.696
+    inp = gp.GasPVTInputs(0.58, 200, 1, 50, 100, 100000, 0, 0.5, 2, "lee", 166, 1200)
+    pr = 1200 + G
+    grid = np.linspace(G, 1500, 1500)
+    mg = gp.pseudo_pressure(inp, grid, 166.0)
+    z3 = gp.gas_props(inp, np.array([pr - 5, pr, pr + 5]), np.full(3, 166.0))[0]
+    mu_r = float(gp.gas_props(inp, np.array([pr]), np.array([166.0]))[3][0])
+    cv = winf.petex_gas(pr, 166, 25, 55, 500, 31.6, .354, 55, 50, .15, .25, 2.0, lambda p: np.interp(p, grid, mg), mu_r,
+                        1 / pr - (z3[2] - z3[0]) / 10 / z3[1], 0.58, wgr=100.0, cgr=1.0, z_r=float(z3[1]))
+    assert abs(cv.params["Gas relative permeability"] - 0.68905) < 1e-3 and abs(cv.aof / 9987.21 - 1) < 0.015
+    t_ = {"Tubing Inside Diameter (in)": 0.95, "Tubing Inside Roughness (in)": 0.0006,
+          "Tubing Outside Diameter (in)": 1.125, "Tubing Outside Roughness (in)": 0.0006,
+          "Casing Inside Diameter (in)": 3.958, "Casing Inside Roughness (in)": 0.0006}
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0}, {"Type": "Tubing", "Measured Depth (ft)": 1000, **t_},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 0.95}, {"Type": "Tubing", "Measured Depth (ft)": 5000, **t_},
+            {"Type": "Casing", "Measured Depth (ft)": 5400, "Casing Inside Diameter (in)": 6.0,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    path = wvlp.build_flow_path(top, secs, pts, [0, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5400],
+                                [0, 1500, 1980, 2450, 2883, 3300, 3721, 4140, 4560, 4900], [0, 1500, 5400],
+                                [45, 75, 166], flow_type="annular")
+    fl = FO.FoamFluid(wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.58, salinity_ppm=100000, co2=0.5, n2=2),
+                                       50.0, "lee", inp),
+                      FO.FoamModel(density=((0.02, 57.8), (0.05, 53), (0.1, 45), (0.25, 33), (0.5, 30.5))), 0.02)
+    ref = pd.read_csv(Path(__file__).parent / "data" / "t48_foam_vlp.csv")
+    q = ref["q"].to_numpy()
+    case = {"q": q, "wgr": np.full_like(q, 100.0), "cgr": np.full_like(q, 1.0), "surf": ref["surf"].to_numpy()}
+    P, T = wvlp.traverse(path, fl, np.full_like(q, 500 + G), case, "foam_homogeneous", 1, 1, 3.0)
+    err = np.abs((P[:, -1] - G) / ref["vlp"].to_numpy() - 1)
+    assert err.max() < 0.01, err.max()
+    sys_ref = [6.789, 6.840, 6.879, 6.904, 6.930, 6.939, 6.940, 6.942, 6.944, 6.945]
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "gas", {"whp": 500 + G, "u": 3.0, "wgr": 100.0, "sep_gor": 1e6},
+                              [{"surf": float(c)} for c in sorted(ref["surf"].unique())], lambda ch: cv,
+                              "foam_homogeneous")
+    got = np.array([r.q for r in res])
+    print("T48 system rates", got.round(3))
+    assert np.all(np.abs(got / np.array(sys_ref) - 1) < 0.01) and np.all(np.diff(got) > 0)
+    det, _, _ = wsys.solution_details(path, fl, "gas", {"whp": 500 + G, "u": 3.0, "wgr": 100.0, "sep_gor": 1e6,
+                                                        "surf": 0.02}, res[0].q, "foam_homogeneous")
+    assert det["dP friction - production string (psi)"] == 0.0
+    assert abs(det["dP gravity - production string (psi)"] / 99.47 - 1) < 0.03
+    assert abs(det["Wellhead temperature (°F)"] - 130.9) < 1.5         # heat transfer at the annulus hydraulic diameter
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T48_Foam_Lift.wellmodel.json"))
+    assert proj["widgets"]["opt_artificial_lift"] == "foam_lift" and proj["inputs"]["sys_corr"] == "foam_homogeneous"

@@ -72,6 +72,7 @@ ARTIFICIAL_LIFT = {
     "diluent_gl": "Diluent injection - annular injection with gas lift",
     "diluent": "Diluent injection - annular injection",
     "mpump": "Multiphase pump (surface, OneSubsea H series)",
+    "foam_lift": "Foam lift (surfactant)",
 }
 
 TEMP_MODELS = {
@@ -109,7 +110,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer", "water_injector", "gas_injector"},
     "artificial_lift": {"none", "gas_lift", "ct_gas_lift", "esp", "srp", "jet", "pcp_motor", "pcp_rod", "hsp",
-                        "diluent_gl", "diluent", "mpump"},
+                        "diluent_gl", "diluent", "mpump", "foam_lift"},
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
     "emulsions": {"none", "emulsion"},
@@ -294,6 +295,20 @@ class WellOptions:
                 add("error", ["artificial_lift", "flow_type"],
                     "Coiled tubing gas lift injects down a coiled tubing inside the tubing and produces up the coiled "
                     "tubing - tubing annulus: choose Tubing flow (the annulus is applied above the coiled tubing end).")
+        if self.artificial_lift == "foam_lift":
+            if self.well_type != "producer" or not self.is_gas:
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "Foam lift deliquifies a gas producer: choose a gas fluid and a producer.")
+            elif self.flow_type == "tubing":
+                add("warning", ["artificial_lift", "flow_type"],
+                    "Foam lift (PROSPER Tutorial 48): the surfactant goes down a coiled tubing and the gas is produced "
+                    "up the annulus - choose Annular flow and enter the coiled tubing as the tubing (its OD) inside "
+                    "the production tubing (as the casing ID).")
+            else:
+                add("info", ["artificial_lift"],
+                    "Foam lift (PROSPER Tutorial 48): surfactant tables (surface tension and foam density against "
+                    "concentration) in Equipment; the Foam-Homogeneous correlation in Calculation, with the surfactant "
+                    "mass percent as a sensitivity variable.")
         if self.artificial_lift == "mpump" and self.well_type != "producer":
             add("error", ["artificial_lift", "well_type"],
                 "The surface multiphase pump boosts a producing well's flowline: choose a producer.")
@@ -462,6 +477,10 @@ class WellOptions:
             eq += ["Enthalpy balance: drilling and casing record (hole sizes, casing OD and weight, shoes, tops of "
                    "cement, mud density), completion fluid and its density, packer depth, tubing OD, lithology "
                    "(formation type, porosity, in-situ fluid by depth), days since production started"]
+        if self.artificial_lift == "foam_lift":
+            eq += ["Foam lift: surfactant mass percent, surface tension and foam density against concentration "
+                   "(PROSPER's default: Petroleum Society paper 2007-118); the coiled tubing as the tubing (OD) and "
+                   "the production tubing as the casing (ID) for annular flow"]
         if self.artificial_lift == "mpump":
             eq += ["Surface equipment with a Pump row at the pump's place in the flowline (manifold first), the "
                    "power available to the pump, its wear factor and efficiency curve (OneSubsea H800/65 by default)"]

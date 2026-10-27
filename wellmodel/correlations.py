@@ -55,6 +55,14 @@ def no_slip(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     return elev, fric, lam
 
 
+def foam_homogeneous(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
+    """PROSPER's Foam-Homogeneous (foam lift, Tutorial 48): the no-slip mixture of gas and foam (rho_l is the foam
+    density, passed by vlp._gradient) for gravity, and no wall friction (see foam.py)."""
+    vm, lam = _no_slip_lambda(vsl, vsg)
+    rho_n = rho_l * lam + rho_g * (1 - lam)
+    return rho_n * sin_t / 144.0, 0.0 * rho_n, lam
+
+
 # ---------------------------------------------------------------------------
 _BB = {  # a, b, c, d', e, f, g (uphill)
     "seg": (0.98, 0.4846, 0.0868, 0.011, -3.768, 3.539, -1.614),
@@ -810,7 +818,16 @@ def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
 
 from .unified import tuffp_unified  # noqa: E402  (unified uses friction_factor above)
 
-CORRELATIONS = {
+class _Correlations(dict):
+    """The selectable correlations; special-purpose ones (EXTRA: foam lift) are found by name but not listed."""
+
+    def __missing__(self, key):
+        return EXTRA[key]
+
+
+EXTRA = {"foam_homogeneous": foam_homogeneous}
+
+CORRELATIONS = _Correlations({
     "tuffp_unified": tuffp_unified,
     "pe5_style": pe5_style,
     "pe2_style": pe2_style,
@@ -826,9 +843,10 @@ CORRELATIONS = {
     "duns_ros_gould": duns_ros_gould,
     "fancher_brown": fancher_brown,
     "ansari": ansari,
-}
+})
 
 LABELS = {
+    "foam_homogeneous": "Foam-Homogeneous",
     "tuffp_unified": "TUFFP Unified (Zhang et al. 2003)",
     "pe5_style": "PE5-style (calibrated approximation)",
     "pe2_style": "PE2-style (calibrated approximation)",

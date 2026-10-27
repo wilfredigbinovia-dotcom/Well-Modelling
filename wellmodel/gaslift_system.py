@@ -339,7 +339,7 @@ def multi_traverse(path, fluid, top_p, case, gas_seg, correlation, p1, p2, u, hc
             p = np.maximum(p + 0.5 * (g0 + g1) * L, 14.7)
             if (i + 1) in path.restrictions:
                 st = fluid.state(p, T[:, i + 1], c)
-                p = p + V._restriction_dp(st, path.restrictions[i + 1])
+                p = p + V._restriction_dp(st, path.restrictions[i + 1], p=p)
             P[:, i + 1] = p
         return P, T
 

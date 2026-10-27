@@ -93,10 +93,11 @@ def rate_grid(aof, method="Automatic - Geometric", n=25, user_rates=None):
 
 def _case_arrays(kind, p):
     """Fluid case dict for one parameter set (oil: q filled later)."""
+    extra = {"surf": p["surf"]} if "surf" in p else {}       # foam lift: surfactant mass percent (foam.FoamFluid)
     if kind == "oil":
-        return {"wc": p["wc"] / 100.0, "gor": p["gor"]}
+        return {"wc": p["wc"] / 100.0, "gor": p["gor"], **extra}
     sg = p.get("sep_gor", 0.0)
-    return {"wgr": p["wgr"], "cgr": 1e6 / sg if sg and sg > 0 else 0.0}
+    return {"wgr": p["wgr"], "cgr": 1e6 / sg if sg and sg > 0 else 0.0, **extra}
 
 
 def _flu(kind, p, curve, q):
@@ -533,7 +534,7 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         s = V.apply_rheology(fluid, fluid.state(np.array([pm]), np.array([tm]), case), path.area[i], path.d_h[i])
         a = path.area[i]
         vsl, vsg = max(float(s["ql"][0]) / a, 1e-12), max(float(s["qg"][0]) / a, 0.0)
-        args = (np.array([vsl]), np.array([vsg]), s["rho_l"], np.maximum(s["rho_g"], 1e-4), s["mu_l"],
+        args = (np.array([vsl]), np.array([vsg]), V.corr_rho_l(s, corr), np.maximum(s["rho_g"], 1e-4), s["mu_l"],
                 np.maximum(s["mu_g"], 1e-4), np.maximum(s["sig"], 0.5), path.d_h[i], path.rough[i],
                 path.sin_t[i], np.array([pm]))
         lam = vsl / max(vsl + vsg, 1e-30)
@@ -582,9 +583,15 @@ def solution_details(path, fluid, kind, params, q, correlation, p1=1.0, p2=1.0, 
         if r["Type"] == "Choke":
             regimes[f"Surface choke - {r['Item']} ({r['Size']})"] = (str(r["Regime"][0]), float(r["dP (psi)"][0]))
     for j, (node, d_in) in enumerate(sorted(path.restrictions.items()), 1):
-        s = fluid.state(np.array([P[node]]), np.array([T[node]]), case)
-        dp = float(V._restriction_dp(s, d_in)[0])
-        p_up, p_dn = P[node], P[node] - dp
+        p_dn = P[node]                         # outlet: traverse adds dP(p_out) to p_out (= P[node], the inlet)
+        for _ in range(30):
+            dp = float(V._restriction_dp(fluid.state(np.array([p_dn]), np.array([T[node]]), case), d_in,
+                                         p=p_dn)[0])
+            new = P[node] - dp
+            if abs(new - p_dn) < 1e-6:
+                break
+            p_dn = max(new, 14.7)
+        p_up = P[node]
         regimes[f"Restriction {j} at {path.md[node]:,.0f} ft (ID {d_in:g} in)"] = (
             ("Critical" if p_dn / max(p_up, 1e-9) < 0.53 else "SubCritical"), dp)
     det = {

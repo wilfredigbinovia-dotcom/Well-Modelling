@@ -330,7 +330,7 @@ def _lifted_traverse(path: V.FlowPath, fluid, top_p, case, qgi, correlation="hag
             p = p_new
             if (i + 1) in path.restrictions:
                 st = fluid.state(p, T[:, i + 1], {k: np.where(done, case[k], lift[k]) for k in case})
-                p = p + V._restriction_dp(st, path.restrictions[i + 1])
+                p = p + V._restriction_dp(st, path.restrictions[i + 1], p=p)
             P[:, i + 1] = p
         inj_md = np.where(np.isfinite(inj_md), inj_md, path.md[-1])
         inj_p = np.where(np.isfinite(inj_p), inj_p, P[:, -1])
