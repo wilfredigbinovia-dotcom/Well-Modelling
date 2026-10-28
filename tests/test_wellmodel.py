@@ -5498,6 +5498,63 @@ def test_flow_assurance_flags_t43():
     assert det["Hydrates formation flag"] == "No hydrates"
 
 
+def _t43_deviated_path(tvd_end):
+    """The T43 well with the user's deviated surveys: vertical to 2000 ft, then 30 deg (TVD 10,660 ft at 12,000 ft MD)
+    or 60 deg (TVD 7000 ft); equipment and U table unchanged."""
+    import dataclasses
+    from wellmodel import thermal as TH
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0018, "Tubing Outside Diameter (in)": 4.5},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.5},
+            {"Type": "Tubing", "Measured Depth (ft)": 11800, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0018, "Tubing Outside Diameter (in)": 4.5},
+            {"Type": "Casing", "Measured Depth (ft)": 12000, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0018}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    p = wvlp.build_flow_path(top, secs, pts, [0, 2000, 12000], [0, 2000, tvd_end], [0, 12000], [70, 300])
+    return dataclasses.replace(p, thermal={"model": "improved", "u_seg": TH.u_segments(
+        p, [0, 4000, 9312.5, 12000], [1.4, 1.4, 2.5, 1.2])})
+
+
+def test_pe5_stability_deviated_t43():
+    """PE5 stability flag in deviated wells: the user's T43 well re-run with 30 deg (D1) and 60 deg (D2) below 2000 ft,
+    WGR 10, at 1000 and 100 psig. PROSPER's film is less stable off vertical (the liquid drains to the low side), so
+    the gravity term is (rho_l - rho_g) g (cos dev + sin dev), not Barnea's g cos dev; flow with a no-slip liquid
+    fraction above 0.3 is stable. With PROSPER's own node properties, 124 of the 125 flagged nodes of 25 gradient
+    exports (T25, T27, T29, T31, T32, T40, T41, T43 vertical/30/60 deg, T48 at 32 deg) agree - the exception is T45's
+    near-stagnant bubbly water column (0.13 ft/s, liquid-continuous), which PROSPER calls unstable. Full model: the flag
+    agrees with all 8 of the user's deviated gradient runs (and 43 of 44 VLP-table rates; the miss is D1 at 100 psig,
+    11.53 MMscf/d, where that table - exported before the others - disagrees with the user's own gradient run at the same
+    rate). Bottom-hole pressure within 3 % at 1000 psig and within 5 % at 60 deg / 100 psig; 30 deg at 100 psig is
+    10-11 % low (gravity 19 % low - PE5-style's holdup in inclined pipe at low pressure)."""
+    from wellmodel import complementary as CX, system as SYS
+    nodes = pd.read_csv(Path(__file__).parent / "data" / "pe5_node_flags.csv")
+    for r in nodes.itertuples():
+        ratio = CX.pe5_stability_ratio(r.vsl, r.vsg, r.rl, r.rg, r.ml, r.mg, r.d / 12, np.cos(np.radians(r.ang)))
+        if r.src.startswith("T45"):
+            assert np.isnan(ratio)
+            continue
+        assert (ratio < 1) == (r.flag == "Unstable"), (r.src, r.run, r.md, ratio)
+    # the deviated casing nodes and the closest vertical one: the margins the gravity factor sits in
+    dev = nodes[nodes.src.str.startswith("T43") & (nodes.d > 6)]
+    assert len(dev) == 8 and set(dev.ang) == {30.0, 60.0}
+    for sv, tvd, whp, q, p_vlp, flag in (("D1", 10660, 1000, 11.533, 2056.26, "Unstable"),
+                                         ("D1", 10660, 1000, 16.589, 2449.60, "Stable"),
+                                         ("D2", 7000, 1000, 11.533, 1748.91, "Unstable"),
+                                         ("D2", 7000, 1000, 16.589, 2077.42, "Stable"),
+                                         ("D1", 10660, 100, 8.018, 1118.37, "Unstable"),
+                                         ("D1", 10660, 100, 11.533, 1526.25, "Stable"),
+                                         ("D2", 7000, 100, 8.018, 921.04, "Unstable"),
+                                         ("D2", 7000, 100, 11.533, 1263.87, "Stable")):
+        det, _, _ = SYS.solution_details(_t43_deviated_path(tvd), _t38_retro(), "gas",
+                                         {"whp": whp + 14.696, "u": 2.0, "wgr": 10.0, "sep_gor": 7431.94}, q,
+                                         "pe5_style")
+        assert det["PE5 stability flag"] == flag, (sv, whp, q, det.get("Min. PE5 stability ratio"))
+        err = abs((det["Bottom node pressure (psia)"] - 14.696) / p_vlp - 1)
+        assert err < (0.12 if (sv, whp) == ("D1", 100) else 0.05), (sv, whp, q, err)
+
+
 def test_hydrate_curve_salts_t43():
     """PROSPER Tutorial 43, the user's file: hydrate formation curves of the T37/T43 condensate with two brines
     (Water 1: NaCl 2.15, CaCl2 0.89, KBr 0.12 wt %; Water 2: 4.52 / 0.94 / 0.24) - van der Waals-Platteeuw with Munck
