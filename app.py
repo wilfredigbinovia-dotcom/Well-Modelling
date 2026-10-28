@@ -54,6 +54,7 @@ from wellmodel import cbm as wcbm
 from wellmodel import foam as wfoam
 from wellmodel import fracture as wfrac
 from wellmodel import mudacid as wacid
+from wellmodel import spot as wspot
 from wellmodel import multilateral as wmlat
 from wellmodel import mpump as wmpump
 from wellmodel import thermal as wth
@@ -2453,6 +2454,7 @@ OIL_ADV = ["Hydraulically Fractured Well", "Horizontal Well - No Flow Boundaries
            "Horizontal Well - Transverse Vertical Fractures", "Horizontal Well - friction dP",
            "Dual Porosity", "Multi-layer", "Multi-layer with dP loss in wellbore", "Multiphase Pseudo Pressure"]
 GAS_ADV = OIL_ADV + ["Modified Isochronal", "Multilateral Well"]
+OIL_ADV = OIL_ADV + ["SPOT"]
 STILL_NOT = {
     "oil": ["SkinAide (ELF proprietary method)",
             "Thermally Induced Fracture (water injectors - injection IPRs come with injector support)"],
@@ -2582,6 +2584,88 @@ def mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr):
     return wmpp.multiphase_pseudo_pressure("gas" if gas else "oil", pr, r["k"], r["h"], r["area"], r["ca"],
                                            r["rw"], skin, table, d_nd=d_nd, psat=psat,
                                            wor=0.0 if gas else wc / max(1 - wc, 1e-9), params=params, notes=notes)
+
+
+SPOT_RELPERM_COLS = ["Phase", "Residual saturation", "End point relative permeability", "Corey exponent"]
+
+
+def spot_ui(o, pr, t_f, wc):
+    """PROSPER's SPOT IPR (Shell Perforation Optimisation Tool, Tutorial 09): one layer split into 1 ft segments."""
+    model = blackoil_model(o)
+    if model is None or o.method == "eos":
+        raise ValueError("SPOT needs a black-oil PVT (PVT tab).")
+    d = wspot.SpotInputs()
+    st.caption("PROSPER's SPOT: the perforation penetration from the gun's API RP 19B data corrected for rock "
+               "strength and stress, then Karakas & Tariq perforation, McLeod crushed-zone and Cinco-Ley deviation "
+               "skins segment by segment (1 ft), combined into the layer skin; the water cut sets the water "
+               "saturation (relative permeabilities). Reservoir pressure, water cut and temperature are the ones "
+               "above. See spot.py for what was reconstructed and how closely.")
+    t1, t2, t3, t4 = st.tabs(["Options", "Layer", "Log data", "Completion"])
+    with t1:
+        c = st.columns(4)
+        wt = sel(c[0], "Well type", ["Deviated", "Vertical"], "spot_wt")
+        inflow = sel(c[1], "Inflow equation", ["Fetkovich", "Vogel"], "spot_inflow")
+        kcf = num(c[2], "Crushed zone permeability factor (fraction)", "spot_kcf", d.crush_factor, 0.001, 1.0, 0.05)
+        kct = num(c[3], "Crushed zone thickness (in)", "spot_kct", d.crush_thickness, 0.0, 10.0, 0.1)
+        st.caption("Lp correlation: Conventional. Non-Darcy skin: no. Activity: new well, single-run perforating, no "
+                   "invasion, no sanding model, cased and perforated - the options of PROSPER's Tutorial 09.")
+    with t2:
+        c = st.columns(4)
+        rw = num(c[0], "Well radius (ft)", "spot_rw", d.rw, 0.05, 5.0, 0.001, "%.3f")
+        re_ = num(c[1], "Drainage radius (ft)", "spot_re", d.re, 10.0, 1e6, 100.0)
+        eff = num(c[2], "Perforation efficiency (fraction)", "spot_eff", d.perf_eff, 0.01, 1.0, 0.05)
+        kvkh = num(c[3], "Kv/Kh", "spot_kvkh", d.kv_kh, 0.001, 10.0, 0.05)
+        c = st.columns(4)
+        top = num(c[0], "Top MD (ft)", "spot_top", d.top_md, 0.0, 4e4, 10.0)
+        bot = num(c[1], "Bottom MD (ft)", "spot_bot", d.bottom_md, 0.0, 4e4, 10.0)
+        ttop = num(c[2], "Top TVD (ft)", "spot_ttop", 9000.0, 0.0, 4e4, 10.0)
+        tbot = num(c[3], "Bottom TVD (ft)", "spot_tbot", 9100.0, 0.0, 4e4, 10.0)
+        c = st.columns(4)
+        ub = num(c[0], "Underbalance pressure (psi)", "spot_ub", d.underbalance, 0.0, 1e4, 50.0)
+        obg = num(c[1], "Overburden pressure gradient (psi/ft)", "spot_obg", d.ob_grad, 0.3, 2.0, 0.01)
+        gun = sel(c[2], "Perforating gun", list(wspot.GUNS), "spot_gun",
+                  help="Baker 2007 Predator XP LS (6 spf, 60 deg, wireline; API RP 19B Lp 19.2 in, EHD 0.23 in) - "
+                       "the gun of PROSPER's Tutorial 09; other guns are not available.")
+        key = "spot_relperm"
+        if key not in ss:
+            ss[key] = pd.DataFrame([["Oil", 0.15, 0.8, 1.5], ["Water", 0.2, 0.6, 1.5]], columns=SPOT_RELPERM_COLS)
+        st.caption("Relative permeability (Corey)")
+        rp = track(key, st.data_editor(ss[key], key=key + "_ed", num_rows="fixed", width="stretch",
+                                       disabled=["Phase"]))
+    with t3:
+        c = st.columns(4)
+        kh = num(c[0], "Horizontal permeability (md)", "spot_k", d.k, 1e-3, 1e5, 1.0)
+        phi = num(c[1], "Porosity (fraction)", "spot_phi", d.porosity, 0.01, 0.5, 0.01)
+        ucs = num(c[2], "Uniaxial compressive strength (psi)", "spot_ucs", d.ucs, 100.0, 30000.0, 500.0)
+        st.caption("A pseudo-log is generated at 1 ft (constant permeability, porosity and strength), as PROSPER's "
+                   "Generate with no log data available.")
+    with t4:
+        c = st.columns(4)
+        c[0].text_input("Completion", "Casing 6.7 in, 10 lb/ft, J55 (ID 6.41 in)", disabled=True)
+        st.caption("The completion and gun enter through the entry-hole size (PROSPER's 0.22427 in for this gun in "
+                   "this casing); other casings are not distinguished.")
+    try:
+        rpv = pd.DataFrame(rp)[SPOT_RELPERM_COLS[1:]].apply(pd.to_numeric, errors="coerce").to_numpy()
+        relperm = (float(rpv[0, 0]), float(rpv[1, 0]), float(rpv[0, 1]), float(rpv[1, 1]), float(rpv[0, 2]),
+                   float(rpv[1, 2]))
+    except (KeyError, IndexError, ValueError):
+        relperm = d.relperm
+    if bot <= top + 1:
+        raise ValueError("SPOT: the bottom MD must be below the top MD.")
+    fi = wspot.SpotInputs(top, bot, ((top, ttop), (bot, tbot)), wt == "Deviated", inflow, rw, re_, eff, pr, ub, obg,
+                          wc, kvkh, kh, phi, ucs, kcf, kct, wspot.GUNS[gun], relperm)
+    pwf_log = num(st.columns(4)[0], "Log results at FBHP (psia)", "spot_pwf_log", round(min(2764.7, pr * 0.7), 1),
+                  14.7, 3e4, 50.0)
+    curve = wspot.spot_ipr(pr, wc, fi, model, t_f, pwf_log)
+    ss["ipr_recipe"] = (wspot.spot_ipr, (pr, wc, fi, model, t_f), {})
+    with st.expander("SPOT layer and log results", expanded=False):
+        lay = curve.spot_layer
+        st.dataframe(pd.DataFrame({"Result": list(lay), "Value": list(lay.values())}), hide_index=True,
+                     width="stretch")
+        st.dataframe(curve.spot_log.style.format(precision=5), hide_index=True, width="stretch", height=320)
+        st.download_button("Download log results (CSV)", curve.spot_log.to_csv(index=False).encode(),
+                           "spot_log_results.csv")
+    return curve
 
 
 def mpp_plot(curve):
@@ -3556,6 +3640,8 @@ with tabs[2]:
                                                    tdays, omega, lam, pvt["mu"], skin, **oil_kw)
                 elif model == "Multiphase Pseudo Pressure":
                     curve = mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr)
+                elif model == "SPOT":
+                    curve = spot_ui(o, pr, t_f, wc)
                 elif model == "Multilateral Well":
                     curve = multilateral_ui(o, pr, t_f, wgr, cgr)
                 elif model == "Multi-layer with dP loss in wellbore":

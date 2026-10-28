@@ -5780,3 +5780,61 @@ def test_mud_acidization_t50():
     assert abs(10627.8 / (5214.696 - pwf) / 4.95562 - 1) < 2e-4
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T50_Stimulation_Mud_Acidization_Sandstone.wellmodel.json"))
     assert proj["inputs"]["sys_whp"] == 514.696 and proj["widgets"]["sys_vals_j"] == "5, 5.38858"
+
+
+def test_spot_ipr_t09():
+    """PROSPER Tutorial 09 (the user's file): SPOT IPR on the Logie well (110 ft MD layer, 50 md, Pr 4000 psig, water
+    cut 20 %, Baker Predator XP LS 6 spf / 60 deg) and 13 one-at-a-time runs. Per-segment perforation and crushed-zone
+    skins within 0.1 % (the bottom segment excepted), deviation skin and the pressure / density columns exact, layer
+    total skin within 0.02 (12 runs) / 0.03 (63 deg), layer oil AOF within 0.2 %, the IPR table within 0.4 % and the
+    system solution at 500 psig within 0.5 % (PE2, U 8)."""
+    from wellmodel import spot as SP, vlp as V, equipment as weq, system as wsys, inflow as winf
+    import json
+    G = 14.696
+    data = json.load(open(Path(__file__).parent / "data" / "t09_spot_runs.json"))
+    fl = _t05_oil()
+    mob = SP.blackoil_mobility(fl.m, 210.0)
+    pairs = {"Perforation Skin": "Perforation skin", "Crush Skin": "Crush skin", "Deviation Skin": "Deviation skin",
+             "Completion Density": "Completion fluid density (lb/gal)", "Underbalance King": "Underbalance King (psig)",
+             "Underbalance Berhmann": "Underbalance Behrmann (psig)", "Underbalance User": "Underbalance user (psig)",
+             "Near Wellbore eff vert stress": "Near-wellbore effective vertical stress (psig)"}
+    tol = {"Perforation Skin": 1e-3, "Crush Skin": 1e-3, "Deviation Skin": 2e-5, "Completion Density": 2e-4,
+           "Underbalance King": 5e-4, "Underbalance Berhmann": 5e-4, "Underbalance User": 1e-5,
+           "Near Wellbore eff vert stress": 1e-4}
+    for r in data["runs"]:
+        kw = dict(r["inputs"])
+        if "survey" in kw:
+            kw["survey"] = tuple(map(tuple, kw["survey"]))
+        res = SP.Spot(SP.SpotInputs(**kw), mob).results()
+        lg, lay = res["log"], res["layer"]
+        for pk, mk in pairs.items():
+            for i, ref in zip((0, 55, 109), r["segments_0_55_109"][pk]):
+                v = float(lg[mk].iloc[i])
+                assert (abs(v - ref) < 1e-6 if ref == 0 else abs(v / ref - 1) < tol[pk]), (r["run"], pk, i, v, ref)
+        assert abs(lay["Total skin"] - r["layer"]["S"]) < (0.03 if r["run"] == "63 deg" else 0.02), (r["run"], lay["Total skin"])
+        assert abs(lay["Oil AOF (STB/d)"] / r["layer"]["AOF"] - 1) < 0.002, (r["run"], lay["Oil AOF (STB/d)"])
+        assert abs(lay["Completion fluid density (lb/gal)"] / r["layer"]["dens"] - 1) < 2e-4
+    # base IPR table (liquid against FBHP)
+    sp = SP.Spot(SP.SpotInputs(), mob)
+    qo = sp.results()["oil_rate"]
+    ref = data["base_ipr"]
+    for q, p in zip(ref["liquid"][1:], ref["pwf_psig"][1:]):
+        assert abs(float(qo(p + G)) / 0.8 / q - 1) < 0.004, (p, q)
+    # system calculation at 500 psig (Tutorial 05 equipment, PE2, U 8)
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 600},
+            {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 4.052,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "SSSV", "Tubing Inside Diameter (in)": 3.72},
+            {"Type": "Tubing", "Measured Depth (ft)": 9000, "Tubing Inside Diameter (in)": 4.052,
+             "Tubing Inside Roughness (in)": 0.0006},
+            {"Type": "Casing", "Measured Depth (ft)": 9275, "Casing Inside Diameter (in)": 6.4,
+             "Casing Inside Roughness (in)": 0.0006}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    smd, stvd = np.array(LOGIE_SURVEY).T
+    path = V.build_flow_path(top, secs, pts, smd, stvd, [0, 600, 9275], [60, 40, 210])
+    curve = SP.spot_ipr(4000 + G, 0.2, SP.SpotInputs(), fl.m, 210.0)
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "oil", {"whp": 500 + G, "u": 8.0, "wc": 20.0, "gor": 800.0}, [{}],
+                              lambda ch: curve, "pe2_style")
+    assert abs(res[0].q / data["system"]["liquid"] - 1) < 0.005 and abs(res[0].pwf - G - 2274.1) < 25
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T09_SPOT_IPR.wellmodel.json"))
+    assert proj["inputs"]["ipr_model_oil"] == "SPOT" and proj["inputs"]["ipr_wc"] == 20.0
