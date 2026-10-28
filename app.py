@@ -2642,6 +2642,9 @@ def spot_ui(o, pr, t_f, wc):
     with t4:
         c = st.columns(4)
         c[0].text_input("Completion", "Casing 6.7 in, 10 lb/ft, J55 (ID 6.41 in)", disabled=True)
+        holdup = num(c[1], "Holdup depth (ft MD)", "spot_holdup", d.bottom_md, 0.0, 4e4, 10.0,
+                     help="The deepest point the gun can be run to. Above the layer bottom the rest of the layer is not "
+                          "perforated (partial penetration); the segment at the holdup depth has a smaller entry hole.")
         st.caption("The completion and gun enter through the entry-hole size (PROSPER's 0.22427 in for this gun in "
                    "this casing); other casings are not distinguished.")
     try:
@@ -2653,7 +2656,7 @@ def spot_ui(o, pr, t_f, wc):
     if bot <= top + 1:
         raise ValueError("SPOT: the bottom MD must be below the top MD.")
     fi = wspot.SpotInputs(top, bot, ((top, ttop), (bot, tbot)), wt == "Deviated", inflow, rw, re_, eff, pr, ub, obg,
-                          wc, kvkh, kh, phi, ucs, kcf, kct, wspot.GUNS[gun], relperm)
+                          wc, kvkh, kh, phi, ucs, kcf, kct, wspot.GUNS[gun], relperm, holdup)
     pwf_log = num(st.columns(4)[0], "Log results at FBHP (psia)", "spot_pwf_log", round(min(2764.7, pr * 0.7), 1),
                   14.7, 3e4, 50.0)
     curve = wspot.spot_ipr(pr, wc, fi, model, t_f, pwf_log)

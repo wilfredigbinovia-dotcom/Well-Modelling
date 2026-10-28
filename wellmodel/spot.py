@@ -23,19 +23,24 @@ Per segment (exact on all runs unless stated):
                          Behrmann 46235 phi k^-0.3636 psi below Pr (from the 50 / 200 md and porosity 0.18 / 0.25 runs), user
                          Pr - underbalance. Porosity changes nothing else in PROSPER's SPOT results.
 Layer:
-  total skin = cos^0.965 (cos^2 + sin^2 kv/kh)^0.4946 (1.002 Sperf + 0.9866 Scrush) + Sdev  (layer means;
-               fitted - within 0.015 on 11 runs, totals 0.7 to 15),
-  WIQI = A / (A + S), A = ln(re / rw) - 0.75.
+  total skin = cos (cos^2 + sin^2 kv/kh)^0.478 (n / n_perf)^0.65 (0.996 Sperf + 0.989 Scrush) + 0.997 Sdev + Spart
+               (layer means over the perforated segments; fitted - within 0.025 on 19 runs, totals -0.3 to 15),
+  WIQI = (A' + Sdev + Spart) / (A' + S), A' = ln(re / rw) - 0.75 + 0.1405 (fitted, within 0.9 %).
+  Gun held up above the layer bottom (one run, holdup 9380 ft): segments below it unperforated; partial-penetration
+  skin Papatzacos on the segment-count thickness (0.3051 against 0.30603); the slant + penetration sum from
+  Cinco-Ley, Ramey & Miller; the segment at the holdup depth has a 0.9434 x smaller entry hole (every run).
   Water cut entered: the water saturation that gives it (Corey relative permeabilities, mobilities at Pr) sets
   kro and krw (exact), ko = k kro.
   IPR: oil q = 0.00708 ko h / (A + S) [ int(Pwf..Pr) dp / (mu_o B_o) above Pb; below it Fetkovich
   (Pb^2 - Pwf^2) / (2 Pb) / (mu_o B_o)_Pb or Vogel ], liquid = oil / (1 - water cut); h the layer's TVD thickness.
-  PROSPER's layer table: oil AOF on n / (n - 1) of that thickness (the segment count) - within 0.02 % (Vogel 0.12 %);
-  PI = the oil rate at half the layer pressure (gauge) over that drawdown (all 15 runs to PROSPER's 2 decimals);
+  PROSPER's layer table: oil AOF on n / (n - 1) of that thickness (the segment count; on the thickness itself with
+  the gun held up) - within 0.2 % (1 % held up); PI = the oil rate at half the layer pressure (gauge) over that
+  drawdown (within 0.007 of PROSPER's 2-decimal values on 20 runs);
   Min Lp = max(0, 1.30082 Lp - 4.41478) (within PROSPER's 2 decimals).
 
-Not identified: WIQI with Kv/Kh 1 or high deviation (it equals A / (A + S) at Kv/Kh 0.1 below 25 deg), the bottom
-segment's smaller entry hole, the thick-wall-cylinder columns (from the log; not used), the IPR temperature column.
+Not identified: PROSPER's split of the slant and penetration skins with the gun held up (Sdev -0.116 against -0.144
+here; the total skin is within 0.025), the thick-wall-cylinder columns (from the log; not used), the IPR
+temperature column.
 """
 from __future__ import annotations
 
@@ -49,7 +54,10 @@ from . import completion as wcomp
 LP_C, LP_U0, LP_S0, LP_ALPHA, LP_NORM_REF = 1.85055313, 32357.0, 26989.6, 1.0256, 20.1883
 MINLP = (1.30082, -4.41478)                 # PROSPER's Min Lp = max(0, 1.30082 Lp - 4.41478)
 EHD_FACTOR = 0.22427 / 0.23
-AGG = (1.002, 0.9866, 0.965, 0.9891)         # layer total skin: perf, crush, cos exponent, anisotropy exponent
+AGG = (0.9958, 0.98885, 0.99737, 0.99676, 0.4783)   # total skin: perf, crush, Sdev factors; cos and (cos2+sin2 kv/kh) exps
+PP_MECH = 0.6503                    # mechanical skin x (segments / perforated segments)^0.6503 (holdup above the bottom)
+HOLDUP_EHD = 0.21157 / 0.22427      # the segment at the holdup depth: smaller entry hole
+WIQI_DA = 0.1405                    # WIQI = (A' + Sdev + Spart) / (A' + S), A' = A + 0.1405
 KING = (3099.6, 0.36997)
 BEHRMANN = (46234.67, 0.36362)      # dP = C phi k^-b
 G = 14.696
@@ -92,6 +100,7 @@ class SpotInputs:
     crush_thickness: float = 1.2     # in
     gun: SpotGun = field(default_factory=SpotGun)
     relperm: tuple = (0.15, 0.2, 0.8, 0.6, 1.5, 1.5)   # Sor, Swr, kro end, krw end, n oil, n water
+    holdup_md: float | None = None   # deepest point the gun reaches (None: the layer bottom)
 
 
 def corey(sw, rp):
@@ -124,6 +133,10 @@ class Spot:
             self.cos = 1.0
         self.h_tvd = (f.bottom_md - f.top_md) * self.cos
         self.A = np.log(f.re / f.rw) - 0.75
+        self.holdup = f.bottom_md if f.holdup_md is None else float(f.holdup_md)
+        self.perf = self.md <= self.holdup + 1e-9
+        self.n_perf = int(self.perf.sum())
+        self._geo = None
 
     def log(self):
         f, gun = self.f, self.f.gun
@@ -131,12 +144,16 @@ class Spot:
         sv = f.ob_grad * self.tvd
         lp = penetration(gun, f.ucs, sv, p_g)
         ehd = np.full_like(lp, gun.ehd * EHD_FACTOR)
+        if self.holdup <= self.f.bottom_md + 1e-9:
+            ehd[np.abs(self.md - self.holdup) < 0.5] *= HOLDUP_EHD
         rp_in = ehd / 2
         n_eff = gun.spf * f.perf_eff / self.cos
         sp = np.array([wcomp.kt_perforation_skin(f.rw, L / 12, r / 12, n_eff, int(gun.phasing), f.kv_kh)["perforation"]
                        for L, r in zip(lp, rp_in)])
         sc = (1 / f.crush_factor - 1) * np.log((rp_in + f.crush_thickness) / rp_in) / (n_eff * lp / 12)
         sdev = self.deviation_skin()
+        off = ~self.perf
+        lp, ehd, sp, sc = (np.where(off, 0.0, x) for x in (lp, ehd, sp, sc))
         dk = KING[0] * f.k ** -KING[1]
         db = BEHRMANN[0] * f.porosity * f.k ** -BEHRMANN[1]
         import pandas as pd
@@ -148,25 +165,45 @@ class Spot:
             "Underbalance King (psig)": p_g - dk, "Underbalance user (psig)": p_g - f.underbalance - G,
             "Completion fluid density (lb/gal)": (p_g - f.underbalance) / (0.0519481 * self.tvd),
             "Perforation skin": sp, "Damage skin": 0.0, "Damage, perf, crush skin": sp + sc, "Crush skin": sc,
-            "Deviation skin": sdev,
+            "Deviation skin": np.where(off, 0.0, sdev), "Partial penetration skin": np.where(off, 0.0, self.partial_skin()),
             "Near-wellbore effective vertical stress (psig)": sv - (p_g - f.underbalance) - G})
 
-    def deviation_skin(self):
+    def _geometry(self):
+        """(deviation skin, partial-penetration skin). Fully perforated: Cinco-Ley's deviation correlation on the
+        segment-count thickness. Gun held up above the bottom: Papatzacos partial penetration (perforated top
+        interval) and the slanted partially-penetrating well of Cinco-Ley, Ramey & Miller for the sum
+        (PROSPER's split, one run: Spart 0.30508 against 0.30603, Sdev -0.144 against -0.116)."""
+        if self._geo is not None:
+            return self._geo
         f = self.f
-        if not f.deviated or self.cos >= 1 - 1e-9:
-            return 0.0
-        th = np.degrees(np.arccos(self.cos))
+        dev = f.deviated and self.cos < 1 - 1e-9
+        th = np.degrees(np.arccos(self.cos)) if dev else 0.0
         h = len(self.md) * self.cos
-        return wcomp.deviation_skin(min(th, 75.0), h, f.rw, f.kv_kh, True)
+        if self.n_perf >= len(self.md):
+            sd = wcomp.deviation_skin(min(th, 75.0), h, f.rw, f.kv_kh, True) if dev else 0.0
+            self._geo = (sd, 0.0)
+        else:
+            hp = max(self.holdup - f.top_md, 1.0) * self.cos
+            spp = wcomp.partial_penetration_skin(h, hp, 0.0, f.rw, f.kv_kh)
+            tot = wcomp.cinco_slant_pp(min(th, 75.0), h, hp, 0.0, f.rw, f.kv_kh)["total"] if dev else spp
+            self._geo = (tot - spp, spp)
+        return self._geo
+
+    def deviation_skin(self):
+        return self._geometry()[0]
+
+    def partial_skin(self):
+        return self._geometry()[1]
+
+    def _factor(self):
+        c, kv = self.cos, self.f.kv_kh
+        return c ** AGG[3] * (c * c + (1 - c * c) * kv) ** AGG[4] * (len(self.md) / max(self.n_perf, 1)) ** PP_MECH
 
     def total_skin(self, lg=None):
-        f = self.f
         lg = self.log() if lg is None else lg
-        c = self.cos
-        s2 = 1 - c * c
-        F = c ** AGG[2] * np.sqrt(c * c + s2 * f.kv_kh) ** AGG[3]
-        return float(F * (AGG[0] * lg["Perforation skin"].mean() + AGG[1] * lg["Crush skin"].mean())
-                     + self.deviation_skin())
+        m = self.perf
+        return float(self._factor() * (AGG[0] * lg["Perforation skin"][m].mean() + AGG[1] * lg["Crush skin"][m].mean())
+                     + AGG[2] * self.deviation_skin() + self.partial_skin())
 
     def saturation(self):
         f = self.f
@@ -219,25 +256,27 @@ class Spot:
         sw, kro, krw = self.saturation()
         qo = self.oil_rate_fn(s)
         n = len(self.md)
-        aof_layer = float(qo(0.0)) * n / max(n - 1, 1)
+        fac = n / max(n - 1, 1) if self.n_perf >= n else 1.0     # PROSPER's layer table (see the docstring)
+        aof_layer = float(qo(0.0)) * fac
         p_half = (f.pr - G) / 2                     # PROSPER's layer PI: oil rate at half the layer pressure (gauge)
         pi_half = float(qo(p_half + G)) / p_half
         layer = {"Top MD (ft)": f.top_md, "Bottom MD (ft)": f.bottom_md,
                  "Completion fluid density (lb/gal)": (f.pr - G - f.underbalance) /
-                 (0.0519481 * float(np.mean([self.tvd[0], self.tvd[-1]]))),
+                 (0.0519481 * float(np.mean([self.tvd[0], self.tvd[self.perf][-1]]))),
                  "PI (STB/d/psi)": pi_half, "Net PI (STB/d/psi)": pi_half,
-                 "Total skin": s, "Deviation skin": self.deviation_skin(), "Partial penetration skin": 0.0,
-                 "WIQI": self.A / (self.A + s), "Oil AOF (STB/d)": aof_layer,
+                 "Total skin": s, "Deviation skin": self.deviation_skin(),
+                 "Partial penetration skin": self.partial_skin(),
+                 "WIQI": (self.A + WIQI_DA + self.deviation_skin() + self.partial_skin()) / (self.A + WIQI_DA + s),
+                 "Oil AOF (STB/d)": aof_layer,
                  "Water saturation": sw, "kro": kro, "krw": krw, "ko (md)": f.k * kro, "kw (md)": f.k * krw,
-                 "Mean penetration Lp (in)": float(lg["Penetration Lp (in)"].mean()),
+                 "Mean penetration Lp (in)": float(lg["Penetration Lp (in)"][self.perf].mean()),
                  "TVD thickness (ft)": self.h_tvd}
         if pwf_log is not None:
             # each segment's share of the layer rate at this FBHP
-            c = self.cos
-            F = c ** AGG[2] * np.sqrt(c * c + (1 - c * c) * f.kv_kh) ** AGG[3]
-            w = 1 / (self.A + F * (AGG[0] * lg["Perforation skin"] + AGG[1] * lg["Crush skin"])
-                     + self.deviation_skin())
-            q_tot = float(qo(pwf_log)) * n / max(n - 1, 1)
+            w = np.where(self.perf, 1 / (self.A + self._factor() * (AGG[0] * lg["Perforation skin"]
+                                                                     + AGG[1] * lg["Crush skin"])
+                                         + AGG[2] * self.deviation_skin() + self.partial_skin()), 0.0)
+            q_tot = float(qo(pwf_log)) * fac
             lg["Qo at FBHP (STB/d)"] = q_tot * w / w.sum()
             lg["Qw at FBHP (STB/d)"] = lg["Qo at FBHP (STB/d)"] * f.wc / max(1 - f.wc, 1e-12)
             lg["Qo AOF (STB/d)"] = aof_layer * w / w.sum()
