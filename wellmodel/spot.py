@@ -23,12 +23,16 @@ Per segment (exact on all runs unless stated):
                          Behrmann 46235 phi k^-0.3636 psi below Pr (from the 50 / 200 md and porosity 0.18 / 0.25 runs), user
                          Pr - underbalance. Porosity changes nothing else in PROSPER's SPOT results.
 Layer:
-  total skin = cos (cos^2 + sin^2 kv/kh)^0.478 (n / n_perf)^0.65 (0.996 Sperf + 0.989 Scrush) + 0.997 Sdev + Spart
-               (layer means over the perforated segments; fitted - within 0.025 on 19 runs, totals -0.3 to 15),
-  WIQI = (A' + Sdev + Spart) / (A' + S), A' = ln(re / rw) - 0.75 + 0.1405 (fitted, within 0.9 %).
-  Gun held up above the layer bottom (one run, holdup 9380 ft): segments below it unperforated; partial-penetration
-  skin Papatzacos on the segment-count thickness (0.3051 against 0.30603); the slant + penetration sum from
-  Cinco-Ley, Ramey & Miller; the segment at the holdup depth has a 0.9434 x smaller entry hole (every run).
+  total skin = cos (cos^2 + sin^2 kv/kh)^0.478 (0.996 Sperf + 0.989 Scrush) + 0.997 Sdev + Spart
+               (layer means over the perforated segments; fitted - within 0.025 on the 14 fully perforated runs),
+  WIQI = (A' + Sdev + Spart) / (A' + S), A' = ln(re / rw) - 0.75 + 0.1405 (fitted, within 0.9 %; 1.8 % held up).
+  Gun held up above the layer bottom (holdup depth; 6 runs, 25-81 of 111 ft perforated, 0-63 deg, Kv/Kh 0.1 and 1):
+  segments below it unperforated; the slanted, partially-penetrating well of Cinco-Ley, Ramey & Miller on the
+  perforated segments gives the penetration skin (the same interval vertical) and the deviation skin (the rest) -
+  their sum within 0.04 of PROSPER's on the half-perforated runs, though PROSPER splits it differently (its
+  penetration skin 0.03 higher, 0.13 on the 95 % perforated run); the mechanical skin x n / n_perf x
+  (0.987 - 0.040 (1 - cos)) (fitted). Total skin within 0.08, oil AOF within 0.4 %. The segment at the holdup depth
+  has a 0.9434 x smaller entry hole (every run).
   Water cut entered: the water saturation that gives it (Corey relative permeabilities, mobilities at Pr) sets
   kro and krw (exact), ko = k kro.
   IPR: oil q = 0.00708 ko h / (A + S) [ int(Pwf..Pr) dp / (mu_o B_o) above Pb; below it Fetkovich
@@ -38,9 +42,9 @@ Layer:
   drawdown (within 0.007 of PROSPER's 2-decimal values on 20 runs);
   Min Lp = max(0, 1.30082 Lp - 4.41478) (within PROSPER's 2 decimals).
 
-Not identified: PROSPER's split of the slant and penetration skins with the gun held up (Sdev -0.116 against -0.144
-here; the total skin is within 0.025), the thick-wall-cylinder columns (from the log; not used), the IPR
-temperature column.
+Not identified: PROSPER's exact split of the slant and penetration skins with the gun held up (above), the
+thick-wall-cylinder columns (from the log; not used), the IPR temperature column (a function of the flowing pressure
+and slightly of the water cut only - not of the layer temperature, pressure or rate - not used by any calculation).
 """
 from __future__ import annotations
 
@@ -55,7 +59,7 @@ LP_C, LP_U0, LP_S0, LP_ALPHA, LP_NORM_REF = 1.85055313, 32357.0, 26989.6, 1.0256
 MINLP = (1.30082, -4.41478)                 # PROSPER's Min Lp = max(0, 1.30082 Lp - 4.41478)
 EHD_FACTOR = 0.22427 / 0.23
 AGG = (0.9958, 0.98885, 0.99737, 0.99676, 0.4783)   # total skin: perf, crush, Sdev factors; cos and (cos2+sin2 kv/kh) exps
-PP_MECH = 0.6503                    # mechanical skin x (segments / perforated segments)^0.6503 (holdup above the bottom)
+PP_MECH = (0.987, 0.040)            # held up: mechanical skin x n / n_perf x (0.987 - 0.040 (1 - cos))
 HOLDUP_EHD = 0.21157 / 0.22427      # the segment at the holdup depth: smaller entry hole
 WIQI_DA = 0.1405                    # WIQI = (A' + Sdev + Spart) / (A' + S), A' = A + 0.1405
 KING = (3099.6, 0.36997)
@@ -170,9 +174,8 @@ class Spot:
 
     def _geometry(self):
         """(deviation skin, partial-penetration skin). Fully perforated: Cinco-Ley's deviation correlation on the
-        segment-count thickness. Gun held up above the bottom: Papatzacos partial penetration (perforated top
-        interval) and the slanted partially-penetrating well of Cinco-Ley, Ramey & Miller for the sum
-        (PROSPER's split, one run: Spart 0.30508 against 0.30603, Sdev -0.144 against -0.116)."""
+        segment-count thickness. Gun held up above the bottom: the slanted, partially-penetrating well of Cinco-Ley,
+        Ramey & Miller on the perforated segments (penetration = the same interval vertical, deviation = the rest)."""
         if self._geo is not None:
             return self._geo
         f = self.f
@@ -183,10 +186,8 @@ class Spot:
             sd = wcomp.deviation_skin(min(th, 75.0), h, f.rw, f.kv_kh, True) if dev else 0.0
             self._geo = (sd, 0.0)
         else:
-            hp = max(self.holdup - f.top_md, 1.0) * self.cos
-            spp = wcomp.partial_penetration_skin(h, hp, 0.0, f.rw, f.kv_kh)
-            tot = wcomp.cinco_slant_pp(min(th, 75.0), h, hp, 0.0, f.rw, f.kv_kh)["total"] if dev else spp
-            self._geo = (tot - spp, spp)
+            r = wcomp.cinco_slant_pp(min(th, 75.0), h, max(self.n_perf, 1) * self.cos, 0.0, f.rw, f.kv_kh)
+            self._geo = (r["slant"], r["penetration"])
         return self._geo
 
     def deviation_skin(self):
@@ -197,7 +198,10 @@ class Spot:
 
     def _factor(self):
         c, kv = self.cos, self.f.kv_kh
-        return c ** AGG[3] * (c * c + (1 - c * c) * kv) ** AGG[4] * (len(self.md) / max(self.n_perf, 1)) ** PP_MECH
+        fac = c ** AGG[3] * (c * c + (1 - c * c) * kv) ** AGG[4]
+        if self.n_perf < len(self.md):            # gun held up: mechanical skin on the perforated fraction
+            fac *= len(self.md) / max(self.n_perf, 1) * (PP_MECH[0] - PP_MECH[1] * (1 - c))
+        return fac
 
     def total_skin(self, lg=None):
         lg = self.log() if lg is None else lg

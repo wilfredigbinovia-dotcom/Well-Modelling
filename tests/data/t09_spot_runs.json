@@ -1290,6 +1290,348 @@
 0.0
 ]
 }
+},
+{
+"run": "H3",
+"inputs": {
+"holdup_md": 9330.0
+},
+"layer": {
+"dens": 8.319,
+"S": 25.9353,
+"Sdev": -0.18643,
+"Spart": 5.29287,
+"AOF": 2330.0,
+"WIQI": 0.39664,
+"PI": 0.86619
+},
+"segments_0_55_109": {
+"Perforation Skin": [
+2.67344,
+2.75479,
+0.0
+],
+"Crush Skin": [
+10.1298,
+10.4137,
+0.0
+],
+"Deviation Skin": [
+-0.18643,
+-0.18643,
+0.0
+],
+"Completion Density": [
+8.342,
+8.296,
+8.251
+],
+"Underbalance King": [
+3271.0,
+3271.0,
+3271.0
+],
+"Underbalance Berhmann": [
+1993.4,
+1993.4,
+1993.4
+],
+"Underbalance User": [
+3885.3,
+3885.3,
+3885.3
+],
+"Near Wellbore eff vert stress": [
+5085.3,
+5135.3,
+5184.4
+],
+"Min Lp": [
+1.33,
+1.29,
+0.0
+]
+}
+},
+{
+"run": "H4",
+"inputs": {
+"holdup_md": 9330.0,
+"survey": [
+[
+9275.0,
+9000.0
+],
+[
+9385.0,
+9110.0
+]
+],
+"deviated": false
+},
+"layer": {
+"dens": 8.316,
+"S": 32.904,
+"Sdev": 0.0,
+"Spart": 5.39103,
+"AOF": 2133.0,
+"WIQI": 0.3354,
+"PI": 0.79295
+},
+"segments_0_55_109": {
+"Perforation Skin": [
+3.00274,
+3.09216,
+0.0
+],
+"Crush Skin": [
+11.1428,
+11.4622,
+0.0
+],
+"Deviation Skin": [
+0.0,
+0.0,
+0.0
+],
+"Completion Density": [
+8.342,
+8.291,
+8.242
+],
+"Underbalance King": [
+3271.0,
+3271.0,
+3271.0
+],
+"Underbalance Berhmann": [
+1993.4,
+1993.4,
+1993.4
+],
+"Underbalance User": [
+3885.3,
+3885.3,
+3885.3
+],
+"Near Wellbore eff vert stress": [
+5085.3,
+5140.3,
+5194.3
+],
+"Min Lp": [
+1.33,
+1.29,
+0.0
+]
+}
+},
+{
+"run": "H5",
+"inputs": {
+"holdup_md": 9330.0,
+"kv_kh": 1.0
+},
+"layer": {
+"dens": 8.319,
+"S": 22.4591,
+"Sdev": -0.7602,
+"Spart": 4.10719,
+"AOF": 2590.5,
+"WIQI": 0.38267,
+"PI": 0.96304
+},
+"segments_0_55_109": {
+"Perforation Skin": [
+0.69132,
+0.73133,
+0.0
+],
+"Crush Skin": [
+10.1298,
+10.4137,
+0.0
+],
+"Deviation Skin": [
+-0.7602,
+-0.7602,
+0.0
+],
+"Completion Density": [
+8.342,
+8.296,
+8.251
+],
+"Underbalance King": [
+3271.0,
+3271.0,
+3271.0
+],
+"Underbalance Berhmann": [
+1993.4,
+1993.4,
+1993.4
+],
+"Underbalance User": [
+3885.3,
+3885.3,
+3885.3
+],
+"Near Wellbore eff vert stress": [
+5085.3,
+5135.3,
+5184.4
+],
+"Min Lp": [
+1.33,
+1.29,
+0.0
+]
+}
+},
+{
+"run": "H6",
+"inputs": {
+"holdup_md": 9330.0,
+"survey": [
+[
+9275.0,
+9000.0
+],
+[
+9385.0,
+9050.0
+]
+]
+},
+"layer": {
+"dens": 8.33,
+"S": 6.12395,
+"Sdev": -1.33684,
+"Spart": 4.57902,
+"AOF": 2729.2,
+"WIQI": 0.80627,
+"PI": 1.01
+},
+"segments_0_55_109": {
+"Perforation Skin": [
+0.97408,
+1.01727,
+0.0
+],
+"Crush Skin": [
+5.06489,
+5.19087,
+0.0
+],
+"Deviation Skin": [
+-1.33684,
+-1.33684,
+0.0
+],
+"Completion Density": [
+8.342,
+8.319,
+8.296
+],
+"Underbalance King": [
+3271.0,
+3271.0,
+3271.0
+],
+"Underbalance Berhmann": [
+1993.4,
+1993.4,
+1993.4
+],
+"Underbalance User": [
+3885.3,
+3885.3,
+3885.3
+],
+"Near Wellbore eff vert stress": [
+5085.3,
+5110.3,
+5134.8
+],
+"Min Lp": [
+1.33,
+1.31,
+0.0
+]
+}
+},
+{
+"run": "H7",
+"inputs": {
+"holdup_md": 9355.0,
+"survey": [
+[
+9275.0,
+9000.0
+],
+[
+9385.0,
+9050.0
+]
+]
+},
+"layer": {
+"dens": 8.325,
+"S": 2.67974,
+"Sdev": -1.01611,
+"Spart": 1.71231,
+"AOF": 3560.3,
+"WIQI": 0.82527,
+"PI": 1.32
+},
+"segments_0_55_109": {
+"Perforation Skin": [
+0.97408,
+0.97911,
+0.0
+],
+"Crush Skin": [
+5.06489,
+5.08053,
+0.0
+],
+"Deviation Skin": [
+-1.01611,
+-1.01611,
+0.0
+],
+"Completion Density": [
+8.342,
+8.319,
+8.296
+],
+"Underbalance King": [
+3271.0,
+3271.0,
+3271.0
+],
+"Underbalance Berhmann": [
+1993.4,
+1993.4,
+1993.4
+],
+"Underbalance User": [
+3885.3,
+3885.3,
+3885.3
+],
+"Near Wellbore eff vert stress": [
+5085.3,
+5110.3,
+5134.8
+],
+"Min Lp": [
+1.33,
+1.31,
+0.0
+]
+}
 }
 ],
 "base_ipr": {
