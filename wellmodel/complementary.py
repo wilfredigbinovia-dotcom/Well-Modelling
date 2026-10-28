@@ -131,14 +131,16 @@ def turner_velocity(sig_dyncm, rho_l, rho_g, c=2.04):
 # 1000 psig (unstable to 10.5 MMscf/d, stable from 12) and at 100 psig except 10.66 MMscf/d (ratio 1.13, PROSPER
 # unstable); with PROSPER's own node properties every PE5 node flag of the T41, T43 and T47 gradient exports is
 # reproduced (casing nodes 0.03-0.16 unstable, tubing nodes 1.2-1.9 stable, T41 Run 2A casing 1.04 stable).
-# Deviated wells (the user's T43 well re-run with 30 and 60 deg below 2000 ft): PROSPER's film is LESS stable off
-# vertical, not more as Barnea's axial-gravity term g cos(dev) would have it (the liquid drains to the low side). With
-# PROSPER's own node properties the 30 deg casing nodes need a gravity factor of 1.16-1.44 x vertical and the 60 deg
-# ones 1.30-1.69 x; cos(dev) + sin(dev) (1.37 at both) fits every node, also T48's 32 deg casing (unstable) and T25's
-# 9-12 deg tubing (stable). Flow with a no-slip liquid fraction above 0.3 is reported stable (PROSPER: stable from
-# 0.41 in T25/T27, unstable at 0.22 in T47); horizontal / downward flow stable (not tested against PROSPER).
+# Deviated wells (the user's T43 well re-run at 30, 60 and 85 deg below 2000 ft): off vertical PROSPER's film is first
+# LESS stable than Barnea's axial gravity g cos(dev) gives (the liquid drains to the low side), then more stable again
+# near horizontal. With PROSPER's own node properties the gravity factor must be 1.16-1.44 x vertical at 30 deg and
+# 1.30-1.69 x at 60 deg; its 85 deg VLP table (unstable to 3.9 MMscf/d, stable from 5.6, set by the 85 deg casing)
+# needs 0.21-0.40. cos(dev) (1 + 2.4 sin^2(dev)) - axial gravity times a low-side drainage term - gives 1.39 / 1.40 /
+# 0.30 and 0 at horizontal (c = 2.13-2.65 fit the 30 / 60 deg windows). Flow with a no-slip liquid fraction above 0.3
+# is reported stable (PROSPER stable from 0.41 in T25/T27, unstable at 0.22 in T47); horizontal / downward stable.
 PE5_FILM_K = 55.0
 PE5_LIQ_CUT = 0.3
+PE5_DRAIN = 2.4
 _FILM_H = np.geomspace(1e-5, 0.6, 2000)
 _CP_LBFTS = 6.7197e-4
 
@@ -159,7 +161,7 @@ def pe5_stability_ratio(vsl, vsg, rho_l, rho_g, mu_l, mu_g, d_ft, sin_t=1.0):
         return np.inf
     sin_t = min(sin_t, 1.0)
     dl, dg = _dpdz_superficial(rho_l, vsl, mu_l, d_ft), _dpdz_superficial(rho_g, vsg, mu_g, d_ft)
-    x2, y = dl / dg, (rho_l - rho_g) * (sin_t + np.sqrt(1.0 - sin_t * sin_t)) / dg
+    x2, y = dl / dg, (rho_l - rho_g) * sin_t * (1.0 + PE5_DRAIN * (1.0 - sin_t * sin_t)) / dg
     h = _FILM_H
     rhs = (1 + PE5_FILM_K * h) / ((1 - h) ** 2.5 * h) - x2 / h ** 3
     return float(rhs.max() / y)

@@ -9,6 +9,18 @@ T41_Improved_Approximation,Run_2A,125.0,0.0,3.99,1.034,7.559,42.353,10.941,0.389
 T41_Improved_Approximation,Run_2A,1125.0,0.0,3.99,1.012,7.515,41.861,11.2,0.3498,0.0206,Slug (Normal),Stable
 T41_Improved_Approximation,Run_2A,8625.0,0.0,3.99,0.673,7.363,38.453,13.668,0.1919,0.0252,Slug (Normal),Stable
 T41_Improved_Approximation,Run_2A,11900.0,0.0,6.4,0.145,2.841,37.183,15.426,0.1622,0.0284,Slug (Normal),Stable
+T43_Flow_Assurance,5,125.0,0.0,3.99,1.136,28.405,47.978,3.891,0.6448,0.0138,Slug (Normal),Stable
+T43_Flow_Assurance,5,1125.0,0.0,3.99,1.104,26.176,47.853,4.252,0.6297,0.0142,Slug (Normal),Stable
+T43_Flow_Assurance,5,2125.0,85.0,3.99,1.08,24.513,47.723,4.566,0.6145,0.0145,Slug (Normal),Stable
+T43_Flow_Assurance,5,4125.0,85.0,3.99,1.048,23.858,47.711,4.733,0.6117,0.0148,Slug (Normal),Stable
+T43_Flow_Assurance,5,8625.0,85.0,3.99,0.972,23.051,47.563,5.012,0.5896,0.0154,Slug (Normal),Stable
+T43_Flow_Assurance,5,9437.5,85.0,3.99,0.965,22.818,47.504,5.073,0.5827,0.0155,Slug (Normal),Stable
+T43_Flow_Assurance,5,11900.0,85.0,6.4,0.373,8.519,47.314,5.295,0.5623,0.0157,Slug (Normal),Stable
+T43_Flow_Assurance,3,125.0,0.0,3.99,0.649,12.048,46.92,4.108,0.5512,0.0133,Slug (Normal),Stable
+T43_Flow_Assurance,3,1125.0,0.0,3.99,0.623,11.599,46.977,4.343,0.5526,0.0136,Slug (Normal),Stable
+T43_Flow_Assurance,3,2125.0,30.0,3.99,0.6,11.177,47.034,4.578,0.5549,0.0139,Slug (Normal),Stable
+T43_Flow_Assurance,3,8625.0,30.0,3.99,0.486,9.491,46.99,5.808,0.5356,0.0159,Slug (Normal),Stable
+T43_Flow_Assurance,3,11900.0,30.0,6.4,0.181,3.296,46.369,6.59,0.4766,0.0168,Slug (Normal),Unstable
 T40_Enthalpy_Balance,Run_6,125.0,0.0,3.99,3.464,29.692,41.944,10.152,0.3164,0.0197,Slug (Normal),Stable
 T40_Enthalpy_Balance,Run_6,1125.0,0.0,3.99,3.38,27.934,41.235,11.003,0.2902,0.0208,Slug (Normal),Stable
 T40_Enthalpy_Balance,Run_6,8625.0,0.0,3.99,1.103,23.511,36.552,17.286,0.1616,0.0317,Annular,Stable
@@ -17,6 +29,16 @@ T43_Flow_Assurance,1000_psig_D2 S,1125.0,0.0,3.99,1.607,35.126,47.606,4.529,0.60
 T43_Flow_Assurance,1000_psig_D2 S,2125.0,60.0,3.99,1.572,31.71,47.356,5.041,0.5776,0.0148,Slug (Normal),Stable
 T43_Flow_Assurance,1000_psig_D2 S,8625.0,60.0,3.99,1.421,24.506,46.345,6.724,0.4775,0.0168,Slug (Normal),Stable
 T43_Flow_Assurance,1000_psig_D2 S,11900.0,60.0,6.4,0.537,8.569,45.72,7.555,0.4263,0.0177,Slug (Normal),Stable
+T43_Flow_Assurance,2C,125.0,0.0,3.99,1.558,220.66,52.115,0.792,1.4577,0.0116,Annular,Stable
+T43_Flow_Assurance,2C,1125.0,0.0,3.99,1.631,70.741,49.423,2.299,0.8396,0.0127,Slug (Normal),Stable
+T43_Flow_Assurance,2C,2125.0,30.0,3.99,1.61,51.57,48.68,3.129,0.7305,0.0133,Slug (Normal),Stable
+T43_Flow_Assurance,2C,8625.0,30.0,3.99,1.436,26.392,46.698,6.225,0.5085,0.0163,Slug (Normal),Stable
+T43_Flow_Assurance,2C,11900.0,30.0,6.4,0.538,8.599,45.739,7.527,0.4277,0.0177,Slug (Normal),Stable
+T43_Flow_Assurance,2D,125.0,0.0,3.99,2.314,243.596,51.406,1.006,1.2525,0.0117,Annular,Stable
+T43_Flow_Assurance,2D,1125.0,0.0,3.99,2.381,71.731,48.464,3.2,0.7034,0.0133,Slug (Normal),Stable
+T43_Flow_Assurance,2D,2125.0,30.0,3.99,2.328,52.463,47.691,4.356,0.6131,0.0142,Slug (Normal),Stable
+T43_Flow_Assurance,2D,8625.0,30.0,3.99,2.037,27.51,45.189,8.624,0.3941,0.0187,Slug (Normal),Stable
+T43_Flow_Assurance,2D,11900.0,30.0,6.4,0.735,9.116,43.926,10.416,0.3147,0.0211,Slug (Normal),Stable
 T31_Modelling_Surface_Multiphase_Pumps,Gradient_Traverse_Production_String,-3025.0,0.0,4.0,5.328,3.471,60.352,2.136,0.8999,0.0122,Intermittent,Stable
 T31_Modelling_Surface_Multiphase_Pumps,Gradient_Traverse_Production_String,-2775.0,63.26,4.0,5.335,3.092,60.304,2.36,0.8734,0.0124,Intermittent,Stable
 T31_Modelling_Surface_Multiphase_Pumps,Gradient_Traverse_Production_String,-2275.0,90.0,4.0,5.344,2.776,60.222,2.586,0.832,0.0126,Intermittent,Stable
@@ -50,6 +72,11 @@ T25_Coiled_Tubing_GasLift_Design,Gradient_Run_1_Production_String,8574.0,17.75,4
 T25_Coiled_Tubing_GasLift_Design,Gradient_Run_1_Production_String,9125.0,17.75,6.4,2.195,0.18,57.739,8.114,0.3539,0.0182,Bubble,Stable
 T41_Improved_Approximation,Run_2B,125.0,0.0,3.99,5.995,50.38,42.258,10.04,0.3393,0.0194,Slug (Normal),Stable
 T41_Improved_Approximation,Run_2B,1125.0,0.0,3.99,5.739,44.493,40.902,11.785,0.2903,0.0217,Slug (Normal),Stable
+T43_Flow_Assurance,4B,125.0,0.0,3.99,4.961,107.468,47.548,4.35,0.5998,0.014,Slug (Normal),Stable
+T43_Flow_Assurance,4B,1125.0,0.0,3.99,4.706,65.28,46.096,7.217,0.4706,0.0166,Slug (Normal),Stable
+T43_Flow_Assurance,4B,2125.0,60.0,3.99,4.509,52.791,45.167,9.061,0.4025,0.0188,Slug (Normal),Stable
+T43_Flow_Assurance,4B,8625.0,60.0,3.99,3.181,36.198,41.613,14.858,0.2098,0.028,Slug (Normal),Stable
+T43_Flow_Assurance,4B,11900.0,60.0,6.4,0.519,13.252,43.034,17.883,0.1492,0.0339,Annular,Stable
 T48_Foam_Lift,Run_2A,125.0,0.0,2.83,0.578,31.488,31.567,1.459,71.1185,0.013,Slug,Stable
 T48_Foam_Lift,Run_2A,1125.0,0.0,2.83,0.579,24.597,31.567,1.868,51.0114,0.0134,Slug,Stable
 T48_Foam_Lift,Run_2A,1625.0,16.26,2.83,0.579,23.747,31.567,1.936,47.3275,0.0135,Slug,Stable
@@ -71,6 +98,11 @@ T48_Foam_Lift,Run_2B,4125.0,33.07,2.83,0.568,20.006,57.8,2.25,36.1076,0.0139,Slu
 T48_Foam_Lift,Run_2B,4625.0,32.86,2.83,0.568,19.397,57.8,2.321,34.6694,0.014,Slug,Stable
 T48_Foam_Lift,Run_2B,5125.0,31.79,6.0,0.227,7.537,57.8,2.389,33.4982,0.0141,Slug,Unstable
 T45_CBM_Dewatering_Well,Gradient_Traverse_Production_String,2550.0,0.0,6.1,0.128,0.006,66.454,1.657,0.9063,0.0123,Bubble,Unstable
+T43_Flow_Assurance,4A,125.0,0.0,3.99,3.392,79.823,47.802,4.106,0.6256,0.0139,Slug (Normal),Stable
+T43_Flow_Assurance,4A,1125.0,0.0,3.99,3.284,56.232,46.834,5.838,0.53,0.0154,Slug (Normal),Stable
+T43_Flow_Assurance,4A,2125.0,60.0,3.99,3.193,46.657,46.191,7.088,0.475,0.0166,Slug (Normal),Stable
+T43_Flow_Assurance,4A,8625.0,60.0,3.99,2.762,31.896,43.755,10.949,0.3089,0.0217,Slug (Normal),Stable
+T43_Flow_Assurance,4A,11900.0,60.0,6.4,0.961,11.118,42.579,12.691,0.2491,0.0244,Slug (Normal),Stable
 T29_PCP_Design,Run_R1,125.0,0.0,2.45,0.927,0.227,64.219,0.896,17.2635,0.0122,Slug,Stable
 T29_PCP_Design,Run_R1,1725.0,0.0,2.45,0.931,0.156,63.94,1.251,14.1431,0.0126,Slug,Stable
 T29_PCP_Design,Run_R1,1875.0,0.0,6.4,0.22,0.031,63.921,1.447,13.8672,0.0127,Bubble,Stable
@@ -93,6 +125,11 @@ T32_Designing_A_Jet_Pump,Jet_Pump_Gradient_Traverse,7825.0,17.75,6.4,1.243,0.089
 T41_Improved_Approximation,Run_1,125.0,0.0,3.99,3.311,27.162,42.053,10.348,0.3331,0.0198,Slug (Normal),Stable
 T41_Improved_Approximation,Run_1,1125.0,0.0,3.99,3.231,25.805,41.365,11.109,0.3035,0.0208,Slug (Normal),Stable
 T41_Improved_Approximation,Run_1,8625.0,0.0,3.99,1.292,22.138,36.804,16.837,0.1666,0.0307,Annular,Stable
+T43_Flow_Assurance,2B,125.0,0.0,3.99,0.541,116.78,52.721,0.516,1.6755,0.0111,Annular,Stable
+T43_Flow_Assurance,2B,1125.0,0.0,3.99,0.539,63.126,51.629,0.914,1.3139,0.0116,Annular,Stable
+T43_Flow_Assurance,2B,2125.0,30.0,3.99,0.526,47.286,51.188,1.206,1.194,0.012,Slug (Normal),Stable
+T43_Flow_Assurance,2B,8625.0,30.0,3.99,0.444,24.776,50.326,2.326,0.9976,0.0137,Slug (Normal),Stable
+T43_Flow_Assurance,2B,11900.0,30.0,6.4,0.17,7.944,49.674,2.822,0.875,0.0142,Slug (Normal),Unstable
 T29_PCP_Design,T29_PCP_Design_Gradient_Traverse,125.0,0.0,3.2,0.875,0.213,64.286,0.902,17.8976,0.0122,Slug,Stable
 T29_PCP_Design,T29_PCP_Design_Gradient_Traverse,1725.0,0.0,6.4,0.22,0.02,63.905,2.009,13.4534,0.013,Bubble,Stable
 T29_PCP_Design,T29_PCP_Design_Gradient_Traverse,1875.0,0.0,6.4,0.22,0.018,63.884,2.22,13.1274,0.0131,Bubble,Stable
@@ -124,3 +161,8 @@ T43_Flow_Assurance,100_psig_D1 St,1125.0,0.0,3.99,1.116,69.445,50.311,1.659,0.99
 T43_Flow_Assurance,100_psig_D1 St,2125.0,30.0,3.99,1.106,50.707,49.625,2.25,0.872,0.0128,Slug (Normal),Stable
 T43_Flow_Assurance,100_psig_D1 St,8625.0,30.0,3.99,0.984,25.772,48.016,4.475,0.6416,0.0149,Slug (Normal),Stable
 T43_Flow_Assurance,100_psig_D1 St,11900.0,30.0,6.4,0.374,8.311,47.216,5.423,0.5527,0.0158,Slug (Normal),Stable
+T43_Flow_Assurance,2A,125.0,0.0,3.99,0.394,85.139,52.522,0.487,1.6102,0.011,Annular,Stable
+T43_Flow_Assurance,2A,1125.0,0.0,3.99,0.383,55.442,51.941,0.732,1.4093,0.0114,Annular,Stable
+T43_Flow_Assurance,2A,2125.0,30.0,3.99,0.369,43.268,51.697,0.93,1.3315,0.0117,Slug (Normal),Stable
+T43_Flow_Assurance,2A,8625.0,30.0,3.99,0.296,23.65,51.265,1.717,1.209,0.0134,Slug (Normal),Stable
+T43_Flow_Assurance,2A,11900.0,30.0,6.4,0.113,7.593,50.65,2.077,1.0637,0.0138,Slug (Normal),Unstable

@@ -5499,8 +5499,8 @@ def test_flow_assurance_flags_t43():
 
 
 def _t43_deviated_path(tvd_end):
-    """The T43 well with the user's deviated surveys: vertical to 2000 ft, then 30 deg (TVD 10,660 ft at 12,000 ft MD)
-    or 60 deg (TVD 7000 ft); equipment and U table unchanged."""
+    """The T43 well with the user's deviated surveys: vertical to 2000 ft, then 30 deg (TVD 10,660 ft at 12,000 ft MD),
+    60 deg (TVD 7000 ft) or 85 deg (TVD 2872 ft); equipment and U table unchanged."""
     import dataclasses
     from wellmodel import thermal as TH
     rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
@@ -5517,18 +5517,49 @@ def _t43_deviated_path(tvd_end):
         p, [0, 4000, 9312.5, 12000], [1.4, 1.4, 2.5, 1.2])})
 
 
+def test_pe5_style_deviated_t43():
+    """PE5-style against the user's 16 deviated T43 gradients (30 / 60 / 85 deg below 2000 ft, 100 and 1000 psig,
+    1.3-49 MMscf/d) at PROSPER's own node properties. PROSPER's PE5 friction gradient steps down where the well turns
+    off vertical (x 0.83-0.88 at 30 deg, 0.62-0.67 at 60, 0.59 at 85): friction x (1 - 0.447 sin^2 dev). At 100 psig
+    (gas 0.5-1 lb/ft3) PROSPER's holdup is 5-8 x the no-slip one: the 3 x cap rises below 2.2 lb/ft3 of gas (static
+    gradient only - the friction keeps the capped holdup). Pressure drop integrated down each traverse within 6.1 %
+    (mean 2.3 %; before: up to 39 % - 60 / 85 deg friction 25-40 % high, 100 psig holdup 30-60 % low)."""
+    from wellmodel import correlations as C
+    D = pd.read_csv(Path(__file__).parent / "data" / "t43_deviated_nodes.csv")
+    errs = []
+    for run, g in D.groupby("run"):
+        a = [g[c].to_numpy() for c in ("vsl", "vsg", "rl", "rg", "ml", "mg", "sig")]
+        e, f, hl = C.pe5_style(*a, g.d.to_numpy() / 12, 0.0018 / 12, np.cos(np.radians(g.ang.to_numpy())),
+                               g.p.to_numpy() + 14.696)
+        L = g.L.to_numpy()
+        err = np.sum((e + f) * L) / np.sum((g.sg + g.fg).to_numpy() * L) - 1
+        errs.append(err)
+        assert abs(err) < 0.062, (run, err)
+        # the friction step at the bend (last vertical node before 2000 ft, first deviated node after it)
+        md = g.md.to_numpy()
+        i, j = np.where((md > 1800) & (md < 1900))[0], np.where((md > 2100) & (md < 2200))[0]
+        if len(i) and len(j) and g.fg.to_numpy()[i[0]] > 0.02:
+            step_p = g.fg.to_numpy()[j[0]] / g.fg.to_numpy()[i[0]]
+            tol = 0.08 if g.ang.max() > 80 else 0.06              # 85 deg: 0.55 against PROSPER's 0.59
+            assert abs(f[j[0]] / f[i[0]] / step_p - 1) < tol, (run, step_p, f[j[0]] / f[i[0]])
+    assert np.mean(np.abs(errs)) < 0.03
+
+
 def test_pe5_stability_deviated_t43():
-    """PE5 stability flag in deviated wells: the user's T43 well re-run with 30 deg (D1) and 60 deg (D2) below 2000 ft,
-    WGR 10, at 1000 and 100 psig. PROSPER's film is less stable off vertical (the liquid drains to the low side), so
-    the gravity term is (rho_l - rho_g) g (cos dev + sin dev), not Barnea's g cos dev; flow with a no-slip liquid
-    fraction above 0.3 is stable. With PROSPER's own node properties, 124 of the 125 flagged nodes of 25 gradient
-    exports (T25, T27, T29, T31, T32, T40, T41, T43 vertical/30/60 deg, T48 at 32 deg) agree - the exception is T45's
-    near-stagnant bubbly water column (0.13 ft/s, liquid-continuous), which PROSPER calls unstable. Full model: the flag
-    agrees with all 8 of the user's deviated gradient runs (and 43 of 44 VLP-table rates; the miss is D1 at 100 psig,
-    11.53 MMscf/d, where that table - exported before the others - disagrees with the user's own gradient run at the same
-    rate). Bottom-hole pressure within 3 % at 1000 psig and within 5 % at 60 deg / 100 psig; 30 deg at 100 psig is
-    10-11 % low (gravity 19 % low - PE5-style's holdup in inclined pipe at low pressure)."""
-    from wellmodel import complementary as CX, system as SYS
+    """PE5 stability flag in deviated wells: the user's T43 well re-run with 30 / 60 / 85 deg below 2000 ft, WGR 10,
+    at 1000 and 100 psig. Off vertical PROSPER's film is first less stable than Barnea's axial gravity g cos(dev) makes
+    it (the liquid drains to the low side), then more stable near horizontal: gravity term (rho_l - rho_g) g cos(dev)
+    (1 + 2.4 sin^2 dev) - 1.39 / 1.40 / 0.30 x vertical at 30 / 60 / 85 deg (PROSPER's nodes need 1.16-1.44,
+    1.30-1.69 and, from its 85 deg VLP table, 0.21-0.40). Flow with a no-slip liquid fraction above 0.3 is stable.
+    With PROSPER's own node properties 166 of the 167 flagged nodes of 33 gradient exports (T25, T27, T29, T31, T32,
+    T40, T41, T43 at 0 / 30 / 60 / 85 deg, T48 at 32 deg) agree - the exception is T45's near-stagnant bubbly water
+    column (0.13 ft/s, liquid-continuous), which PROSPER calls unstable. Full model: every flag of the five deviated
+    VLP tables (55 rates; the D1 100 psig table as re-exported) with the black-oil condensate, 54 of 55 with the T37
+    equation of state (D1 100 psig 11.5 MMscf/d: ratio 0.97). The user's T43 file runs the EoS fluid (PROSPER's EoS
+    traverse carries 3-9 % more mass than the wellstream at 1000 psig and 5-22 % at 100 psig, as in Tutorial 38 - ours
+    conserves mass): with it the bottom-hole pressure is within 4.4 % at 1000 psig (2.7-49 MMscf/d, all three angles)
+    and 3-9 % low at 100 psig."""
+    from wellmodel import complementary as CX, system as SYS, eos as E
     nodes = pd.read_csv(Path(__file__).parent / "data" / "pe5_node_flags.csv")
     for r in nodes.itertuples():
         ratio = CX.pe5_stability_ratio(r.vsl, r.vsg, r.rl, r.rg, r.ml, r.mg, r.d / 12, np.cos(np.radians(r.ang)))
@@ -5536,23 +5567,36 @@ def test_pe5_stability_deviated_t43():
             assert np.isnan(ratio)
             continue
         assert (ratio < 1) == (r.flag == "Unstable"), (r.src, r.run, r.md, ratio)
-    # the deviated casing nodes and the closest vertical one: the margins the gravity factor sits in
-    dev = nodes[nodes.src.str.startswith("T43") & (nodes.d > 6)]
-    assert len(dev) == 8 and set(dev.ang) == {30.0, 60.0}
-    for sv, tvd, whp, q, p_vlp, flag in (("D1", 10660, 1000, 11.533, 2056.26, "Unstable"),
-                                         ("D1", 10660, 1000, 16.589, 2449.60, "Stable"),
-                                         ("D2", 7000, 1000, 11.533, 1748.91, "Unstable"),
-                                         ("D2", 7000, 1000, 16.589, 2077.42, "Stable"),
-                                         ("D1", 10660, 100, 8.018, 1118.37, "Unstable"),
-                                         ("D1", 10660, 100, 11.533, 1526.25, "Stable"),
-                                         ("D2", 7000, 100, 8.018, 921.04, "Unstable"),
-                                         ("D2", 7000, 100, 11.533, 1263.87, "Stable")):
-        det, _, _ = SYS.solution_details(_t43_deviated_path(tvd), _t38_retro(), "gas",
-                                         {"whp": whp + 14.696, "u": 2.0, "wgr": 10.0, "sep_gor": 7431.94}, q,
-                                         "pe5_style")
+    dev = nodes[nodes.src.str.startswith("T43") & (nodes.d > 6) & (nodes.ang > 0)]
+    assert set(dev.ang) == {30.0, 60.0, 85.0} and (dev.flag == "Unstable").sum() == 7
+    tvd = {"D1": 10660, "D2": 7000, "D3": 2872}
+    bo = {"wgr": 10.0, "sep_gor": 7431.94}
+    for sv, whp, q, flag in (("D1", 1000, 11.533, "Unstable"), ("D1", 1000, 16.589, "Stable"),
+                             ("D2", 1000, 11.533, "Unstable"), ("D2", 1000, 16.589, "Stable"),
+                             ("D1", 100, 8.018, "Unstable"), ("D1", 100, 11.533, "Stable"),
+                             ("D2", 100, 8.018, "Unstable"), ("D2", 100, 11.533, "Stable"),
+                             ("D3", 1000, 3.875, "Unstable"), ("D3", 1000, 5.574, "Stable")):
+        det, _, _ = SYS.solution_details(_t43_deviated_path(tvd[sv]), _t38_retro(), "gas",
+                                         {"whp": whp + 14.696, "u": 2.0, **bo}, q, "pe5_style")
         assert det["PE5 stability flag"] == flag, (sv, whp, q, det.get("Min. PE5 stability ratio"))
-        err = abs((det["Bottom node pressure (psia)"] - 14.696) / p_vlp - 1)
-        assert err < (0.12 if (sv, whp) == ("D1", 100) else 0.05), (sv, whp, q, err)
+    root = __file__.replace("tests/test_wellmodel.py", "examples/")
+    f = E.EOSFluid(E.parse_prp(open(root + "T37_Retrograde_Condensate_EoS.prp").read()))
+    sep = f.separator_train()
+    fe = wvlp.EOSTableFluid("gas", wvlp.eos_grid(f, 7000, 60, 300), float(f.z @ f.mw),
+                            float(sep["stages"]["Gas (scf per lbmol feed)"].sum()), float(sep["stb_per_lbmol"]),
+                            float(sep["oil_density"]), wbo.PVTInputs(rsb=1, api=40, gas_sg=0.7, salinity_ppm=20000))
+    for sv, whp, q, p_pros in (("D1", 1000, 5.574, 1835.07), ("D1", 1000, 16.589, 2449.60),
+                               ("D2", 1000, 11.533, 1748.91), ("D2", 1000, 34.321, 3346.74),
+                               ("D2", 1000, 49.367, 4435.72), ("D3", 1000, 11.533, 1486.81),
+                               ("D1", 100, 3.875, 606.31), ("D1", 100, 23.861, 2801.23),
+                               ("D2", 100, 11.533, 1263.87)):
+        det, _, _ = SYS.solution_details(_t43_deviated_path(tvd[sv]), fe, "gas", {"whp": whp + 14.696, "u": 2.0,
+                                                                                 "wgr": 10.0}, q, "pe5_style")
+        err = (det["Bottom node pressure (psia)"] - 14.696) / p_pros - 1
+        if whp == 1000:
+            assert abs(err) < 0.045, (sv, q, err)
+        else:
+            assert -0.10 < err < 0, (sv, q, err)
 
 
 def test_hydrate_curve_salts_t43():

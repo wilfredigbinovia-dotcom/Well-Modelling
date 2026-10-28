@@ -764,6 +764,10 @@ PE5_LOW_VM_DRIFT = (0.65, 10.0, 20.0)  # drift at least 0.65 ft/s below vm = 10 
 PE5_LOW_VM_RHO = 6.0          # lb/ft3 - the low-velocity drift scales down with the gas density below this (T47 lifted
 #                                low rates at 350 psig and T43 at 100 psig need much less)
 PE5_DRIFT_CAP = 3.0            # drift-flux holdup at most 3 x the no-slip holdup (dry gas tends to no slip)
+PE5_CAP_RHO = (2.218, 0.626)   # ... x max(1, (2.218 / rho_g)^0.626) at low gas density: PROSPER's T43 gradients at 100 psig
+#                                (rho_g 0.5-1 lb/ft3, 50-200 ft/s) carry 5-8 x the no-slip holdup (the 3 x cap was 30-60 % low)
+PE5_INCL_FRICTION = 0.447      # slug friction x (1 - 0.447 sin^2(deviation)): PROSPER's PE5 friction gradient steps down where
+#                                the T43 well turns off vertical - x 0.89 at 30 deg, 0.665 at 60 deg (0.60 at 85 deg; this gives 0.555)
 PE5_FRICTION = (-2.28432, 0.29878, 0.10340, -0.72371, 0.32939)  # slug friction / Moody =
 #   exp(a + b HL + c ln vm + d ln mu_g + e ln(rho_g / rho_l))
 #   both fitted on PROSPER PE5 gradients: Tutorial 38 (384 nodes, condensate, 2-9 % liquid, 19-115 ft/s, 560-4020 psig) and
@@ -781,9 +785,10 @@ def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     would give mist (Tutorial 38): holdup the larger of a constant 0.32 ft/s slip (low velocity, Abura 2S) and a
     drift flux vsg/(1-HL) = (1.0421 - 0.3058 lambda) vm + 1.710 lambda^0.6326 ft/s (the drift grows with the liquid
     fraction; at least 0.65 ft/s below 10 ft/s mixture velocity, fading out by 20 ft/s - Tutorials 41 / 43; capped at
-    3 x the no-slip holdup); static gradient from the in-situ density; friction =
+    3 x the no-slip holdup, more below 2.2 lb/ft3 of gas - Tutorial 43 at 100 psig); static gradient from the in-situ density; friction =
     exp(-2.284 + 0.299 HL + 0.1034 ln vm - 0.724 ln mu_g + 0.329 ln(rho_g/rho_l)) x the Moody friction of the slug
-    mixture (in-situ density, mixture velocity, liquid viscosity). Fitted on PROSPER's PE5 gradients of Tutorial 38
+    mixture (in-situ density, mixture velocity, liquid viscosity), x (1 - 0.447 sin^2 deviation) off vertical (Tutorial 43
+    at 30 / 60 / 85 deg). Fitted on PROSPER's PE5 gradients of Tutorial 38
     (condensate, 2-9 % liquid, 19-115 ft/s, BO and EoS, 8 traverses) and Tutorial 47 (water-rich, 3-38 % liquid,
     5-53 ft/s, 5 traverses), 624 nodes: holdup within 2.1 % (T38) / 5.2 % (T47) at every node, pressure drop per
     traverse within 3.8 % (T47 within 2.2 %); Abura 2S holdup within 0.6 %, total gradient within 2 %."""
@@ -799,15 +804,22 @@ def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     vd = np.maximum(c_d * lam ** n_d, v0 * np.clip((vhi - vm) / (vhi - vlo), 0.0, 1.0)
                     * np.clip(rho_g / PE5_LOW_VM_RHO, 0.0, 1.0))
     fade = np.clip((vhi - vm) / (vhi - vlo), 0.0, 1.0)
-    cap = np.where(fade > 0, 1.0, PE5_DRIFT_CAP * lam)          # the no-slip cap only at high mixture velocity
-    hl_df = np.minimum(1 - vsg / np.maximum((a0 + a1 * lam) * vm + vd, 1e-9), cap)
+    k_cap = PE5_DRIFT_CAP * np.maximum(1.0, (PE5_CAP_RHO[0] / np.maximum(rho_g, 1e-3)) ** PE5_CAP_RHO[1])
+    cap = np.where(fade > 0, 1.0, k_cap * lam)                  # the no-slip cap only at high mixture velocity
+    hl_free = 1 - vsg / np.maximum((a0 + a1 * lam) * vm + vd, 1e-9)
+    hl_df = np.minimum(hl_free, cap)
     hl_s = np.clip(np.maximum(hl_slip, hl_df), lam, 1.0)
     rho_s = rho_l * hl_s + rho_g * (1 - hl_s)
-    f_m = friction_factor(rho_s * vm * d / (mu_l * CP_TO_LBFTS), rough / d)
+    # friction on the 3 x no-slip capped holdup, as fitted (T38 / T47): the extra low-density holdup is static only -
+    # with it in the friction density the T43 100 psig friction came out 30-70 % high
+    hl_f = np.clip(np.maximum(hl_slip, np.minimum(hl_free, np.where(fade > 0, 1.0, PE5_DRIFT_CAP * lam))), lam, 1.0)
+    rho_f = rho_l * hl_f + rho_g * (1 - hl_f)
+    f_m = friction_factor(rho_f * vm * d / (mu_l * CP_TO_LBFTS), rough / d)
     a_, b_, c_, d_, e_ = PE5_FRICTION
-    mult = np.exp(a_ + b_ * hl_s + c_ * np.log(np.maximum(vm, 1e-6)) + d_ * np.log(np.maximum(mu_g, 1e-4))
+    mult = np.exp(a_ + b_ * hl_f + c_ * np.log(np.maximum(vm, 1e-6)) + d_ * np.log(np.maximum(mu_g, 1e-4))
                   + e_ * np.log(np.maximum(rho_g, 1e-3) / np.maximum(rho_l, 1e-3)))
-    f_s = mult * f_m * rho_s * vm * vm / (2 * G * d) / 144.0
+    s2 = 1.0 - np.minimum(np.asarray(sin_t, float) ** 2, 1.0)    # sin^2 of the deviation from vertical
+    f_s = (1.0 - PE5_INCL_FRICTION * s2) * mult * f_m * rho_f * vm * vm / (2 * G * d) / 144.0
     e_s = rho_s * sin_t / 144.0
     e = np.where(bubble, e_hb, e_s)
     f = np.where(bubble, f_hb, f_s)
