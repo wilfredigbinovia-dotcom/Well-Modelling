@@ -30,10 +30,12 @@ Layer:
   kro and krw (exact), ko = k kro.
   IPR: oil q = 0.00708 ko h / (A + S) [ int(Pwf..Pr) dp / (mu_o B_o) above Pb; below it Fetkovich
   (Pb^2 - Pwf^2) / (2 Pb) / (mu_o B_o)_Pb or Vogel ], liquid = oil / (1 - water cut); h the layer's TVD thickness.
-  PROSPER's layer table: oil AOF on n / (n - 1) of that thickness (the segment count) - within 0.02 % (Vogel 0.12 %).
+  PROSPER's layer table: oil AOF on n / (n - 1) of that thickness (the segment count) - within 0.02 % (Vogel 0.12 %);
+  PI = the oil rate at half the layer pressure (gauge) over that drawdown (all 15 runs to PROSPER's 2 decimals);
+  Min Lp = max(0, 1.30082 Lp - 4.41478) (within PROSPER's 2 decimals).
 
-Not identified: PROSPER's layer "PI" column (2 decimals; not the Darcy oil PI), the Min Lp column, the thick-wall-
-cylinder columns (from the log; not used), the IPR temperature column.
+Not identified: WIQI with Kv/Kh 1 or high deviation (it equals A / (A + S) at Kv/Kh 0.1 below 25 deg), the bottom
+segment's smaller entry hole, the thick-wall-cylinder columns (from the log; not used), the IPR temperature column.
 """
 from __future__ import annotations
 
@@ -45,6 +47,7 @@ from scipy.optimize import brentq
 from . import completion as wcomp
 
 LP_C, LP_U0, LP_S0, LP_ALPHA, LP_NORM_REF = 1.85055313, 32357.0, 26989.6, 1.0256, 20.1883
+MINLP = (1.30082, -4.41478)                 # PROSPER's Min Lp = max(0, 1.30082 Lp - 4.41478)
 EHD_FACTOR = 0.22427 / 0.23
 AGG = (1.002, 0.9866, 0.965, 0.9891)         # layer total skin: perf, crush, cos exponent, anisotropy exponent
 KING = (3099.6, 0.36997)
@@ -139,7 +142,8 @@ class Spot:
         import pandas as pd
         return pd.DataFrame({
             "Measured depth (ft)": self.md, "True vertical depth (ft)": self.tvd,
-            "Penetration Lp (in)": lp, "Entry hole diameter (in)": ehd,
+            "Penetration Lp (in)": lp, "Min Lp (in)": np.maximum(MINLP[0] * lp + MINLP[1], 0.0),
+            "Entry hole diameter (in)": ehd,
             "Reservoir pressure (psig)": p_g, "Underbalance Behrmann (psig)": p_g - db,
             "Underbalance King (psig)": p_g - dk, "Underbalance user (psig)": p_g - f.underbalance - G,
             "Completion fluid density (lb/gal)": (p_g - f.underbalance) / (0.0519481 * self.tvd),
@@ -216,9 +220,12 @@ class Spot:
         qo = self.oil_rate_fn(s)
         n = len(self.md)
         aof_layer = float(qo(0.0)) * n / max(n - 1, 1)
+        p_half = (f.pr - G) / 2                     # PROSPER's layer PI: oil rate at half the layer pressure (gauge)
+        pi_half = float(qo(p_half + G)) / p_half
         layer = {"Top MD (ft)": f.top_md, "Bottom MD (ft)": f.bottom_md,
                  "Completion fluid density (lb/gal)": (f.pr - G - f.underbalance) /
                  (0.0519481 * float(np.mean([self.tvd[0], self.tvd[-1]]))),
+                 "PI (STB/d/psi)": pi_half, "Net PI (STB/d/psi)": pi_half,
                  "Total skin": s, "Deviation skin": self.deviation_skin(), "Partial penetration skin": 0.0,
                  "WIQI": self.A / (self.A + s), "Oil AOF (STB/d)": aof_layer,
                  "Water saturation": sw, "kro": kro, "krw": krw, "ko (md)": f.k * kro, "kw (md)": f.k * krw,

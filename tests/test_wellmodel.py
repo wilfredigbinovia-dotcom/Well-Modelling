@@ -5814,6 +5814,9 @@ def test_spot_ipr_t09():
         assert abs(lay["Total skin"] - r["layer"]["S"]) < (0.03 if r["run"] == "63 deg" else 0.02), (r["run"], lay["Total skin"])
         assert abs(lay["Oil AOF (STB/d)"] / r["layer"]["AOF"] - 1) < 0.002, (r["run"], lay["Oil AOF (STB/d)"])
         assert abs(lay["Completion fluid density (lb/gal)"] / r["layer"]["dens"] - 1) < 2e-4
+        assert abs(lay["PI (STB/d/psi)"] - r["layer"]["PI"]) < 0.0065, (r["run"], lay["PI (STB/d/psi)"])
+        for i, ref in zip((0, 55, 109), r["segments_0_55_109"]["Min Lp"]):
+            assert abs(float(lg["Min Lp (in)"].iloc[i]) - ref) < 0.01, (r["run"], i, ref)
     # base IPR table (liquid against FBHP)
     sp = SP.Spot(SP.SpotInputs(), mob)
     qo = sp.results()["oil_rate"]
