@@ -20,7 +20,8 @@ Per segment (exact on all runs unless stated):
   deviation skin       = Cinco-Ley (anisotropic) with h = number of segments x cos(deviation) (100.9 ft here).
   completion fluid density = (Pr - underbalance) / (0.051948 TVD) lb/gal; near-wellbore effective vertical stress
                          = sigma_v - (Pr - underbalance) - 14.7; underbalance pressures: King 3099.6 k^-0.370 and
-                         Behrmann 8322.3 k^-0.3636 psi below Pr (from the 50 and 200 md runs), user Pr - underbalance.
+                         Behrmann 46235 phi k^-0.3636 psi below Pr (from the 50 / 200 md and porosity 0.18 / 0.25 runs), user
+                         Pr - underbalance. Porosity changes nothing else in PROSPER's SPOT results.
 Layer:
   total skin = cos^0.965 (cos^2 + sin^2 kv/kh)^0.4946 (1.002 Sperf + 0.9866 Scrush) + Sdev  (layer means;
                fitted - within 0.015 on 11 runs, totals 0.7 to 15),
@@ -47,7 +48,7 @@ LP_C, LP_U0, LP_S0, LP_ALPHA, LP_NORM_REF = 1.85055313, 32357.0, 26989.6, 1.0256
 EHD_FACTOR = 0.22427 / 0.23
 AGG = (1.002, 0.9866, 0.965, 0.9891)         # layer total skin: perf, crush, cos exponent, anisotropy exponent
 KING = (3099.6, 0.36997)
-BEHRMANN = (8322.3, 0.36362)
+BEHRMANN = (46234.67, 0.36362)      # dP = C phi k^-b
 G = 14.696
 
 
@@ -134,7 +135,7 @@ class Spot:
         sc = (1 / f.crush_factor - 1) * np.log((rp_in + f.crush_thickness) / rp_in) / (n_eff * lp / 12)
         sdev = self.deviation_skin()
         dk = KING[0] * f.k ** -KING[1]
-        db = BEHRMANN[0] * f.k ** -BEHRMANN[1]
+        db = BEHRMANN[0] * f.porosity * f.k ** -BEHRMANN[1]
         import pandas as pd
         return pd.DataFrame({
             "Measured depth (ft)": self.md, "True vertical depth (ft)": self.tvd,

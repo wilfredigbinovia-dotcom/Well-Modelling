@@ -5784,7 +5784,7 @@ def test_mud_acidization_t50():
 
 def test_spot_ipr_t09():
     """PROSPER Tutorial 09 (the user's file): SPOT IPR on the Logie well (110 ft MD layer, 50 md, Pr 4000 psig, water
-    cut 20 %, Baker Predator XP LS 6 spf / 60 deg) and 13 one-at-a-time runs. Per-segment perforation and crushed-zone
+    cut 20 %, Baker Predator XP LS 6 spf / 60 deg) and 14 one-at-a-time runs. Per-segment perforation and crushed-zone
     skins within 0.1 % (the bottom segment excepted), deviation skin and the pressure / density columns exact, layer
     total skin within 0.02 (12 runs) / 0.03 (63 deg), layer oil AOF within 0.2 %, the IPR table within 0.4 % and the
     system solution at 500 psig within 0.5 % (PE2, U 8)."""

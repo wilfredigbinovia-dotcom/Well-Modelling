@@ -786,6 +786,61 @@
 5184.4
 ]
 }
+},
+{
+"run": "porosity 0.25",
+"inputs": {
+"porosity": 0.25
+},
+"layer": {
+"dens": 8.296,
+"S": 10.6314,
+"Sdev": -0.063548,
+"AOF": 4218.6,
+"WIQI": 0.44809
+},
+"segments_0_55_109": {
+"Perforation Skin": [
+2.67344,
+2.69037,
+2.70699
+],
+"Crush Skin": [
+10.1298,
+10.1924,
+10.254
+],
+"Deviation Skin": [
+-0.063548,
+-0.063548,
+-0.063548
+],
+"Completion Density": [
+8.342,
+8.296,
+8.251
+],
+"Underbalance King": [
+3271.0,
+3271.0,
+3271.0
+],
+"Underbalance Berhmann": [
+1213.0,
+1213.0,
+1213.0
+],
+"Underbalance User": [
+3885.3,
+3885.3,
+3885.3
+],
+"Near Wellbore eff vert stress": [
+5085.3,
+5135.3,
+5184.4
+]
+}
 }
 ],
 "base_ipr": {
