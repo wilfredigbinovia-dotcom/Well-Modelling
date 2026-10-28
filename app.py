@@ -1,4 +1,4 @@
-"""Streamlit front end for wellmodel.
+"""Streamlit front end for fluxwell.
 
 Run from the project folder:   streamlit run app.py
 
@@ -20,71 +20,71 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from wellmodel import blackoil as bo
-from wellmodel import eos as wm_eos
+from fluxwell import blackoil as bo
+from fluxwell import eos as wm_eos
 import inspect
 import dataclasses
 
 from scipy.optimize import brentq
 
-from wellmodel import inflow as _ipr_mod
-from wellmodel import inflow_adv as _ipr2_mod
-from wellmodel import completion as wcomp
-from wellmodel import mpp as _mpp_mod
-from wellmodel import vlp as wvlp
-from wellmodel import system as wsys
-from wellmodel import injection as winj
-from wellmodel import tif as wtif
-from wellmodel import surface as wsurf
-from wellmodel import project as wproj
-from wellmodel import liftcurves as wlc
-from wellmodel import gradient as wgrad
-from wellmodel import choke as wchoke
-from wellmodel import gaslift as wgl
-from wellmodel import gaslift_system as wgls
-from wellmodel import coiled as wct
-from wellmodel import quicklook as wql
-from wellmodel import esp_quicklook as weql
-from wellmodel import hsp_quicklook as whql
-from wellmodel import srp_cards as wsrpc
-from wellmodel import diluent as wdil
-from wellmodel import emulsion as wem
-from wellmodel import rheology as wrh
-from wellmodel import cbm as wcbm
-from wellmodel import foam as wfoam
-from wellmodel import fracture as wfrac
-from wellmodel import mudacid as wacid
-from wellmodel import spot as wspot
-from wellmodel import multilateral as wmlat
-from wellmodel import mpump as wmpump
-from wellmodel import thermal as wth
-from wellmodel import enthalpy as web
-from wellmodel import co2 as wco2
-from wellmodel import steam as wsteam
-from wellmodel import hydrate as whyd
-from wellmodel import intermittent as wigl
-from wellmodel import esp as wesp
-from wellmodel import srp as wsrp
-from wellmodel import jetpump as wjet
-from wellmodel import hsp as whsp
-from wellmodel import pcp as wpcp
-from wellmodel import gaspvt as wgp
-from wellmodel import retrograde as wrg
-from wellmodel import complementary as wcx
-from wellmodel import units as wu
-from wellmodel import ui_units as wuu
+from fluxwell import inflow as _ipr_mod
+from fluxwell import inflow_adv as _ipr2_mod
+from fluxwell import completion as wcomp
+from fluxwell import mpp as _mpp_mod
+from fluxwell import vlp as wvlp
+from fluxwell import system as wsys
+from fluxwell import injection as winj
+from fluxwell import tif as wtif
+from fluxwell import surface as wsurf
+from fluxwell import project as wproj
+from fluxwell import liftcurves as wlc
+from fluxwell import gradient as wgrad
+from fluxwell import choke as wchoke
+from fluxwell import gaslift as wgl
+from fluxwell import gaslift_system as wgls
+from fluxwell import coiled as wct
+from fluxwell import quicklook as wql
+from fluxwell import esp_quicklook as weql
+from fluxwell import hsp_quicklook as whql
+from fluxwell import srp_cards as wsrpc
+from fluxwell import diluent as wdil
+from fluxwell import emulsion as wem
+from fluxwell import rheology as wrh
+from fluxwell import cbm as wcbm
+from fluxwell import foam as wfoam
+from fluxwell import fracture as wfrac
+from fluxwell import mudacid as wacid
+from fluxwell import spot as wspot
+from fluxwell import multilateral as wmlat
+from fluxwell import mpump as wmpump
+from fluxwell import thermal as wth
+from fluxwell import enthalpy as web
+from fluxwell import co2 as wco2
+from fluxwell import steam as wsteam
+from fluxwell import hydrate as whyd
+from fluxwell import intermittent as wigl
+from fluxwell import esp as wesp
+from fluxwell import srp as wsrp
+from fluxwell import jetpump as wjet
+from fluxwell import hsp as whsp
+from fluxwell import pcp as wpcp
+from fluxwell import gaspvt as wgp
+from fluxwell import retrograde as wrg
+from fluxwell import complementary as wcx
+from fluxwell import units as wu
+from fluxwell import ui_units as wuu
 try:                                    # PROSPER-style grids with per-cell locking; optional dependency
     from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
     HAVE_AGGRID = True
 except ImportError:                     # falls back to st.data_editor
     HAVE_AGGRID = False
-from wellmodel.correlations import LABELS as VLP_LABELS
-from wellmodel import equipment as weq
-from wellmodel import schematic as wsch
-from wellmodel import options as wopt
-from wellmodel import plotting as wplt
+from fluxwell.correlations import LABELS as VLP_LABELS
+from fluxwell import equipment as weq
+from fluxwell import schematic as wsch
+from fluxwell import options as wopt
+from fluxwell import plotting as wplt
 
-st.set_page_config(page_title="wellmodel", page_icon="🛢️", layout="wide")
+st.set_page_config(page_title="FluxWell", page_icon="🛢️", layout="wide")
 ss = st.session_state
 
 
@@ -394,7 +394,7 @@ def apply_project(data, fname):
             for m in ex["vlp_matches"]}}
     if ex.get("pvt_matched") and "pvt_table" in ss:
         ss["_proj_rematch"] = True                 # repeated just before the PVT tab draws
-    stem = fname.rsplit(".", 1)[0].replace(".wellmodel", "").strip()
+    stem = fname.rsplit(".", 1)[0].replace(".fluxwell", "").replace(".wellmodel", "").strip()
     saved = doc.get("name") or ""
     # the file name the user chose wins, unless it is just the saved name made file-safe ("Abura 2S" -> Abura_2S)
     ss["proj_name"] = saved if saved and _file_stem(saved) == stem else (stem or saved or "my_well")
@@ -411,14 +411,14 @@ if "_proj_pending" in ss:
     apply_project(*ss.pop("_proj_pending"))
 
 hdr = st.columns([5, 2.4, 0.42, 0.42, 0.42], vertical_alignment="bottom", gap="small")
-hdr[0].title("🛢️ wellmodel")
+hdr[0].title("🛢️ fluxwell")
 pname = hdr[1].text_input("Project name", key="proj_name", **dflt("proj_name", value="my_well"),
-                          help="Press Enter after typing - the save button then writes <name>.wellmodel.json.")
+                          help="Press Enter after typing - the save button then writes <name>.fluxwell.json.")
 save_slot = hdr[2]                                          # filled at the end, once every tab has run
 with hdr[3].popover("", icon=":material/folder_open:", help="Open project"):
     st.file_uploader("Open project", type=["json"], key=_uploader_key(), on_change=queue_project,
                      args=(_uploader_key(),),
-                     help="A .wellmodel.json file saved from this tool. Replaces the current model.")
+                     help="A .fluxwell.json file saved from this tool (older .wellmodel.json files also load). Replaces the current model.")
     st.caption("Replaces the current model; the PVT match is repeated automatically. Calculation results are "
                "not saved - press Calculate after opening.")
 hdr[4].button("", icon=":material/note_add:", on_click=new_project, help="New project - clears every input",
@@ -1280,7 +1280,7 @@ def tif_panel(pr, t_res, fl_):
     """PROSPER Thermally Induced Fracture injectivity (water injector)."""
     st.caption("Thermally Induced Fracture: cold water cools the rock near the well and lowers the stress; above the "
                "fracturing pressure the rock fractures. Three regimes - radial, fracture opening, fracture developed "
-               "- with the forms and coefficients found from PROSPER's Tutorial 03a (see wellmodel/tif.py). In this "
+               "- with the forms and coefficients found from PROSPER's Tutorial 03a (see fluxwell/tif.py). In this "
                "tab the injected temperature below is used; the system calculation uses the sandface temperature "
                "of the tubing at each rate.")
     st.markdown("**Injectivity index parameters**")
@@ -1900,7 +1900,7 @@ def retro_pvt_panel(opts_now):
     """PROSPER PVT | Input Data for Retrograde Condensate with the black-oil method."""
     st.subheader("Input data")
     st.caption("PROSPER's black-oil retrograde condensate model (reconstructed from its PVT tables, Tutorial 38 - see "
-               "wellmodel/retrograde.py): below the dew point condensate drops out of the gas and flows as liquid in "
+               "fluxwell/retrograde.py): below the dew point condensate drops out of the gas and flows as liquid in "
                "the well. The separator and tank figures describe the full stream brought to stock-tank conditions "
                "(PROSPER's Tutorial 38: separator at 0 psig and 60 °F, tank GOR 1 scf/STB).")
     c = st.columns(4)
@@ -4340,7 +4340,7 @@ def hsp_equipment_panel(top_md, secs):
     st.button("Copy from the HSP design", on_click=_hsp_copy_design, disabled=not ss.get("hsp_design"),
               key="hspq_copy")
     if not whsp.PUMPS or not whsp.TURBINES:
-        st.error("The HSP pump and turbine databases are missing (wellmodel/data/hsp_pumps.csv, hsp_turbines.csv).")
+        st.error("The HSP pump and turbine databases are missing (fluxwell/data/hsp_pumps.csv, hsp_turbines.csv).")
         return None
     c = st.columns(3)
     md = num(c[0], "Pump depth (ft MD)", "hspq_md", float(round(bottom)), float(top_md) + 50, 60000.0)
@@ -11305,9 +11305,9 @@ with save_slot:
         payload = wproj.dumps(project_state(), pname)
         ss["_proj_payload"] = payload
         fname = _file_stem(pname)
-        st.download_button("", payload.encode(), f"{fname}.wellmodel.json", "application/json",
+        st.download_button("", payload.encode(), f"{fname}.fluxwell.json", "application/json",
                            icon=":material/save:", key="proj_save", on_click="ignore",
-                           help=f"Save project as {fname}.wellmodel.json - every input, table and accepted match.")
+                           help=f"Save project as {fname}.fluxwell.json - every input, table and accepted match.")
     except TypeError as e:
         st.button("", icon=":material/error:", disabled=True, help=f"Project cannot be saved: {e}", key="proj_save")
 

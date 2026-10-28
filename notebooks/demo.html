@@ -7802,7 +7802,7 @@ a.anchor-link {
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h1 id="wellmodel---end-to-end-demo">wellmodel - end-to-end demo<a class="anchor-link" href="#wellmodel---end-to-end-demo">¶</a></h1><p>This notebook runs the full workflow on a <strong>synthetic well with a known answer</strong>, so every step can be checked:</p>
+<h1 id="fluxwell---end-to-end-demo">fluxwell - end-to-end demo<a class="anchor-link" href="#fluxwell---end-to-end-demo">¶</a></h1><p>This notebook runs the full workflow on a <strong>synthetic well with a known answer</strong>, so every step can be checked:</p>
 <ol>
 <li>Build the well (PVT, deviation survey, tubing)</li>
 <li><strong>Test data QC</strong> - catch bad tests before they reach the match</li>
@@ -7830,9 +7830,9 @@ a.anchor-link {
 <span class="n">pd</span><span class="o">.</span><span class="n">set_option</span><span class="p">(</span><span class="s2">"display.width"</span><span class="p">,</span> <span class="mi">160</span><span class="p">);</span> <span class="n">pd</span><span class="o">.</span><span class="n">set_option</span><span class="p">(</span><span class="s2">"display.max_columns"</span><span class="p">,</span> <span class="mi">20</span><span class="p">)</span>
 <span class="n">pd</span><span class="o">.</span><span class="n">set_option</span><span class="p">(</span><span class="s2">"display.float_format"</span><span class="p">,</span> <span class="k">lambda</span> <span class="n">v</span><span class="p">:</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">v</span><span class="si">:</span><span class="s2">,.3f</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
 
-<span class="kn">import</span><span class="w"> </span><span class="nn">wellmodel</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">wm</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">wellmodel</span><span class="w"> </span><span class="kn">import</span> <span class="n">plotting</span> <span class="k">as</span> <span class="n">wplt</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">wellmodel.synthetic</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">demo_well</span><span class="p">,</span> <span class="n">make_tests</span><span class="p">,</span> <span class="n">make_buildup</span><span class="p">,</span> <span class="n">demo_reservoir</span><span class="p">,</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">fluxwell</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">wm</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fluxwell</span><span class="w"> </span><span class="kn">import</span> <span class="n">plotting</span> <span class="k">as</span> <span class="n">wplt</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">fluxwell.synthetic</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">demo_well</span><span class="p">,</span> <span class="n">make_tests</span><span class="p">,</span> <span class="n">make_buildup</span><span class="p">,</span> <span class="n">demo_reservoir</span><span class="p">,</span>
                                  <span class="n">demo_stoiip</span><span class="p">,</span> <span class="n">TRUTH</span><span class="p">)</span>
 </pre></div>
 </div>

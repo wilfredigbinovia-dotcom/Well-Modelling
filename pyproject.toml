@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wellmodel"
+name = "fluxwell"
 version = "0.1.0"
 description = "Oil-well modelling: VLP/IPR nodal analysis with automated test QC, multi-test matching, correlation selection, probabilistic runs and transient screening"
 readme = "README.md"
@@ -15,7 +15,7 @@ dev = ["pytest", "jupyter"]
 app = ["streamlit>=1.40", "streamlit-aggrid>=1.0", "openpyxl>=3.1"]
 
 [tool.setuptools]
-packages = ["wellmodel"]
+packages = ["fluxwell"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

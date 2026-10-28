@@ -901,7 +901,7 @@ A self-consistent illustration built from the printed coefficients (my construct
 
 ---------------------------------------------------------------------------------------------------------------------
 
-## 5. Relevance to wellmodel (`wellmodel/gaslift.py`)
+## 5. Relevance to fluxwell (`fluxwell/gaslift.py`)
 
 ### 5.1 What gaslift.py does now, against Brown and 11V2
 | Topic | gaslift.py | Brown / 11V2 | Verdict |

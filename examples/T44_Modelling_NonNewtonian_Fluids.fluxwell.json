@@ -1,0 +1,527 @@
+{
+ "format": "fluxwell-project",
+ "version": 1,
+ "name": "T44 Modelling Non-Newtonian Fluids",
+ "saved": "2026-10-27T09:00:00+00:00",
+ "inputs": {
+  "eq_cpg": 0.51,
+  "sys_flags": "Yes",
+  "pvt_sel_pb": "vazquez_beggs",
+  "eq_usur": 8.0,
+  "ipr_rw": 0.354,
+  "ipr_area": 500.0,
+  "eq_u": 8.0,
+  "ipr_skin": 0.0,
+  "pvt_gg": 0.58,
+  "sys_node": "Bottom node",
+  "pvt_impurity_corr": false,
+  "ipr_devpp": "Cinco (2) / Martin-Bronz",
+  "sys_corr": "pe2_style",
+  "ipr_pr": 2500.0,
+  "pvt_t": 120.0,
+  "sys_whp": 264.696,
+  "sys_rate_method": "Automatic - Geometric",
+  "eq_cpo": 0.53,
+  "ipr_k": 50.0,
+  "sys_wc": 0.0,
+  "pvt_pb": 184.696,
+  "ipr_model_oil": "P.I. Entry",
+  "ipr_wc": 0.0,
+  "pvt_n2": 0.0,
+  "pvt_use_match": true,
+  "eq_tsur": 60.0,
+  "ipr_ca": 31.6,
+  "pvt_co2": 0.0,
+  "sys_use_fit": false,
+  "ipr_h": 100.0,
+  "pvt_sal": 75000.0,
+  "pvt_rsb": 10.0,
+  "pvt_sel_visc": "egbogah",
+  "ipr_j": 5.0,
+  "sys_gor": 10.0,
+  "ipr_t_from_pvt": true,
+  "pvt_api": 12.0,
+  "ipr_mech": "Karakas & Tariq",
+  "pvt_h2s": 0.0,
+  "eq_cpw": 1.0,
+  "sys_lhi": "DisAllow",
+  "ipr_pd": 0.43,
+  "ipr_spf": 8.0,
+  "ipr_lp": 9.2,
+  "ipr_peff": 0.9,
+  "ipr_phasing": 120,
+  "ipr_kv": 5.0,
+  "ipr_ld": 8.0,
+  "ipr_kd": 25.0,
+  "ipr_lc": 0.2,
+  "ipr_kc": 12.5,
+  "ipr_dev": 13.0,
+  "ipr_ppf": 1.0,
+  "ipr_kv2": 5.0,
+  "sc_kg": 35000.0,
+  "sc_L": 6.0,
+  "sc_int": 100.0,
+  "sc_pd": 0.43,
+  "sc_spf": 8.0,
+  "sc_eff": 0.9,
+  "sc_dev": 13.0,
+  "sc_bm": "Calculated",
+  "sc_phase": "Multi Phase",
+  "sys_p1_pe2_style": 1.0,
+  "sys_p2_pe2_style": 1.0,
+  "calc_mode": "Gradient traverse",
+  "rheo_mu_max": 10000.0,
+  "rheo_t": 120.0,
+  "rheo_p": 500.0,
+  "rheo_d": 3.2
+ },
+ "widgets": {
+  "eq_filter_on": false,
+  "opt_completion": "cased_hole",
+  "opt_method": "black_oil",
+  "opt_well_type": "producer",
+  "opt_sand_control": "none",
+  "opt_fluid_type": "oil",
+  "opt_flow_type": "tubing",
+  "sys_sens_on": false,
+  "opt_artificial_lift": "none",
+  "opt_water_vapour": "none",
+  "opt_separator": "single_stage",
+  "trav_rates_oil": "7500",
+  "opt_emulsions": "none",
+  "opt_viscosity_model": "non_newtonian"
+ },
+ "tables": {
+  "pvt_table": {
+   "__df__": {
+    "columns": [
+     "Pressure",
+     "Gas Oil Ratio",
+     "Oil FVF",
+     "Oil Viscosity"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      184.696,
+      10.0,
+      1.025,
+      700.0
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Pressure": "float64",
+    "Gas Oil Ratio": "float64",
+    "Oil FVF": "float64",
+    "Oil Viscosity": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_survey": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "True Vertical Depth (ft)"
+    ],
+    "index": [
+     1,
+     2
+    ],
+    "data": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      2000.0,
+      2000.0
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "True Vertical Depth (ft)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_surface": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Fitting",
+     "Pipe Length (ft)",
+     "TVD of End Point (ft)",
+     "Pipe Inside Diameter (in)",
+     "Pipe Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Fitting": "object",
+    "Pipe Length (ft)": "float64",
+    "TVD of End Point (ft)": "float64",
+    "Pipe Inside Diameter (in)": "float64",
+    "Pipe Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_downhole": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Measured Depth (ft)",
+     "Tubing Inside Diameter (in)",
+     "Tubing Inside Roughness (in)",
+     "Tubing Outside Diameter (in)",
+     "Tubing Outside Roughness (in)",
+     "Casing Inside Diameter (in)",
+     "Casing Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3
+    ],
+    "data": [
+     [
+      null,
+      "Xmas Tree",
+      0.0,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      1800.0,
+      3.2,
+      0.0006,
+      null,
+      null,
+      null,
+      null,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "Casing",
+      2000.0,
+      null,
+      null,
+      null,
+      null,
+      6.4,
+      0.0006,
+      1.0,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "str",
+    "Type": "str",
+    "Measured Depth (ft)": "float64",
+    "Tubing Inside Diameter (in)": "float64",
+    "Tubing Inside Roughness (in)": "float64",
+    "Tubing Outside Diameter (in)": "float64",
+    "Tubing Outside Roughness (in)": "float64",
+    "Casing Inside Diameter (in)": "float64",
+    "Casing Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_geo": {
+   "__df__": {
+    "columns": [
+     "Formation Measured Depth (ft)",
+     "Formation Temperature (deg F)"
+    ],
+    "index": [
+     1,
+     2
+    ],
+    "data": [
+     [
+      0.0,
+      80.0
+     ],
+     [
+      2000.0,
+      120.0
+     ]
+    ]
+   },
+   "dtypes": {
+    "Formation Measured Depth (ft)": "float64",
+    "Formation Temperature (deg F)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "pvt_rheology": {
+   "__df__": {
+    "columns": [
+     "Temperature (\u00b0F)",
+     "Pressure (psig)",
+     "Yield stress TAUo (psi)",
+     "Consistency index K",
+     "Shear thinning index n"
+    ],
+    "index": [
+     0,
+     1,
+     2,
+     3
+    ],
+    "data": [
+     [
+      60.0,
+      100.0,
+      0.0,
+      1.0,
+      0.9
+     ],
+     [
+      60.0,
+      5000.0,
+      0.0,
+      1.0,
+      0.9
+     ],
+     [
+      120.0,
+      100.0,
+      0.0,
+      0.5,
+      0.95
+     ],
+     [
+      120.0,
+      5000.0,
+      0.0,
+      0.5,
+      0.95
+     ]
+    ]
+   },
+   "dtypes": {
+    "Temperature (\u00b0F)": "float64",
+    "Pressure (psig)": "float64",
+    "Yield stress TAUo (psi)": "float64",
+    "Consistency index K": "float64",
+    "Shear thinning index n": "float64"
+   },
+   "index_name": null
+  }
+ },
+ "extras": {
+  "pvt_matched": true
+ }
+}

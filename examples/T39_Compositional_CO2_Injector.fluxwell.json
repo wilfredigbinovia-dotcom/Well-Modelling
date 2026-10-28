@@ -1,0 +1,572 @@
+{
+ "format": "fluxwell-project",
+ "version": 1,
+ "name": "T39 Compositional CO2 Injector",
+ "saved": "2026-10-26T18:00:00+00:00",
+ "inputs": {
+  "eq_cpg": 0.51,
+  "calc_mode": "System analysis (IPR + VLP)",
+  "eq_cpo": 0.53,
+  "eq_tsur": 60.0,
+  "eq_cpw": 1.0,
+  "eq_u": 3.0,
+  "eq_usur": 3.0,
+  "eq_tinj": 75.0,
+  "ipr_model_ginj": "Petroleum Experts",
+  "ipr_pr": 4514.696,
+  "ipr_t_inj_res": 313.0,
+  "ipr_k": 35.0,
+  "ipr_h": 75.0,
+  "ipr_area": 450.0,
+  "ipr_ca": 31.6,
+  "ipr_rw": 0.354,
+  "ipr_hp": 75.0,
+  "ipr_tdays": 50.0,
+  "ipr_phi": 0.19,
+  "ipr_swc": 0.2,
+  "ipr_perm_kind": "Total permeability",
+  "ipr_d_method": "Calculated",
+  "ipr_skin_inj": 12.0,
+  "pvt_sal": 20000.0
+ },
+ "widgets": {
+  "opt_completion": "cased_hole",
+  "opt_method": "eos",
+  "opt_well_type": "gas_injector",
+  "opt_sand_control": "none",
+  "opt_fluid_type": "dry_wet_gas",
+  "opt_flow_type": "tubing",
+  "opt_separator": "single_stage",
+  "opt_water_vapour": "none",
+  "opt_artificial_lift": "none",
+  "sys_sens_on": false,
+  "eq_filter_on": false,
+  "_vl_sys_inj_whp": [
+   1264.696
+  ],
+  "opt_temp_model": "improved"
+ },
+ "tables": {
+  "eq_survey": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "True Vertical Depth (ft)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      14500.0,
+      14500.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "True Vertical Depth (ft)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_surface": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Fitting",
+     "Pipe Length (ft)",
+     "TVD of End Point (ft)",
+     "Pipe Inside Diameter (in)",
+     "Pipe Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "data": [
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Fitting": "object",
+    "Pipe Length (ft)": "float64",
+    "TVD of End Point (ft)": "float64",
+    "Pipe Inside Diameter (in)": "float64",
+    "Pipe Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_downhole": {
+   "__df__": {
+    "columns": [
+     "Label",
+     "Type",
+     "Measured Depth (ft)",
+     "Tubing Inside Diameter (in)",
+     "Tubing Inside Roughness (in)",
+     "Tubing Outside Diameter (in)",
+     "Tubing Outside Roughness (in)",
+     "Casing Inside Diameter (in)",
+     "Casing Inside Roughness (in)",
+     "Rate Multiplier",
+     "::auto_unique_id::"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5
+    ],
+    "data": [
+     [
+      null,
+      "Xmas Tree",
+      0.0,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      1200.0,
+      3.992,
+      0.0006,
+      4.5,
+      null,
+      null,
+      null,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "SSSV",
+      null,
+      3.8,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+     ],
+     [
+      null,
+      "Tubing",
+      14000.0,
+      3.992,
+      0.0006,
+      4.5,
+      null,
+      null,
+      null,
+      1.0,
+      null
+     ],
+     [
+      null,
+      "Casing",
+      14500.0,
+      null,
+      null,
+      null,
+      null,
+      6.4,
+      0.0006,
+      1.0,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Label": "object",
+    "Type": "object",
+    "Measured Depth (ft)": "float64",
+    "Tubing Inside Diameter (in)": "float64",
+    "Tubing Inside Roughness (in)": "float64",
+    "Tubing Outside Diameter (in)": "float64",
+    "Tubing Outside Roughness (in)": "float64",
+    "Casing Inside Diameter (in)": "float64",
+    "Casing Inside Roughness (in)": "float64",
+    "Rate Multiplier": "float64",
+    "::auto_unique_id::": "object"
+   },
+   "index_name": "Point"
+  },
+  "eq_geo": {
+   "__df__": {
+    "columns": [
+     "Formation Measured Depth (ft)",
+     "Formation Temperature (deg F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20
+    ],
+    "data": [
+     [
+      0.0,
+      60.0
+     ],
+     [
+      14500.0,
+      313.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Formation Measured Depth (ft)": "float64",
+    "Formation Temperature (deg F)": "float64"
+   },
+   "index_name": "Point"
+  },
+  "eq_ihtc": {
+   "__df__": {
+    "columns": [
+     "Measured Depth (ft)",
+     "Heat Transfer Coefficient (BTU/h/ft2/F)"
+    ],
+    "index": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12
+    ],
+    "data": [
+     [
+      14500.0,
+      3.0
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ],
+     [
+      null,
+      null
+     ]
+    ]
+   },
+   "dtypes": {
+    "Measured Depth (ft)": "float64",
+    "Heat Transfer Coefficient (BTU/h/ft2/F)": "float64"
+   },
+   "index_name": "Point"
+  }
+ },
+ "extras": {
+  "prp_text": "*\n* Petroleum Experts - PRP Export File\n*\n*\n*Export File Signature\n*#PetexPRP\n*Export File Version\n*#17\n*\n* !!!!!!!!!!!!!!!!!!!! FILE DETAILS !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n*  FILE NAME : K:\\IPM1250\\samples\\prosper\\T39_co2_EoS.prp\n*  Exported  : Wed Nov 11 13:16:27 2020\n* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n*\n*\n* Equation Type 0 - Peng Robinson 1 - SRK\n0 \n*\n*\n*\n* Number of Components   Number of Lumped Components - Set to 0 if No Lumping Present\n*\n4 0 \n*\n*\n*          Mole        Critical        Critical       Accentric       Molecular        Specific        Critical          Volume         Boiling        Parachor          OmegaA          OmegaB         Costald         Costald Component\n*       Percent     Temperature        Pressure          Factor          Weight         Gravity          Volume           Shift           Point                                                          Volume  Accentric Fact Name     \n*\n*       percent       degrees F            psig                      lb/lb.mole         Gravity       l/kg.mole                       degrees F                                                       l/kg.mole         \n* ------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- --------------- ---------\n*\n\n           89.1          87.692         1058.26           0.239           44.01           1.101      93.8998875         -0.1002         -109.21              78         0.45724        0.077796      93.8299662         0.23725 \"CO2\" \n           6.21        -116.518         658.381           0.011           16.04           0.415       99.200169          -0.154         -258.79              70         0.45724        0.077796      99.3899553          0.0074 \"C1\" \n           2.98          89.798         693.651           0.099            30.1           0.546      148.299879         -0.1002         -127.39             115         0.45724        0.077796      145.750251          0.0983 \"C2\" \n           1.71         206.006         602.683           0.153            44.1           0.585      203.000158        -0.08501          -43.69             155         0.45724        0.077796      200.079697          0.1532 \"C3\" \n*\n* Binary Interaction Coefficients\n*\n* Only non-zero BICs are exported and imported\n* Number of non-zero BICs to be written or read\n*\n\n0 \n* Only first half of array is exported - values will be copied to second half\n*\n*\n* Volume Shift Flag\n*\n0 \n*\n* OIL Viscosity Options\n*  LBC LBCCOEFF PED BEGGS BEAL PETROSKY BERGMAN EGBOG\n*\nLBC \n*\n* GAS Viscosity Options\n*  LBC LBCCOEFF PED LEE CARR\n*\nLBC \n*\n*Enthalpy Model \n*\n1 \n*\n*Enthalpy Model Shift Multiplier\n*\n              0               1 \n*\n*\n* CO2 Correction\n*\n1 \n*\n* Hydrate Model Options\n* MUNCK HCUBIC HCPA\n*\nMUNCK \n*\n* Use Hyd Inhibitor\n*\n0 \n*\n*\n* Use Alcohol Correction\n*\n1 \n*\n* Water Composition\n*\n* Number of Salts\n*\n0 \n*\n* Number of Inhibitors\n*\n0 \n*\n*\n* Water Cut\n* Use Gas Water Cut\n*\n0 \n*\n*Water Cut Oil\n              0 \n*Water Cut Gas\n              0 \n*\n*\n* Separators T, P\n*\n0 0 \n*\n* Reference Temperature\n*\n            313 \n*\n*# End of file   \n*\n",
+  "prp_name": "T39_co2_EoS.prp"
+ }
+}
