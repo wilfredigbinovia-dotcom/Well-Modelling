@@ -84,7 +84,9 @@ from fluxwell import schematic as wsch
 from fluxwell import options as wopt
 from fluxwell import plotting as wplt
 
-st.set_page_config(page_title="FluxWell", page_icon="🛢️", layout="wide")
+_ASSETS = Path(__file__).resolve().parent / "assets"
+st.set_page_config(page_title="FluxWell", page_icon=str(_ASSETS / "fluxwell_icon.png"), layout="wide")
+st.logo(str(_ASSETS / "fluxwell_logo.png"), icon_image=str(_ASSETS / "fluxwell_icon.png"), size="large")
 ss = st.session_state
 
 
@@ -411,7 +413,7 @@ if "_proj_pending" in ss:
     apply_project(*ss.pop("_proj_pending"))
 
 hdr = st.columns([5, 2.4, 0.42, 0.42, 0.42], vertical_alignment="bottom", gap="small")
-hdr[0].title("🛢️ fluxwell")
+hdr[0].image(str(_ASSETS / "fluxwell_logo.png"), width=300)
 pname = hdr[1].text_input("Project name", key="proj_name", **dflt("proj_name", value="my_well"),
                           help="Press Enter after typing - the save button then writes <name>.fluxwell.json.")
 save_slot = hdr[2]                                          # filled at the end, once every tab has run

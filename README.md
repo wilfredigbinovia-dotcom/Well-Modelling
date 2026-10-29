@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/fluxwell_logo.png" alt="FluxWell" width="420"></p>
+
 # FluxWell
 
 An open, scriptable oil-well modelling toolkit in Python, built around five things commercial nodal tools do poorly or not at all:
