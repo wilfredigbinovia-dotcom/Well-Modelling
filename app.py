@@ -71,6 +71,10 @@ from fluxwell import pcp as wpcp
 from fluxwell import gaspvt as wgp
 from fluxwell import retrograde as wrg
 from fluxwell import complementary as wcx
+from fluxwell import tubulars as wtub
+from fluxwell import sanding as wsand
+from fluxwell import coning as wcone
+from fluxwell import woe as wwoe
 from fluxwell import units as wu
 from fluxwell import ui_units as wuu
 try:                                    # PROSPER-style grids with per-cell locking; optional dependency
@@ -437,7 +441,7 @@ ss["_units"] = {q_: (val("unit_" + q_, wu.default_unit(q_)) if val("unit_" + q_,
 wuu.install()
 
 TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP",
-             "6 · Calculation", "7 · Design", "8 · Units"]
+             "6 · Calculation", "7 · Design", "8 · Well Operating Envelope", "9 · Units"]
 tabs = st.tabs(TAB_NAMES, key="main_tabs")
 
 CAPTIONS = {
@@ -11206,6 +11210,650 @@ def ct_design_tab(o, eqd, ipr_curve):
             st.download_button("Download (CSV)", res.profile.to_csv(index=False).encode(), "ct_design_gradient.csv")
 
 
+# ================================================================ well operating envelope (tab 8)
+WOE_CONE_OIL = ["Water coning (bottom water)", "Gas coning (gas cap)", "Thin oil rim (gas cap and aquifer)"]
+WOE_CONE_GAS = ["Water coning (bottom water)"]
+WOE_TUBE_CUSTOM = "From the equipment / custom"
+
+
+def _woe_reservoir(o, kind, ipr_curve, eqd, pr=None):
+    """Reservoir conditions and fluid properties at pr (default the IPR's) for the envelope's defaults."""
+    gmd, gt = eqd["geothermal"]
+    t_res = float(np.max(gt))
+    pr = float(ipr_curve.pr if pr is None else pr)
+    out = {"pr": pr, "t": t_res}
+    for key_, arg_, dflt_ in (("k", "k", 50.0), ("h", "h", 50.0), ("rw", "rw", 0.354), ("phi", "phi", 0.2)):
+        v_ = ipr_arg(arg_)
+        out[key_] = float(v_) if isinstance(v_, (int, float)) and v_ > 0 else dflt_
+    area_ = ipr_arg("area_acres")
+    out["re"] = float(np.sqrt(43560.0 * area_ / np.pi)) if isinstance(area_, (int, float)) and area_ > 0 else 1490.0
+    try:
+        inp_, _ = current_inputs()
+        _, rho_w_, mu_w_ = bo.water_props(inp_, pr, t_res)
+        out["rho_w"], out["mu_w"] = float(rho_w_) / 62.428, float(mu_w_)
+    except Exception:  # noqa: BLE001 - defaults only
+        out["rho_w"], out["mu_w"] = 1.02, 0.5
+    try:
+        mu_z_, sg_, _ = gas_pvt_fn(o, t_res)
+        mu_, z_ = mu_z_(np.array([pr]))
+        out["mu_g"], out["z"], out["sg"] = float(np.atleast_1d(mu_)[0]), float(np.atleast_1d(z_)[0]), float(sg_)
+    except Exception:  # noqa: BLE001
+        out["mu_g"], out["z"], out["sg"] = 0.02, 0.9, 0.65
+    out["rho_g"] = 2.7 * out["sg"] * pr / (out["z"] * (t_res + 459.67)) / 62.428
+    out["rho_o"], out["mu_o"], out["bo"] = 0.8, 1.0, 1.2
+    if kind == "oil":
+        pv_, _ = oil_pvt_at(o, pr, t_res)
+        if pv_ is not None:
+            out["rho_o"], out["mu_o"], out["bo"] = float(pv_["rho"]) / 62.428, float(pv_["mu"]), float(pv_["bo"])
+    return out
+
+
+def _woe_fill(res_):
+    """Fill the coning inputs from the PVT and IPR (button)."""
+    for k_, v_ in (("woe_cn_re", res_["re"]), ("woe_cn_rw", res_["rw"]), ("woe_cn_k", res_["k"]),
+                   ("woe_cn_phi", res_["phi"]), ("woe_cn_rho_o", res_["rho_o"]), ("woe_cn_mu_o", res_["mu_o"]),
+                   ("woe_cn_bo", res_["bo"]), ("woe_cn_rho_w", res_["rho_w"]), ("woe_cn_mu_w", res_["mu_w"]),
+                   ("woe_cn_rho_g", res_["rho_g"]), ("woe_cn_mu_g", res_["mu_g"]), ("woe_cn_z", res_["z"])):
+        put(k_, float(round(v_, 6)))
+
+
+def _woe_tubing_default(eqd):
+    """Catalog label matching the equipment's tubing, or the custom entry; plus OD, wall and the packer MD."""
+    secs_ = eqd["downhole"][1]
+    tub_ = secs_[secs_["Type"] == "Tubing"]
+    od_ = float(tub_["Tubing OD (in)"].dropna().iloc[-1]) if len(tub_) and tub_["Tubing OD (in)"].notna().any() else 3.5
+    id_ = float(tub_["Flow ID (in)"].iloc[-1]) if len(tub_) else 2.992
+    wall_ = max((od_ - id_) / 2, 0.05)
+    lab_ = next((k_ for k_, (o_, w_, t_) in wtub.TUBING.items() if abs(o_ - od_) < 1e-3 and abs(t_ - wall_) < 0.006),
+                WOE_TUBE_CUSTOM)
+    packer_ = float(tub_["MD bottom (ft)"].max()) if len(tub_) else 5000.0
+    return lab_, od_, wall_, packer_
+
+
+def woe_inputs_sanding(res_, tvd_mid):
+    st.caption("Willson et al. (2002): critical bottom-hole flowing pressure CBHFP = (3 sigma1 - sigma3 - U - A Pr) / "
+               "(2 - A), U = 3.1 TWC, A = (1 - 2 nu) alpha / (1 - nu). Depletion lowers the horizontal stresses by the "
+               "stress path. The envelope keeps Pwf above Pr - (1 - margin) x critical drawdown.")
+    on = flag(st.toggle, "Sanding limit", "woe_sand_on", False)
+    c = st.columns(3)
+    tvd = num(c[0], "Mid-perforation depth (ft TVD)", "woe_sd_tvd", float(round(tvd_mid)), 100.0, 60000.0)
+    p_i = num(c[1], "Initial reservoir pressure (psia)", "woe_sd_pi", float(round(res_["pr"])), 15.0, 30000.0,
+              help="The pressure at which the stress gradients below were measured; depletion is from here.")
+    well_ = sel(c[2], "Well", ["vertical", "horizontal"], "woe_sd_well")
+    c = st.columns(3)
+    sv = num(c[0], "Overburden gradient (psi/ft)", "woe_sd_sv", 1.0, 0.5, 1.5, None, "%.3f")
+    sh = num(c[1], "Min. horizontal stress gradient (psi/ft)", "woe_sd_sh", 0.75, 0.3, 1.5, None, "%.3f")
+    ratio = num(c[2], "sigma_H / sigma_h", "woe_sd_ratio", 1.0, 1.0, 3.0, None, "%.3f")
+    c = st.columns(3)
+    nu = num(c[0], "Poisson's ratio (static)", "woe_sd_nu", 0.25, 0.0, 0.49, None, "%.3f")
+    alpha = num(c[1], "Biot coefficient", "woe_sd_biot", 1.0, 0.0, 1.0, None, "%.3f")
+    gam = num(c[2], "Stress path (d sigma_h / d Pp)", "woe_sd_gamma", 0.6, 0.0, 1.0, None, "%.3f")
+    c = st.columns(3)
+    src = sel(c[0], "Rock strength", ["TWC measured", "From UCS"], "woe_sd_src")
+    if src == "TWC measured":
+        twc = num(c[1], "TWC strength (psi)", "woe_sd_twc", 2000.0, 0.0, 1e5)
+        ucs, k_ = 800.0, 2.5
+    else:
+        ucs = num(c[1], "UCS (psi)", "woe_sd_ucs", 800.0, 0.0, 1e5)
+        k_ = num(c[2], "TWC / UCS", "woe_sd_k", 2.5, 0.5, 10.0, None, "%.3g")
+        twc = None
+    c = st.columns(3)
+    margin = num(c[0], "Safety margin (percent)", "woe_sd_margin", 20.0, 0.0, 90.0) / 100.0
+    az = "along sigma_H"
+    if well_ == "horizontal":
+        az = sel(c[1], "Horizontal well azimuth", ["along sigma_H", "along sigma_h"], "woe_sd_az")
+    inp_ = wsand.SandingInputs(tvd, p_i, sv, sh, ratio, nu, alpha, twc, ucs, k_, margin, gam, well_, az)
+    m = st.columns(4)
+    m[0].metric("CBHFP (psia)", f"{wsand.cbhfp(inp_, res_['pr']):,.0f}")
+    m[1].metric("Critical drawdown (psi)", f"{wsand.critical_drawdown(inp_, res_['pr']):,.0f}")
+    m[2].metric("Min. flowing BHP (psia)", f"{wsand.min_pwf(inp_, res_['pr']):,.0f}")
+    m[3].metric("Eaton sigma_h (psi)", f"{wsand.eaton_sh(inp_, res_['pr']):,.0f}",
+                help="Uniaxial-strain check on the minimum horizontal stress entered (no tectonic term).")
+    st.caption(f"At the IPR reservoir pressure {res_['pr']:,.0f} psia: {wsand.verdict(inp_, res_['pr'])}.")
+    with st.expander("Depletion"):
+        prs_ = np.linspace(p_i, max(p_i * 0.3, 15.0), 8)
+        st.dataframe(pd.DataFrame(wsand.depletion_table(inp_, prs_)), hide_index=True, width="stretch")
+    return inp_ if on else None
+
+
+def woe_inputs_coning(o, kind, res_):
+    modes = WOE_CONE_OIL if kind == "oil" else WOE_CONE_GAS
+    if kind == "oil":
+        st.caption("Critical oil rate: Meyer & Garder and Schols (water coning the lower of the two), Meyer & Garder "
+                   "for a gas cap; a thin oil rim with perforations placed for simultaneous breakthrough. Breakthrough "
+                   "time above the critical rate: Sobocinski & Cornelius and Bournazel & Jeanson; water cut after it: "
+                   "Kuo & DesBrisay. The envelope limits the liquid rate to the critical oil rate / (1 - water cut).")
+    else:
+        st.caption("Bottom water under a gas well (Hagoort 1988): Meyer-Garder (Dupuit) and Schols forms with the gas "
+                   "mobility and (kv/kh)^0.07, converted with Bg; the lower one, then the non-Darcy correction "
+                   "(Smulski 2012) with the turbulent / laminar ratio of the case's IPR. Screening values: against a "
+                   "numerical model they were 44-68 % high on average even after the correction.")
+    on = flag(st.toggle, "Coning limit", "woe_cn_on", False)
+    mode = sel(st, "Coning", modes, "woe_cn_mode")
+    st.button("Fill from PVT and IPR", on_click=_woe_fill, args=(res_,), key="woe_cn_fill",
+              help=f"Reservoir properties at {res_['pr']:,.0f} psia and {res_['t']:.0f} °F, k, h, re and rw from the IPR.")
+    c = st.columns(3)
+    if kind == "oil":
+        lab_h = "Oil column (ft)" if mode != WOE_CONE_OIL[2] else "Oil rim thickness (ft)"
+    else:
+        lab_h = "Gas column above the GWC (ft)"
+    h = num(c[0], lab_h, "woe_cn_h", float(round(res_["h"], 1)), 1.0, 5000.0)
+    hp = num(c[1], "Perforated interval (ft)", "woe_cn_hp", float(round(min(res_["h"] / 3, h * 0.9), 1)), 0.0, 5000.0,
+             help=("From the top of the oil column" if mode == WOE_CONE_OIL[0] else
+                   "From the base of the oil column" if mode == WOE_CONE_OIL[1] else
+                   "Placed in the rim for simultaneous breakthrough" if kind == "oil" else "From the top of the gas"))
+    hw = num(c[2], "Water zone thickness (ft)", "woe_cn_hw", 100.0, 0.0, 1e4,
+             help="Kuo & DesBrisay limiting water cut.") if kind == "oil" and mode == WOE_CONE_OIL[0] else 0.0
+    c = st.columns(4)
+    re_ = num(c[0], "Drainage radius (ft)", "woe_cn_re", float(round(res_["re"])), 10.0, 1e5)
+    rw_ = num(c[1], "Wellbore radius (ft)", "woe_cn_rw", float(res_["rw"]), 0.05, 5.0, None, "%.4g")
+    k_ = num(c[2], "Horizontal permeability (md)", "woe_cn_k", float(res_["k"]), 1e-3, 1e5, None, "%.4g",
+             help="Effective oil permeability (oil wells) / absolute permeability (gas wells).")
+    kvkh = num(c[3], "kv / kh", "woe_cn_kvkh", 0.1, 1e-4, 1.0, None, "%.4g")
+    if hp >= h:
+        st.error("The perforated interval must be less than the column.")
+    c = st.columns(4)
+    if kind == "oil":
+        phi = num(c[0], "Porosity (fraction)", "woe_cn_phi", float(res_["phi"]), 0.01, 0.5, None, "%.3f")
+        rho_o = num(c[1], "Oil density at reservoir (g/cc)", "woe_cn_rho_o", float(round(res_["rho_o"], 4)), 0.3, 1.2,
+                    None, "%.4f")
+        mu_o = num(c[2], "Oil viscosity at reservoir (cp)", "woe_cn_mu_o", float(round(res_["mu_o"], 4)), 0.01, 1e5,
+                   None, "%.4g")
+        bo_ = num(c[3], "Oil FVF (RB/STB)", "woe_cn_bo", float(round(res_["bo"], 4)), 1.0, 5.0, None, "%.4f")
+        c = st.columns(4)
+        kro = num(c[0], "kro end point", "woe_cn_kro", 0.8, 0.01, 1.0, None, "%.3f")
+        rho_w = num(c[1], "Water density at reservoir (g/cc)", "woe_cn_rho_w", float(round(res_["rho_w"], 4)), 0.9, 1.3,
+                    None, "%.4f")
+        mu_w = num(c[2], "Water viscosity (cp)", "woe_cn_mu_w", float(round(res_["mu_w"], 4)), 0.05, 10.0, None, "%.4g")
+        krw = num(c[3], "krw end point", "woe_cn_krw", 0.3, 0.01, 1.0, None, "%.3f")
+        c = st.columns(4)
+        rho_g = num(c[1], "Gas density at reservoir (g/cc)", "woe_cn_rho_g", float(round(res_["rho_g"], 4)), 0.01, 0.6,
+                    None, "%.4f")
+        mu_g = num(c[2], "Gas viscosity (cp)", "woe_cn_mu_g", float(round(res_["mu_g"], 5)), 0.005, 0.2, None, "%.4g")
+        krg = num(c[3], "krg end point", "woe_cn_krg", 0.6, 0.01, 1.0, None, "%.3f")
+        follow = flag(st.checkbox, "Oil properties follow the case's reservoir pressure", "woe_cn_follow", True,
+                      help="With a reservoir pressure sweep, the oil density, viscosity and FVF are re-evaluated "
+                           "from the PVT at each case's pressure.")
+        gas_ = mode == WOE_CONE_OIL[1]
+        cone = wcone.ConeInputs(h, min(hp, h * 0.999), re_, rw_, k_, k_ * kvkh, phi, rho_o, mu_o, bo_,
+                                rho_g if gas_ else rho_w, mu_g if gas_ else mu_w, krg if gas_ else krw, kro, hw,
+                                "gas" if gas_ else "water")
+        cache_ = {}
+
+        def update(c_, params):
+            pr_ = float(params.get("pr", res_["pr"]))
+            if not follow or abs(pr_ - res_["pr"]) < 0.5:
+                return c_
+            if pr_ not in cache_:
+                cache_[pr_] = _woe_reservoir(o, kind, ss["ipr_curve"], ss["equipment"], pr_)
+            r_ = cache_[pr_]
+            return dataclasses.replace(c_, rho_o=r_["rho_o"], mu_o=r_["mu_o"], bo=r_["bo"])
+        rim = (rho_w, rho_g) if mode == WOE_CONE_OIL[2] else None
+        limit = wwoe.oil_coning(cone, update, rim)
+        m = st.columns(4)
+        if rim:
+            r_ = wcone.oil_rim(cone, rho_w, rho_g)
+            m[0].metric("Critical oil rate (STB/d)", f"{r_['Critical rate (STB/d)']:,.1f}")
+            m[1].metric("GOC to top perforation (ft)", f"{r_['Dt (ft)']:,.1f}")
+            m[2].metric("Base perforation to WOC (ft)", f"{r_['Db (ft)']:,.1f}")
+            m[3].metric("Gravity drawdown (psi)", f"{r_['Gravity drawdown (psi)']:,.1f}")
+        else:
+            qc_ = wcone.critical_rate(cone)
+            m[0].metric("Critical oil rate (STB/d)", f"{qc_:,.1f}")
+            m[1].metric("Meyer-Garder (STB/d)", f"{wcone.meyer_garder(cone):,.1f}")
+            m[2].metric("Schols (STB/d)", f"{wcone.schols(cone):,.1f}" if not gas_ else "—")
+            m[3].metric("Gravity drawdown (psi)", f"{wcone.gravity_drawdown(cone):,.2f}",
+                        help="Static screen: the drawdown that lifts a static cone to the perforations.")
+            with st.expander("Breakthrough time and water cut"):
+                st.caption("Above the critical rate the cone breaks through after t_BT. " +
+                           ("Gas: mobility ratio " + f"{cone.mobility_ratio:.3g}" + " - the correlations were built "
+                            "for water coning (M up to ~10), indicative only." if gas_ else
+                            f"Mobility ratio {cone.mobility_ratio:.3g}; limiting water cut "
+                            f"{100 * wcone.limiting_water_cut(cone):.1f} %."))
+                rows_ = []
+                for f_ in (1.5, 2, 3, 5, 10, 20):
+                    q_ = qc_ * f_
+                    rows_.append({"Oil rate (STB/d)": q_, "Z": wcone.cone_height_z(cone, q_),
+                                  "Sobocinski-Cornelius (days)": wcone.breakthrough_time(cone, q_),
+                                  "Bournazel-Jeanson (days)": wcone.breakthrough_time(cone, q_, "Bournazel-Jeanson")})
+                st.dataframe(pd.DataFrame(rows_).replace(np.inf, np.nan), hide_index=True, width="stretch")
+                if not gas_:
+                    q_f = num(st, "Forecast oil rate (STB/d)", "woe_cn_qf", float(round(max(qc_ * 5, 10.0))), 1.0, 1e6)
+                    tbt_ = wcone.breakthrough_time(cone, q_f)
+                    if np.isfinite(tbt_):
+                        t_ = np.round(np.geomspace(max(tbt_ * 0.3, 1.0), tbt_ * 8, 10))
+                        st.dataframe(pd.DataFrame({"Time (days)": t_, "Water cut (%)": 100 * wcone.kuo_desbrisay_wc(
+                            cone, t_, tbt_)}), hide_index=True, width="stretch")
+                    else:
+                        st.caption("Stable cone at this rate (Z above 3.5): no breakthrough predicted.")
+    else:
+        rho_w = num(c[0], "Water density at reservoir (g/cc)", "woe_cn_rho_w", float(round(res_["rho_w"], 4)), 0.9,
+                    1.3, None, "%.4f")
+        rho_g = num(c[1], "Gas density at reservoir (g/cc)", "woe_cn_rho_g", float(round(res_["rho_g"], 4)), 0.005, 0.6,
+                    None, "%.4f")
+        mu_g = num(c[2], "Gas viscosity at reservoir (cp)", "woe_cn_mu_g", float(round(res_["mu_g"], 5)), 0.005, 0.2,
+                   None, "%.4g")
+        z_ = num(c[3], "Gas Z factor at reservoir", "woe_cn_z", float(round(res_["z"], 4)), 0.2, 2.0, None, "%.4f")
+        c = st.columns(4)
+        krg = num(c[0], "krg end point", "woe_cn_krg", 0.9, 0.01, 1.0, None, "%.3f",
+                  help="Gas relative permeability at the connate water saturation.")
+        nd = flag(c[1].checkbox, "Non-Darcy correction", "woe_cn_nd", True,
+                  help="Turbulent / laminar ratio from each case's IPR (Jones, Forchheimer or Petroleum Experts); "
+                       "for other IPR models enter D below.")
+        d_user = num(c[2], "Non-Darcy ratio, if the IPR has none (1/(Mscf/d))", "woe_cn_ratio", 0.0, 0.0, 1.0, None,
+                     "%.4g", help="Turbulent / laminar coefficient ratio; 0 = no correction.")
+        cone = wcone.GasConeInputs(h, min(hp, h * 0.999), re_, rw_, k_, kvkh, krg, rho_w, rho_g, mu_g, z_, res_["t"],
+                                   res_["pr"])
+        cache_ = {}
+
+        def update(c_, params):
+            pr_ = float(params.get("pr", res_["pr"]))
+            if abs(pr_ - res_["pr"]) < 0.5:
+                return c_
+            if pr_ not in cache_:
+                cache_[pr_] = _woe_reservoir(o, kind, ss["ipr_curve"], ss["equipment"], pr_)
+            r_ = cache_[pr_]
+            return dataclasses.replace(c_, rho_g=r_["rho_g"], mu_g=r_["mu_g"], z=r_["z"], p=pr_)
+        ratio_ipr = wcone.ipr_turbulence_ratio(ss["ipr_curve"])
+        ratio_ = None if ratio_ipr is not None else (d_user if d_user > 0 else None)
+        limit = wwoe.gas_coning(cone, update, ratio_, nd)
+        m = st.columns(4)
+        m[0].metric("Meyer-Garder, Darcy (MMscf/d)", f"{wcone.gas_meyer_garder(cone) / 1000:,.3f}")
+        m[1].metric("Schols, Darcy (MMscf/d)", f"{wcone.gas_schols(cone) / 1000:,.3f}")
+        r_used = (ratio_ipr if ratio_ipr is not None else ratio_) if nd else None
+        m[2].metric("Critical gas rate (MMscf/d)", f"{wcone.gas_critical_rate(cone, r_used) / 1000:,.3f}")
+        m[3].metric("Bg (RB/Mscf)", f"{cone.bg_rb_mscf:.4f}")
+        st.caption("Non-Darcy ratio " + (f"{r_used:.4g} 1/(Mscf/d)" + (" from the IPR" if ratio_ipr is not None
+                                                                       else " entered") if r_used else "not applied")
+                   + ".")
+    return limit if on else None
+
+
+def woe_inputs_tubing(eqd):
+    st.caption("API TR 5C3 / ISO TR 10400 pipe-body ratings along the tubing from surface to the packer, against the "
+               "A-annulus (surface pressure + packer fluid): burst, collapse (with the axial and internal-pressure "
+               "reduction), axial and von Mises. Shut-in: gas to surface from the reservoir pressure. Not covered: "
+               "connections, wear, corrosion allowance, buckling, thermal and ballooning loads.")
+    on = flag(st.toggle, "Tubing stress limits", "woe_tb_on", False)
+    lab0, od0, wall0, packer0 = _woe_tubing_default(eqd)
+    c = st.columns(3)
+    size = sel(c[0], "Tubing", [WOE_TUBE_CUSTOM] + list(wtub.TUBING), "woe_tb_size", lab0)
+    if size == WOE_TUBE_CUSTOM:
+        od = num(c[1], "Tubing OD (in)", "woe_tb_od", od0, 0.5, 20.0, None, "%.4g")
+        wall = num(c[2], "Wall thickness (in)", "woe_tb_wall", float(round(wall0, 4)), 0.05, 2.0, None, "%.4g")
+        c = st.columns(3)
+        wt = num(c[0], "Nominal weight (lb/ft)", "woe_tb_wt", float(round(10.69 * (od - wall) * wall, 2)), 0.5, 200.0,
+                 None, "%.4g", help="Default: plain-end weight 10.69 (D - t) t.")
+    else:
+        od, wt, wall = wtub.TUBING[size]
+        c[1].text_input("OD / wall", f'{od:g}" / {wall:g}"', disabled=True)
+        c[2].text_input("Nominal weight", f"{wt:g} lb/ft", disabled=True)
+        c = st.columns(3)
+    grade = sel(c[1], "Grade", list(wtub.GRADES), "woe_tb_grade", "L-80")
+    derate = num(c[2], "Yield derating (percent)", "woe_tb_derate", 0.0, 0.0, 60.0,
+                 help="Temperature or corrosion derating of the yield strength.")
+    pipe = wtub.Tubular(od, wall, wt, grade, 1 - derate / 100.0)
+    c = st.columns(4)
+    packer = num(c[0], "Packer depth (ft MD)", "woe_tb_packer", float(round(packer0)), 100.0, 60000.0)
+    p_ann = num(c[1], "Annulus surface pressure (psia)", "woe_tb_pann", 14.7, 0.0, 2e4)
+    ppg = num(c[2], "Packer fluid density (ppg)", "woe_tb_ppg", 8.6, 6.0, 20.0, None, "%.3g")
+    extra = num(c[3], "Additional axial load (lbf)", "woe_tb_extra", 0.0, -1e6, 1e6, None, "%.6g",
+                help="From a tubing movement analysis; tension positive.")
+    c = st.columns(5)
+    df_ = wtub.DesignFactors(num(c[0], "Burst DF", "woe_tb_dfb", 1.1, 1.0, 3.0, None, "%.3g"),
+                             num(c[1], "Collapse DF", "woe_tb_dfc", 1.0, 0.8, 3.0, None, "%.3g"),
+                             num(c[2], "Axial DF", "woe_tb_dfa", 1.3, 1.0, 3.0, None, "%.3g"),
+                             num(c[3], "Triaxial DF", "woe_tb_dft", 1.25, 1.0, 3.0, None, "%.3g"))
+    method = sel(c[4], "Collapse under tension", ["ISO", "API"], "woe_tb_method",
+                 help="ISO TR 10400 includes the internal pressure in the reduced yield (the more conservative); "
+                      "API 5C3 the axial stress only.")
+    m = st.columns(4)
+    m[0].metric("Burst rating (psi)", f"{pipe.burst:,.0f}")
+    m[1].metric("Collapse rating (psi)", f"{pipe.collapse:,.0f}", help=wtub.collapse_regime(pipe.dt, pipe.y) + " collapse")
+    m[2].metric("Body yield (lbf)", f"{pipe.body_yield:,.0f}")
+    m[3].metric("D/t", f"{pipe.dt:.2f}")
+    return wwoe.TubingCheck(pipe, packer, p_ann, ppg, extra, df_, method) if on else None
+
+
+WOE_LIM_COLORS = {"whp_min": "#2a78d6", "whp_max": "#2a78d6", "stability": "#52514e", "turner": "#1baf7a",
+                  "pe5": "#1baf7a", "erosion": "#c0392b", "hydrate": "#8e44ad", "coning": "#eda100",
+                  "sanding": "#eb6834", "burst": "#7f8c8d", "collapse": "#7f8c8d", "triaxial": "#7f8c8d",
+                  "aof": "#52514e", "grid": "#52514e"}
+
+
+def _woe_label(e, names):
+    return ", ".join(f"{names.get(k_, k_).split(' (')[0]} {e.params[k_]:g}" for k_ in names if k_ in e.params)
+
+
+def _woe_qmax(envs):
+    his = [w[1] for e in envs for w in e.windows]
+    ops = [e.op["Rate"] for e in envs if e.op]
+    q_all = max(e.rates.max() for e in envs)
+    if not his and not ops:
+        return q_all
+    return min(q_all, 1.35 * max(his + ops))
+
+
+def woe_plot(envs, kind, names, view="bhp", max_curves=12):
+    from matplotlib.lines import Line2D
+    qunit = "STB/d" if kind == "oil" else "MMscf/d"
+    shown = envs[:max_curves]
+    fig, ax = plt.subplots(figsize=(9, 5.4))
+    cmap = plt.get_cmap("tab10" if len(shown) <= 10 else "tab20")
+    qmax = _woe_qmax(shown)
+    ytop = 0.0
+    for i, e in enumerate(shown):
+        col = cmap(i % cmap.N)
+        y = e.pwf if view == "bhp" else e.whp
+        lab = _woe_label(e, names) or "Base case"
+        ax.plot(e.rates, y, color=col, lw=1.0, alpha=0.6)
+        ok = np.isfinite(y)
+        if view == "bhp":
+            ax.plot(e.rates, e.vlp_min, color=col, lw=0.9, ls="--", alpha=0.8)
+            if e.vlp_max is not None:
+                ax.plot(e.rates, e.vlp_max, color=col, lw=0.9, ls=":", alpha=0.9)
+            if e.sand_pwf is not None and e.sand_pwf > 0:
+                ax.plot([0, qmax], [e.sand_pwf] * 2, color=col, lw=0.9, ls="-.")
+            ytop = max(ytop, float(np.nanmax(e.pwf)))
+        else:
+            ytop = max(ytop, float(np.nanmax(y)) if ok.any() else 0.0)
+        if e.cone_rate is not None and 0 < e.cone_rate < qmax:
+            ax.axvline(e.cone_rate, color=col, lw=0.9, ls=(0, (1, 3)))
+        first = True
+        for a, b, la, lb in e.windows:
+            q = np.unique(np.r_[a, e.rates[(e.rates > a) & (e.rates < b)], b])
+            if view == "bhp":
+                yy = np.interp(q, e.rates, e.pwf)
+            else:
+                if ok.sum() < 2:
+                    continue
+                q = q[(q >= e.rates[ok][0]) & (q <= e.rates[ok][-1])]
+                yy = np.interp(q, e.rates[ok], y[ok])
+                for end_, lim_ in ((a, la), (b, lb)):          # a WHP limit at the end: the level itself
+                    if lim_ in ("whp_min", "whp_max"):
+                        q = np.append(q, end_)
+                        yy = np.append(yy, e.whp_levels[lim_])
+                o_ = np.argsort(q)
+                q, yy = q[o_], yy[o_]
+            if not len(q):
+                continue
+            ax.plot(q, yy, color=col, lw=3.4, solid_capstyle="round", label=lab if first else None)
+            first = False
+            for qe, ye, le in ((q[0], yy[0], la), (q[-1], yy[-1], lb)):
+                ax.scatter([qe], [ye], s=34, color=WOE_LIM_COLORS.get(le, "#52514e"), edgecolor="white",
+                           linewidth=0.8, zorder=6)
+                if len(shown) <= 3:
+                    ax.annotate(wwoe.LIMIT_LABELS.get(le, ""), (qe, ye), textcoords="offset points",
+                                xytext=(4, 6), fontsize=7.5, color=wplt.INK2)
+        if first:
+            ax.plot([], [], color=col, lw=3.4, label=lab + " - no window")
+        if e.op:
+            yo = e.op["Pwf (psia)"] if view == "bhp" else e.op["WHP (psia)"]
+            ax.scatter([e.op["Rate"]], [yo], marker="*", s=130, color=col, edgecolor=wplt.INK, linewidth=0.6,
+                       zorder=7)
+    if view == "whp":
+        lv = shown[0].whp_levels
+        for k_, ls_ in (("whp_min", "--"), ("whp_max", ":")):
+            if lv.get(k_) is not None:
+                ax.axhline(lv[k_], color=wplt.INK2, lw=1.0, ls=ls_)
+                ytop = max(ytop, float(lv[k_]))
+        mx = [e.shut_in.get("Max WHP for burst (psia)") for e in shown if e.shut_in]
+        if mx and min(mx) < 1.3 * max(ytop, 1.0):
+            ax.axhline(min(mx), color=WOE_LIM_COLORS["burst"], lw=1.2, ls="-.")
+    ax.set_xlim(0, qmax)
+    ax.set_ylim(0, max(ytop, 1.0) * 1.08)
+    ax.set_xlabel(f"Rate ({qunit})")
+    ax.set_ylabel("Flowing bottom-hole pressure (psia)" if view == "bhp" else "Wellhead pressure (psia)")
+    ax.grid(alpha=0.3, ls="--")
+    keys = [Line2D([], [], color=wplt.INK2, lw=1.0, alpha=0.6, label="IPR" if view == "bhp" else "Inflow at wellhead"),
+            Line2D([], [], color=wplt.INK2, lw=3.4, label="Operating window"),
+            Line2D([], [], color=wplt.INK2, marker="*", ls="", ms=10, label="At the operating WHP")]
+    if view == "bhp":
+        keys += [Line2D([], [], color=wplt.INK2, ls="--", lw=0.9, label="VLP at min. WHP"),
+                 Line2D([], [], color=wplt.INK2, ls=":", lw=0.9, label="VLP at max. WHP"),
+                 Line2D([], [], color=wplt.INK2, ls="-.", lw=0.9, label="Sanding min. Pwf")]
+    else:
+        keys += [Line2D([], [], color=wplt.INK2, ls="--", lw=1.0, label="Min. WHP"),
+                 Line2D([], [], color=wplt.INK2, ls=":", lw=1.0, label="Max. WHP"),
+                 Line2D([], [], color=WOE_LIM_COLORS["burst"], ls="-.", lw=1.2, label="Tubing burst at wellhead")]
+    keys.append(Line2D([], [], color=wplt.INK2, ls=(0, (1, 3)), lw=0.9, label="Coning critical rate"))
+    leg1 = ax.legend(handles=keys, fontsize=7.5, loc="upper right")
+    ax.add_artist(leg1)
+    if len(shown) > 1:
+        ax.legend(fontsize=7.5, loc="lower left", ncol=2 if len(shown) > 6 else 1)
+    ax.set_title(("Operating envelope - bottom-hole pressure" if view == "bhp" else
+                  "Operating envelope - wellhead pressure") + "  (dots: binding limits)", fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def woe_pr_plot(envs, kind, names):
+    """Window against reservoir pressure, one band per combination of the other swept variables."""
+    qunit = "STB/d" if kind == "oil" else "MMscf/d"
+    groups = {}
+    for e in envs:
+        key_ = tuple((k_, e.params[k_]) for k_ in names if k_ != "pr" and k_ in e.params)
+        groups.setdefault(key_, []).append(e)
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    cmap = plt.get_cmap("tab10")
+    for i, (key_, es) in enumerate(groups.items()):
+        es = sorted(es, key=lambda e: e.params["pr"])
+        pr_ = np.array([e.params["pr"] for e in es])
+        lo = np.array([e.window[0] if e.window else np.nan for e in es])
+        hi = np.array([e.window[1] if e.window else np.nan for e in es])
+        col = cmap(i % 10)
+        lab = ", ".join(f"{names[k_].split(' (')[0]} {v_:g}" for k_, v_ in key_) or "Window"
+        ax.fill_between(pr_, lo, hi, color=col, alpha=0.18, lw=0)
+        ax.plot(pr_, hi, color=col, lw=1.8, marker="o", ms=4, label=lab)
+        ax.plot(pr_, lo, color=col, lw=1.2, ls="--", marker="o", ms=3)
+        op = np.array([e.op["Rate"] if e.op else np.nan for e in es])
+        ax.plot(pr_, op, color=col, lw=0, marker="*", ms=9)
+    ax.set_xlabel("Reservoir pressure (psia)")
+    ax.set_ylabel(f"Rate ({qunit})")
+    ax.set_ylim(bottom=0)
+    ax.grid(alpha=0.3, ls="--")
+    ax.set_title("Operating window against reservoir pressure (solid: max. rate, dashed: min. rate, *: at the "
+                 "operating WHP)", fontsize=10)
+    ax.legend(fontsize=7.5)
+    fig.tight_layout()
+    return fig
+
+
+def woe_tab(o, eqd, ipr_curve):
+    kind = "gas" if o.is_gas else "oil"
+    qunit = "STB/d" if kind == "oil" else "MMscf/d"
+    gmd, gt = eqd["geothermal"]
+    res_ = _woe_reservoir(o, kind, ipr_curve, eqd)
+    top_, secs_, pts_ = eqd["downhole"]
+    smd_, stvd_ = eqd["survey"]
+    path = with_thermal(wvlp.build_flow_path(top_, secs_, pts_, smd_, stvd_, gmd, gt, o.flow_type, []))
+    tvd_mid = float(path.tvd[-1])
+    t_in, t_sd, t_cn, t_tb, t_res = st.tabs(["Operating limits and sweeps", "Sanding", "Coning", "Tubing stress",
+                                             "Results"])
+    with t_in:
+        st.caption("The range of rates the well can be produced at, for every combination of the swept reservoir "
+                   "pressure, " + ("water cut and GOR" if kind == "oil" else "WGR and separator GOR") + ". Each "
+                   "operating point lies on the inflow: at a rate the IPR gives the flowing bottom-hole pressure and "
+                   "the tubing traversed upwards the wellhead pressure; every limit switched on is checked there. "
+                   "Natural flow at the wellhead (surface equipment and artificial lift are not part of the envelope).")
+        left, right = st.columns([1, 1], gap="large")
+        with left:
+            st.markdown("**Pressure limits**")
+            c = st.columns(3)
+            whp_min = num(c[0], "Minimum WHP (psia)", "woe_whp_min", 150.0 if kind == "oil" else 300.0, 14.7, 2e4,
+                          help="Separator / flowline back pressure: the lowest WHP the well can be produced at.")
+            use_max = flag(c[1].checkbox, "Maximum WHP", "woe_whp_max_on", False)
+            whp_max = num(c[1], "Maximum WHP (psia)", "woe_whp_max", 2000.0, 14.7, 3e4, disabled=not use_max,
+                          help="Facility or flowline rating: rates whose WHP would be higher are excluded.") \
+                if use_max else None
+            whp_op = num(c[2], "Operating WHP (psia)", "woe_whp_op",
+                         float(val("sys_whp", 250.0 if kind == "oil" else 1500.0)), 14.7, 3e4,
+                         help="The rate at this WHP (system-analysis solution) is marked and checked against the "
+                              "window.")
+            st.markdown("**Flow limits**")
+            c = st.columns(2)
+            stab = flag(c[0].checkbox, "Stability (VLP minimum)", "woe_stab", True,
+                        help="Left of the WHP maximum of the inflow a fixed back pressure gives the unstable, "
+                             "left-hand intersection.")
+            tur = flag(c[1].checkbox, "Liquid loading (Turner)", "woe_turner", kind == "gas", disabled=kind != "gas",
+                       help="Gas wells: the mixture velocity at every node above the Turner velocity (constant in "
+                            "the Calculation tab options).")
+            c = st.columns(2)
+            pe5 = flag(c[0].checkbox, "PE5 film stability", "woe_pe5", kind == "gas",
+                       help="PROSPER's PE5 stability flag: no liquid film reversal at any node. Meant for gas-"
+                            "dominated flow; oil wells with free gas near the top are often flagged.")
+            ero = flag(c[1].checkbox, "Erosional velocity", "woe_erosion", True,
+                       help="API RP 14E with the C-factor (and sand rate) of the Calculation tab options.")
+            hyd_curve = hydrate_curve_current()
+            c = st.columns(2)
+            hyd = flag(c[0].checkbox, "Hydrates", "woe_hydrate", hyd_curve is not None, disabled=hyd_curve is None,
+                       help="Every node warmer than the hydrate curve of the PVT warnings." if hyd_curve is not None
+                       else "Turn on the hydrate warning in the PVT tab to use it.")
+            st.markdown("**Flow model**")
+            ms = ss.get("vlp_matches", {}).get("ms", {})
+            corr_opts = [c_ for c_ in wvlp.VLP_CORRELATIONS if c_ not in wvlp.LOWER_BOUNDS]
+            c = st.columns(3)
+            dflt_c = val("sys_corr", ss.get("vlp_selected") or "hagedorn_brown")
+            corr = sel(c[0], "Vertical lift correlation", corr_opts, "woe_corr",
+                       dflt_c if dflt_c in corr_opts else "hagedorn_brown", format_func=VLP_LABELS.get)
+            m_fit = ms.get(corr)
+            if m_fit is not None:
+                p1, p2 = float(m_fit.p1), float(m_fit.p2)
+                c[1].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True)
+                c[2].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True)
+                st.caption("Parameters from Match VLP.")
+            else:
+                p1 = num(c[1], "Parameter 1 (gravity)", f"woe_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
+                p2 = num(c[2], "Parameter 2 (friction)", f"woe_p2_{corr}", 1.0, 0.01, 10.0, None, "%.4f")
+            u_ = float(val("eq_u", eqd.get("u_geo", 8.0)))
+            st.caption(f"U = {u_:.4g} BTU/h/ft2/F. IPR: {ss.get('ipr_meta', {}).get('model', '')} "
+                       f"(Pr {ipr_curve.pr:,.0f} psia).")
+        with right:
+            st.markdown("**Sweeps**")
+            can_pr = ipr_arg("pr") is not None
+            pr_vals = num_list(st, "Reservoir pressure (psia)", "woe_sw_pr", f"{ipr_curve.pr:.6g}",
+                               "comma separated (up to 6)") if can_pr else [float(ipr_curve.pr)]
+            if not can_pr:
+                st.caption("The IPR cannot be rebuilt at another reservoir pressure - the IPR tab's curve is used.")
+            if kind == "oil":
+                m_ = blackoil_model(o) if o.method != "eos" else None
+                wc_vals = num_list(st, "Water cut (%)", "woe_sw_wc", f"{float(val('sys_wc', val('ipr_wc', 0.0))):g}",
+                                   "comma separated (up to 6)")
+                gor_vals = num_list(st, "Total GOR (scf/STB)", "woe_sw_gor",
+                                    f"{float(val('sys_gor', m_.inp.rsb if m_ else 500.0)):g}",
+                                    "comma separated (up to 6)")
+                sweeps = {"pr": pr_vals, "wc": wc_vals, "gor": gor_vals}
+                names = {"pr": "Pr (psia)", "wc": "WC (%)", "gor": "GOR (scf/STB)"}
+            else:
+                wgr_vals = num_list(st, "Water gas ratio (STB/MMscf)", "woe_sw_wgr", f"{float(val('sys_wgr', 0.0)):g}",
+                                    "comma separated (up to 6)")
+                sg_vals = num_list(st, "Separator GOR (scf/STB)", "woe_sw_sgor",
+                                   f"{float(val('sys_sep_gor', 0.0)):g}", "comma separated (up to 6); 0 = dry gas")
+                sweeps = {"pr": pr_vals, "wgr": wgr_vals, "sep_gor": sg_vals}
+                names = {"pr": "Pr (psia)", "wgr": "WGR (STB/MMscf)", "sep_gor": "Separator GOR (scf/STB)"}
+            sweeps = {k_: list(dict.fromkeys(v_))[:6] for k_, v_ in sweeps.items() if v_}
+            n_case = int(np.prod([len(v_) for v_ in sweeps.values()])) if sweeps else 1
+            st.caption(f"{n_case} case(s).")
+            if getattr(ipr_curve, "mix", None) is not None:
+                st.caption("Multilayer IPR: the water cut and GOR follow the layer contributions at each rate.")
+    with t_sd:
+        sand = woe_inputs_sanding(res_, tvd_mid)
+    with t_cn:
+        cone = woe_inputs_coning(o, kind, res_)
+    with t_tb:
+        tube = woe_inputs_tubing(eqd)
+    with t_res:
+        lim = wwoe.Limits(whp_min=whp_min, whp_max=whp_max, stability=stab, turner=tur and kind == "gas", pe5=pe5,
+                          erosion=ero, hydrate=hyd and hyd_curve is not None, sanding=sand, coning=cone, tubing=tube,
+                          comp=comp_current())
+        sig = (kind, whp_min, whp_max, whp_op, stab, tur, pe5, ero, hyd, corr, p1, p2, u_, repr(sweeps), repr(sand),
+               cone is not None, repr(tube), float(ipr_curve.pr), float(ipr_curve.aof),
+               tuple(sorted((k_, repr(v_)) for k_, v_ in ss.items() if isinstance(k_, str) and k_.startswith("_v_woe_cn"))))
+        go = st.button("Calculate envelope", type="primary", key="woe_go")
+        if go:
+            try:
+                base = {"whp": whp_op, "u": u_, "pr": float(ipr_curve.pr)}
+                if kind == "oil":
+                    base.update({"wc": sweeps.get("wc", [0.0])[0], "gor": sweeps.get("gor", [500.0])[0]})
+                else:
+                    base.update({"wgr": sweeps.get("wgr", [0.0])[0], "sep_gor": sweeps.get("sep_gor", [0.0])[0]})
+                combos = wsys.combinations(sweeps)
+                if not can_pr:
+                    combos = [{k_: v_ for k_, v_ in c_.items() if k_ != "pr"} for c_ in combos]
+
+                def ipr_for(ch):
+                    if not ch:
+                        return ipr_curve
+                    try:
+                        return rebuild_ipr(ch)
+                    except ValueError:
+                        if set(ch) <= {"wc", "gor"}:
+                            return ipr_curve
+                        raise
+                pr_hi = max([float(ipr_curve.pr)] + list(sweeps.get("pr", [])))
+                fluid, fluid_note = vlp_fluid(o, kind, max(pr_hi, 5000.0) * 1.15, float(np.min(gt)) - 10,
+                                              float(np.max(gt)) + 10)
+                if fluid is None:
+                    raise ValueError(fluid_note)
+                with st.spinner(f"Calculating the envelope of {len(combos)} case(s)..."):
+                    envs = wwoe.build(path, fluid, kind, base, combos, ipr_for, corr, lim, p1, p2,
+                                      eqd["heat_capacities"])
+                ss["woe_res"] = {"sig": sig, "envs": envs, "kind": kind, "names": names, "note": fluid_note}
+            except (ValueError, TypeError, KeyError) as e:
+                st.error(f"Calculation failed: {e}")
+        out = ss.get("woe_res")
+        if not out or out["kind"] != kind:
+            st.info("Set the limits and sweeps, then press Calculate envelope.")
+            return
+        if out["sig"] != sig:
+            st.info("Inputs have changed since the last calculation - press Calculate envelope to update.")
+        envs, names = out["envs"], out["names"]
+        names_shown = {k_: v_ for k_, v_ in names.items() if len({e.params.get(k_) for e in envs}) > 1}
+        tab_ = wwoe.summary_table(kind, envs, names)
+        st.markdown(f"**Operating windows** - {len(envs)} case(s). PVT: {out['note']}.")
+        st.dataframe(tab_, hide_index=True, width="stretch")
+        st.download_button("Download the windows (CSV)", tab_.to_csv(index=False).encode(), "operating_envelope.csv",
+                           "text/csv", key="woe_dl")
+        c = st.columns(2)
+        c[0].pyplot(woe_plot(envs, kind, names_shown, "bhp"), clear_figure=True)
+        c[1].pyplot(woe_plot(envs, kind, names_shown, "whp"), clear_figure=True)
+        if "pr" in names_shown and len({e.params["pr"] for e in envs}) > 1 and any(e.window for e in envs):
+            st.columns(2)[0].pyplot(woe_pr_plot(envs, kind, names_shown), clear_figure=True)
+        st.markdown("**Case detail**")
+        labels_ = [f"{i + 1}: " + (_woe_label(e, names_shown) or "Base case") for i, e in enumerate(envs)]
+        pick = st.selectbox("Case", labels_, key="woe_case")
+        e = envs[labels_.index(pick)]
+        for n_ in e.notes:
+            st.warning(n_)
+        c = st.columns(2)
+        with c[0]:
+            st.markdown("Limits")
+            st.dataframe(wwoe.limits_table(kind, e), hide_index=True, width="stretch")
+        with c[1]:
+            rows_ = []
+            if e.op:
+                rows_ += [{"Item": f"Rate at the operating WHP ({qunit})", "Value": e.op["Rate"]},
+                          {"Item": "Pwf at the operating WHP (psia)", "Value": e.op["Pwf (psia)"]},
+                          {"Item": "Operating point", "Value": "Inside the window" if e.op["Inside window"]
+                           else "Violates: " + ", ".join(e.op["Violated"])}]
+            if e.cone_rate is not None:
+                rows_.append({"Item": f"Coning critical rate ({qunit})", "Value": e.cone_rate})
+            if e.sand_pwf is not None:
+                rows_.append({"Item": "Sanding min. Pwf (psia)", "Value": e.sand_pwf})
+            for k_, v_ in e.shut_in.items():
+                rows_.append({"Item": k_, "Value": v_})
+            if rows_:
+                st.markdown("Checks")
+                for r_ in rows_:
+                    v_ = r_["Value"]
+                    r_["Value"] = (f"{v_:,.6g}" if np.isfinite(v_) else "—") if isinstance(v_, (int, float)) else str(v_)
+                st.dataframe(pd.DataFrame(rows_), hide_index=True, width="stretch")
+        with st.expander("Curves and margins"):
+            st.caption("Margins: positive where the limit is satisfied (WHP and Pwf limits in psi, velocities and the "
+                       "PE5 ratio as fractions, hydrates in °F, tubing as safety factor / design factor - 1).")
+            st.dataframe(wwoe.curve_table(kind, e), hide_index=True, width="stretch")
+
+
 with tabs[6]:
     st.header("Design")
     design_kind = st.radio("Artificial lift", ["Gas lift (continuous)", "Gas lift (intermittent)",
@@ -11279,6 +11927,29 @@ def _apply_preset(box_key):
 
 
 with tabs[7]:
+    st.header("Well Operating Envelope")
+    o = ss.get("options")
+    eqd = ss.get("equipment", {})
+    ipr_curve = ss.get("ipr_curve")
+    blocker = None
+    if o is None or o.errors:
+        blocker = "Fix the configuration in the Options summary first."
+    elif o.is_injector:
+        blocker = "The operating envelope applies to producers."
+    elif getattr(o, "artificial_lift", "none") not in ("none",):
+        blocker = ("The operating envelope is for naturally flowing wells - set Artificial lift to None in the "
+                   "Options summary to use it.")
+    elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
+        blocker = "Complete the Equipment Data tab first."
+    elif ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil"):
+        blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
+    if blocker:
+        st.info(blocker)
+    else:
+        st.caption("Erosional velocity, Turner constant and sand rate: the Options panel of the Calculation tab. "
+                   "Hydrate curve: the PVT tab warnings.")
+        woe_tab(o, eqd, ipr_curve)
+with tabs[8]:
     st.header("Units")
     st.caption("Choose the units for inputs and results. Every value is stored in oilfield units, so changing units "
                "never changes the model - inputs, tables, plots and downloads are converted on screen. Pressure "

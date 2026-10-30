@@ -5957,3 +5957,172 @@ def test_spot_ipr_t09():
     assert abs(res[0].q / data["system"]["liquid"] - 1) < 0.005 and abs(res[0].pwf - G - 2274.1) < 25
     proj = json.load(open(Path(__file__).parent.parent / "examples" / "T09_SPOT_IPR.fluxwell.json"))
     assert proj["inputs"]["ipr_model_oil"] == "SPOT" and proj["inputs"]["ipr_wc"] == 20.0
+
+
+# ------------------------------------------------------------ well operating envelope: tubulars, sanding, coning
+from fluxwell import tubulars as wtub, sanding as wsand, coning as wcone, woe as wwoe
+from fluxwell import complementary as CX
+
+
+def test_tubulars_match_burst_collapse_workbook():
+    """The user's Tubing Burst & Collapse Calculator (API 5C3 / ISO TR 10400): catalog ratings and the load profile
+    of 3-1/2" 9.30 lb/ft L-80 to a 9,000 ft packer."""
+    p = wtub.Tubular(3.5, 0.254, 9.3, "L-80")
+    assert p.burst == pytest.approx(10160.0) and p.collapse == pytest.approx(10535.03, abs=0.01)
+    assert wtub.collapse_regime(p.dt, p.y) == "Plastic"
+    assert wtub.collapse_rating(2.375, 0.190, 110000) == pytest.approx(16128.95, abs=0.01)
+    assert wtub.collapse_rating(5.5, 0.304, 125000) == pytest.approx(7889.09, abs=0.01)
+    z = np.linspace(0, 9000, 21)
+    b = wtub.check_profile(p, z, 3100 + 0.1 * z, 0.447 * z, 9000, 8.6, 20000, method="API")
+    c = wtub.check_profile(p, z, 0 * z, 1500 + 0.447 * z, 9000, 8.6, 20000, method="API")
+    assert b.min_sf()["burst"] == pytest.approx(3.2774, abs=1e-4)
+    assert c.min_sf()["collapse"] == pytest.approx(1.8275, abs=1e-4)
+    assert b.min_sf()["axial"] == pytest.approx(2.2351, abs=1e-4)
+    assert c.min_sf()["triaxial"] == pytest.approx(1.7627, abs=1e-4)
+    assert c.collapse_rating[-1] == pytest.approx(10093.40, abs=0.01)
+    assert c.collapse_rating[10] == pytest.approx(9001.46, abs=0.01)
+    cas = wtub.Tubular(7.0, 0.362, 26.0, "L-80")
+    assert cas.collapse == pytest.approx(5411.258, abs=1e-3) and cas.burst == pytest.approx(7240.0)
+    # ISO reduced yield (internal pressure included) is the more conservative: more internal pressure needed
+    api = wtub.min_internal_for_collapse(cas, 5915, method="API")
+    iso = wtub.min_internal_for_collapse(cas, 5915, method="ISO")
+    assert api == pytest.approx(561.85, abs=0.05) and iso == pytest.approx(573.45, abs=0.05) and iso > api
+    assert wtub.min_internal_for_collapse(p, 5915) == 0.0
+    assert wtub.max_internal_for_burst(p, 0.0) == pytest.approx(10160 / 1.1)
+
+
+def test_sanding_matches_critical_drawdown_workbook():
+    """The user's Critical Drawdown Calculator (Willson et al. 2002): calculator, sensitivity and depletion sheets."""
+    inp = wsand.SandingInputs(8000, 3600)
+    assert wsand.cbhfp(inp) == pytest.approx(2550) and wsand.critical_drawdown(inp) == pytest.approx(1050)
+    assert wsand.drawdown_limit(inp) == pytest.approx(840) and wsand.min_pwf(inp) == pytest.approx(2760)
+    assert wsand.eaton_sh(inp) == pytest.approx(5066.67, abs=0.01)
+    rows = {r["Pr (psia)"]: r for r in wsand.depletion_table(inp, [3350, 2600, 1850, 1100])}
+    for pr, cd, mp in ((3350, 900, 2630), (2600, 450, 2240), (1850, 0, 1850), (1100, -450, 1100)):
+        assert rows[pr]["Critical drawdown (psi)"] == pytest.approx(cd) and rows[pr]["Min Pwf (psia)"] == pytest.approx(mp)
+    assert wsand.critical_drawdown(wsand.SandingInputs(8000, 3600, sH_ratio=1.1, twc=3000)) == pytest.approx(2025)
+    assert wsand.critical_drawdown(wsand.SandingInputs(8000, 3600, sh_grad=0.65, nu=0.2)) == pytest.approx(2400)
+    assert "Sand control" in wsand.verdict(inp, 1100)
+
+
+def test_coning_matches_water_and_gas_coning_workbooks():
+    w = wcone.ConeInputs(60, 20, 1000, 0.354, 500, 50, 0.25, 0.76, 1.2, 1.2, 1.02, 0.5, 0.3, 0.8, hw=100)
+    assert wcone.meyer_garder(w) == pytest.approx(55.8322, abs=1e-4)
+    assert wcone.schols(w) == pytest.approx(78.6725, abs=1e-4)
+    assert wcone.critical_rate(w) == pytest.approx(55.8322, abs=1e-4)
+    assert wcone.gravity_drawdown(w) == pytest.approx(4.5032, abs=1e-4)
+    assert wcone.cone_height_z(w, 1500) == pytest.approx(0.443444, abs=1e-6)
+    t_sc = wcone.breakthrough_time(w, 1500)
+    assert t_sc == pytest.approx(77.6713, abs=1e-4)
+    assert wcone.breakthrough_time(w, 1500, "Bournazel-Jeanson") == pytest.approx(38.5322, abs=1e-4)
+    assert wcone.breakthrough_time(w, 250) == pytest.approx(1227.14, abs=0.01)
+    assert wcone.breakthrough_time(w, 250, "Bournazel-Jeanson") == pytest.approx(546.63, abs=0.01)
+    assert wcone.breakthrough_time(w, 100) == np.inf                       # Z > 3.5: stable cone
+    assert wcone.limiting_water_cut(w) == pytest.approx(0.6) and 5.7 * t_sc == pytest.approx(442.73, abs=0.01)
+    wc = wcone.kuo_desbrisay_wc(w, [10, 120, 1000], t_sc)
+    assert wc[0] == 0 and wc[2] == pytest.approx(0.6) and 0 < wc[1] < 0.6
+    g = wcone.ConeInputs(60, 15, 1000, 0.354, 500, 50, 0.25, 0.76, 1.2, 1.2, 0.2, 0.025, 0.6, 0.8, kind="gas")
+    assert wcone.critical_rate(g) == pytest.approx(126.8305, abs=1e-4)
+    assert wcone.gravity_drawdown(g) == pytest.approx(10.9116, abs=1e-4)
+    assert g.mobility_ratio == pytest.approx(36) and wcone.cone_height_z(g, 1500) == pytest.approx(1.0745, abs=1e-4)
+    assert wcone.breakthrough_time(g, 1500) == pytest.approx(24.2514, abs=1e-4)
+    assert wcone.breakthrough_time(g, 1500, "Bournazel-Jeanson") == pytest.approx(7.5302, abs=1e-4)
+    rim = wcone.oil_rim(g, 1.02, 0.2)
+    assert rim["Dt (ft)"] == pytest.approx(14.268, abs=1e-3) and rim["Db (ft)"] == pytest.approx(30.732, abs=1e-3)
+    assert rim["drho_eff (lb/ft3)"] == pytest.approx(11.0848, abs=1e-4)
+    assert rim["Critical rate (STB/d)"] == pytest.approx(40.2145, abs=1e-4)
+    assert rim["Gravity drawdown (psi)"] == pytest.approx(3.4598, abs=1e-4)
+
+
+def test_gas_well_water_coning_hagoort_and_non_darcy():
+    c = wcone.GasConeInputs(100, 30, 1500, 0.354, 50, 0.1, 0.9, 1.05, 0.15, 0.02, 0.9, 200, 3000)
+    assert c.bg_rb_mscf == pytest.approx(5.04 * 0.9 * 659.67 / 3000)
+    mg, sc = wcone.gas_meyer_garder(c), wcone.gas_schols(c)
+    # the oil-well forms with gas mobility, rho_w - rho_g and Bg; Schols with (kv/kh)^0.07
+    oil_form = wcone.ConeInputs(100, 30, 1500, 0.354, 50 * 0.9, 5, 0.2, 0.15, 0.02, c.bg_rb_mscf, 1.05, 0.5, 0.3)
+    assert mg == pytest.approx(wcone.meyer_garder(oil_form))
+    assert sc == pytest.approx(wcone.schols(oil_form) * 0.1 ** 0.07)
+    assert wcone.gas_critical_rate(c) == pytest.approx(min(mg, sc))
+    # non-Darcy: the laminar drawdown at the Darcy rate is the total drawdown at the corrected rate
+    r = 1e-4
+    q = wcone.non_darcy_correct(mg, r)
+    assert q < mg and q + r * q * q == pytest.approx(mg)
+    assert wcone.non_darcy_correct(mg, None) == mg
+    jg = iflow.jones_gas(4000.0, 20, 50, 160, 31.6, 0.354, 2, 200, 0.022, 0.9, 0.65, 30)
+    assert wcone.ipr_turbulence_ratio(jg) == pytest.approx(jg.params["a (psi^2/(Mscf/d)^2)"] / jg.params["b (psi^2/(Mscf/d))"])
+    assert wcone.ipr_turbulence_ratio(iflow.pi_entry(3000, 2000, 2.0)) is None
+
+
+def _woe_gas():
+    *_, path, _oil = _vlp_setup()
+    gas = wvlp.WetGasFluid(wbo.PVTInputs(rsb=1, api=40, gas_sg=0.65), 50)
+    ipr_for = lambda ch: iflow.jones_gas(ch.get("pr", 4000.0), 20, 50, 160, 31.6, 0.354, 2, 200, 0.022, 0.9, 0.65, 30)
+    base = {"whp": 800.0, "u": 4.17, "wgr": 20.0, "sep_gor": 50000.0}
+    return path, gas, ipr_for, base
+
+
+def test_woe_gas_well_window_is_nodal_consistent():
+    """Envelope of a gas well over Pr and WGR: the window ends set by the WHP limits are the nodal solutions at those
+    WHPs, the operating point is the system-analysis solution, Turner sets the low end where the well loads."""
+    path, gas, ipr_for, base = _woe_gas()
+    comp = CX.CompOptions(hydrate=((100, 1000, 3000, 6000), (40, 62, 72, 80)))
+    lim = wwoe.Limits(whp_min=300, whp_max=2500, sanding=wsand.SandingInputs(10900, 4000, twc=6000),
+                      tubing=wwoe.TubingCheck(wtub.Tubular(3.5, 0.254, 9.3, "L-80"), 10000), comp=comp)
+    cases = wsys.combinations({"pr": [2000, 4000], "wgr": [5, 50]})
+    envs = wwoe.build(path, gas, "gas", base, cases, ipr_for, "gray", lim)
+    for c, e in zip(cases, envs):
+        lo, hi, why_lo, why_hi = e.window
+        r300, _ = wsys.solve_cases(lambda t: path, gas, "gas", {**base, "whp": 300.0}, [c], ipr_for, "gray", n=60)
+        assert why_hi == "whp_min" and hi == pytest.approx(r300[0].q, rel=1e-5)
+        rop, _ = wsys.solve_cases(lambda t: path, gas, "gas", base, [c], ipr_for, "gray", n=60)
+        assert e.op["Rate"] == pytest.approx(rop[0].q, rel=1e-5) and e.op["Inside window"]
+        if c["pr"] == 4000:
+            r25, _ = wsys.solve_cases(lambda t: path, gas, "gas", {**base, "whp": 2500.0}, [c], ipr_for, "gray", n=60)
+            assert why_lo == "whp_max" and lo == pytest.approx(r25[0].q, rel=1e-5)
+        else:
+            assert why_lo == "turner" and 2.0 < lo < 3.0
+        assert e.shut_in["Shut-in check"] == "Pass"
+    # shut-in gas to surface: SITHP below Pr by a gas column (~0.06-0.08 psi/ft over ~10,900 ft TVD)
+    si = envs[2].shut_in["Shut-in WHP (psia)"]
+    assert 4000 - 0.09 * 10900 < si < 4000 - 0.05 * 10900
+    df = wwoe.summary_table("gas", envs, {"pr": "Pr", "wgr": "WGR"})
+    assert list(df["Upper limit"]) == ["Minimum WHP"] * 4 and (df["WHP at max rate (psia)"] == 300).all()
+    assert len(wwoe.curve_table("gas", envs[0])) == len(envs[0].rates) and len(wwoe.limits_table("gas", envs[0]))
+    # gas-well water coning: the Darcy critical rate lowered by the IPR's own turbulence; it binds here
+    gc = wcone.GasConeInputs(100, 30, 1500, 0.354, 20, 0.1, 0.9, 1.05, 0.2, 0.022, 0.9, 200, 4000)
+    lim.coning = wwoe.gas_coning(gc)
+    e = wwoe.build(path, gas, "gas", base, [{"pr": 4000.0, "wgr": 5.0}], ipr_for, "gray", lim)[0]
+    ratio = wcone.ipr_turbulence_ratio(ipr_for({}))
+    assert e.cone_rate == pytest.approx(wcone.gas_critical_rate(gc, ratio) / 1000)
+    assert e.window is None and "Coning" in e.op["Violated"]
+
+
+def test_woe_oil_well_sanding_and_coning_limits_map_through_the_ipr():
+    *_, path, oil = _vlp_setup()
+    pb = oil.m.bubble_point(205.0)
+    ipr_for = lambda ch: iflow.pi_entry(ch.get("pr", 3000.0), pb, ch.get("j", 2.0))
+    base = {"whp": 250.0, "u": 4.17, "wc": 20.0, "gor": 750.0}
+    sand = wsand.SandingInputs(10500, 3000, sh_grad=0.7, twc=3000)
+    lim = wwoe.Limits(whp_min=150, pe5=False, sanding=sand)
+    envs = wwoe.build(path, oil, "oil", base, wsys.combinations({"pr": [2700, 3000]}), ipr_for, "hagedorn_brown",
+                      lim, 1.04, 1.15)
+    no_win, win = envs                       # Pr 2700: the sanding limit falls below the stable rates
+    assert no_win.window is None and no_win.op["Violated"] == ["Sanding"]
+    lo, hi, why_lo, why_hi = win.window
+    assert (why_lo, why_hi) == ("stability", "sanding") and win.op["Violated"] == ["Sanding"]
+    assert win.at(hi, win.pwf) == pytest.approx(wsand.min_pwf(sand, 3000.0), abs=0.5)
+    for e in envs:
+        assert e.sand_pwf == pytest.approx(wsand.min_pwf(sand, e.params["pr"]))
+        rop, _ = wsys.solve_cases(lambda t: path, oil, "oil", base, [{"pr": e.params["pr"]}], ipr_for,
+                                  "hagedorn_brown", 1.04, 1.15, n=60)
+        assert e.op["Rate"] == pytest.approx(rop[0].q, rel=1e-5)
+        q150 = [q for q, side in e.crossings["whp_min"] if side == "max"][-1]
+        r150, _ = wsys.solve_cases(lambda t: path, oil, "oil", {**base, "whp": 150.0}, [{"pr": e.params["pr"]}],
+                                   ipr_for, "hagedorn_brown", 1.04, 1.15, n=60)
+        assert q150 == pytest.approx(r150[0].q, rel=1e-5)
+    # a critical oil rate becomes a liquid rate at the case's water cut
+    cone = wcone.ConeInputs(60, 20, 1000, 0.354, 500, 50, 0.25, 0.76, 1.2, 1.2, 1.02, 0.5, 0.3, 0.8, hw=100)
+    f = wwoe.oil_coning(cone)
+    assert f({"wc": 50.0}, None) == pytest.approx(2 * 55.8322, abs=1e-3)
+    rim = wwoe.oil_coning(cone, rim=(1.02, 0.2))
+    assert rim({"wc": 0.0}, None) == pytest.approx(wcone.oil_rim(cone, 1.02, 0.2)["Critical rate (STB/d)"])
