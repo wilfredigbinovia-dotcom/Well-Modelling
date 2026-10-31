@@ -1288,8 +1288,10 @@ def test_bergman_sutton_matches_prosper_at_and_above_bubble_point():
 def test_downhole_cells_follow_type_like_prosper():
     md, tid, te, tod, toe, cid, ce, rm = weq.DH_NUMERIC
     assert weq.active_columns("Xmas Tree") == {md}
-    assert weq.active_columns("Tubing") == {md, tid, te, rm, tod, toe, cid, ce}       # annulus data optional (gas lift)
+    assert weq.active_columns("Tubing") == {md, tid, te, rm}            # natural flow: annulus data locked (PROSPER)
     assert weq.active_columns("Tubing", "annular") == {md, tid, te, rm, tod, toe, cid, ce}
+    assert weq.active_columns("Tubing", lift=True) == {md, tid, te, rm, tod, toe, cid, ce}   # artificial lift
+    assert weq.active_columns("Tubing", tubing_od=True) == {md, tid, te, rm, tod}           # enthalpy / improved
     assert weq.active_columns("SSSV") == {tid} and weq.active_columns("Restriction") == {tid, rm}
     assert weq.active_columns("Gas Lift Mandrel") == {tid, rm} == weq.active_columns("SSD")   # like a restriction
     assert weq.active_columns("Casing") == {md, cid, ce, rm} and weq.active_columns("") == set()
@@ -1298,7 +1300,8 @@ def test_downhole_cells_follow_type_like_prosper():
                        {"Type": "Casing", md: 10932.0, cid: 8.681, ce: 0.0008},
                        {md: 5.0}]).reindex(columns=weq.DOWNHOLE_COLUMNS)
     out = weq.apply_cell_rules(df)
-    assert out.loc[0, te] == 0.0006 and out.loc[0, rm] == 1.0 and out.loc[0, tod] == 2.875     # defaults; OD kept
+    assert out.loc[0, te] == 0.0006 and out.loc[0, rm] == 1.0 and np.isnan(out.loc[0, tod])    # defaults; OD locked
+    assert weq.apply_cell_rules(df, lift=True).loc[0, tod] == 2.875                              # kept with lift
     assert np.isnan(out.loc[1, md]) and np.isnan(out.loc[1, rm]) and out.loc[1, tid] == 1.5    # SSSV: ID only
     assert out.loc[2, ce] == 0.0008                                                              # user value kept
     assert out.iloc[3, 2:].isna().all()                                                          # no type: locked

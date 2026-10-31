@@ -4236,6 +4236,9 @@ def srp_equipment_panel(top_md, secs):
 JET_VARS = {"p_surf": "Power fluid injection pressure (psia)", "q_pf": "Power fluid injection rate (STB/d)"}
 
 
+ANNULUS_HINT = " These cells open on tubing rows once an artificial lift (or annular flow) is chosen in the Options Summary."
+
+
 def _jet_section_at(secs, md):
     """Tubing OD and casing ID at a depth (the tubing section reaching it)."""
     tub = secs[(secs["Type"] == "Tubing")]
@@ -4302,7 +4305,7 @@ def jet_equipment_panel(top_md, secs):
     tod, cid = _jet_section_at(secs, md) if secs is not None else (None, None)
     if tod is None:
         st.warning("Enter the tubing outside diameter and casing inside diameter of the tubing at the pump (the "
-                   "power fluid annulus).")
+                   "power fluid annulus)." + ANNULUS_HINT)
         ss.pop("jet_equipment", None)
         return None
     if abs(bottom - md) > 1.0:
@@ -4370,7 +4373,7 @@ def hsp_equipment_panel(top_md, secs):
     tod, cid = _jet_section_at(secs, md) if secs is not None else (None, None)
     if tod is None:
         st.warning("Enter the tubing outside diameter and casing inside diameter of the tubing at the pump (the "
-                   "power fluid annulus).")
+                   "power fluid annulus)." + ANNULUS_HINT)
         ss.pop("hsp_equipment", None)
         return None
     if abs(bottom - md) > 1.0:
@@ -4495,7 +4498,7 @@ def hsp_design_tab(o, eqd, ipr_curve):
     if go:
         if tod is None:
             st.error("Enter the tubing outside diameter and the casing inside diameter at the pump (Equipment Data) - "
-                     "the power fluid goes down that annulus.")
+                     "the power fluid goes down that annulus." + ANNULUS_HINT)
         else:
             cv = ipr_curve
             try:
@@ -5508,7 +5511,7 @@ def gaslift_data_panel(o, top_md, secs):
         t_ = secs[secs["Type"] == "Tubing"]
         if not len(t_) or t_["Tubing OD (in)"].isna().any() or t_["Casing ID (in)"].isna().any():
             st.error("Friction loss in annulus needs the tubing OD and casing ID of every tubing section "
-                     "(Downhole equipment).")
+                     "(Downhole equipment)." + ANNULUS_HINT)
     setup = wgls.GasLiftSetup(method=method, gas=gas, rate_mode=rate_mode, qgi=qgi, glr_inj=glr,
                               p_casing=pc if np.isfinite(pc) else 1214.7, dp_valve=dp if np.isfinite(dp) else 100.0,
                               max_md=max_md if np.isfinite(max_md) else 1e9, fixed_md=fixed, valves=valves,
@@ -5703,6 +5706,8 @@ with tabs[3]:
     # ----------------------------------------------------- downhole equipment
     with sub[2]:
         ft = o.flow_type if o else "tubing"
+        lift_dh = bool(o is not None and getattr(o, "artificial_lift", "none") != "none")
+        tod_dh = bool(o is not None and getattr(o, "temp_model", "rough") in ("improved", "enthalpy"))
         st.caption("Tubing string and its components from the Xmas tree down, then casing to the deepest "
                    "flowing depth. Point components (SSSV, restriction) sit at the previous depth unless an MD "
                    "is entered." + (" Annular flow is selected: tubing OD and casing ID/roughness are needed on "
@@ -5713,21 +5718,23 @@ with tabs[3]:
                     if HAVE_AGGRID else "Cells open according to the type in each row, as in PROSPER: a value typed "
                     "into a locked cell is cleared. ")
                    + "Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed."
-                   + (" Annular flow also opens tubing OD/outside roughness and casing ID/roughness on tubing "
-                      "rows." if ft != "tubing" else ""))
+                   + (" Annular flow and artificial lift also open tubing OD/outside roughness and casing ID/"
+                      "roughness on tubing rows." if ft != "tubing" or lift_dh else
+                      " Tubing OD and casing ID open on tubing rows when artificial lift or annular flow is chosen in "
+                      "the Options Summary" + ("; the temperature model opens the tubing OD." if tod_dh else ".")))
         if not HAVE_AGGRID:
             with st.expander("Which cells each type opens", expanded=True):
                 short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Tubing ", "Tbg ").replace(
                     "Casing ", "Csg ").replace("Inside ", "In. ").replace("Outside ", "Out. ") for c_ in weq.DH_NUMERIC}
-                guide = pd.DataFrame([{short[c_]: ("open" if c_ in weq.active_columns(t_, ft) else "")
+                guide = pd.DataFrame([{short[c_]: ("open" if c_ in weq.active_columns(t_, ft, lift_dh, tod_dh) else "")
                                        for c_ in weq.DH_NUMERIC} for t_ in weq.DOWNHOLE_TYPES], index=weq.DOWNHOLE_TYPES)
                 st.dataframe(guide.style.apply(lambda d: np.where(d == "", "background-color: rgba(120, 170, 215, 0.35)",
                                                                   "background-color: rgba(120, 200, 140, 0.25)"), axis=None),
                              width="stretch")
                 st.caption("Green: accepts input. Blue: locked for that type (anything typed there is cleared).")
         ed_d = type_grid("downhole", weq.DOWNHOLE_TYPES,
-                         {t_: weq.active_columns(t_, ft) for t_ in weq.DOWNHOLE_TYPES}, weq.DH_NUMERIC)
-        dh_clean = weq.apply_cell_rules(ed_d, ft)
+                         {t_: weq.active_columns(t_, ft, lift_dh, tod_dh) for t_ in weq.DOWNHOLE_TYPES}, weq.DH_NUMERIC)
+        dh_clean = weq.apply_cell_rules(ed_d, ft, lift_dh, tod_dh)
         if not weq.same_table(dh_clean, ed_d):          # entry in a locked cell, or a new type needing defaults
             set_grid("downhole", dh_clean)
             st.rerun()
@@ -8901,7 +8908,7 @@ def jet_design_tab(o, eqd, ipr_curve):
     if go:
         if tod is None:
             st.error("Enter the tubing outside diameter and the casing inside diameter at the pump (Equipment Data) - "
-                     "the power fluid goes down that annulus.")
+                     "the power fluid goes down that annulus." + ANNULUS_HINT)
         else:
             cv = ipr_curve
             try:
@@ -10467,7 +10474,7 @@ def gaslift_tab(o, eqd, ipr_curve):
         with t3:
             if stab is None:
                 st.info("Enter the tubing OD and casing ID of the tubing sections (Equipment Data) to calculate the "
-                        "annulus volume needed by the stability criteria.")
+                        "annulus volume needed by the stability criteria." + ANNULUS_HINT)
             else:
                 verdict = "stable" if stab["stable"] else "unstable"
                 (st.success if stab["stable"] else st.error)(
@@ -10842,7 +10849,7 @@ def igl_tab(o, eqd, ipr_curve):
     t_od, c_id = tub["Tubing OD (in)"].iloc[-1], tub["Casing ID (in)"].iloc[-1]
     if not (pd.notna(t_od) and pd.notna(c_id) and c_id > t_od):
         st.info("Enter the tubing OD and casing ID of the tubing sections (Equipment Data): the annulus stores the "
-                "gas for each cycle.")
+                "gas for each cycle." + ANNULUS_HINT)
         return
     path = vlp_path(eqd, "tubing", ())
     t_id = float(path.d_h[-1] * 12)

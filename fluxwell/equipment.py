@@ -248,23 +248,30 @@ TYPE_HELP = {
 }
 
 
-# Cells each type unlocks, as in PROSPER's downhole equipment screen (natural flow up the tubing). Annular flow
-# also opens the tubing outside diameter/roughness and the casing ID/roughness on tubing rows.
+# Cells each type unlocks, as in PROSPER's downhole equipment screen. Natural flow up the tubing: tubing rows take the
+# MD, ID, roughness and rate multiplier only; the casing ID is entered on casing rows. Annular flow or artificial lift
+# (the annulus carries production, lift gas or power fluid, or holds the pump) also opens the tubing outside diameter /
+# roughness and the casing ID / roughness on tubing rows; the Improved Approximation and Enthalpy Balance temperature
+# models open the tubing outside diameter (the annulus in the heat-transfer path).
 DH_NUMERIC = DOWNHOLE_COLUMNS[2:]
 DH_DEFAULTS = {"Tubing Inside Roughness (in)": 0.0006, "Tubing Outside Roughness (in)": 0.0006,
                "Casing Inside Roughness (in)": 0.0006, "Rate Multiplier": 1.0}
 
 
-def active_columns(row_type, flow_type="tubing"):
-    """Numeric columns that accept input for a row of this type."""
+def active_columns(row_type, flow_type="tubing", lift=False, tubing_od=False):
+    """Numeric columns that accept input for a row of this type. lift: artificial lift selected (opens the annulus
+    data on tubing rows, as annular flow does); tubing_od: the temperature model needs the tubing OD."""
     md, tid, te, tod, toe, cid, ce, rm = DH_NUMERIC
-    annulus = flow_type in ("annular", "tubing_annular")
+    annulus = flow_type in ("annular", "tubing_annular") or lift
     if row_type == "Xmas Tree":
         return {md}
     if row_type == "Tubing":
-        # tubing OD and casing ID are always open on tubing rows: required for annular flow, optional otherwise
-        # (gas lift uses them for the annulus - casing-head volume, stability)
-        return {md, tid, te, rm, tod, toe, cid, ce}
+        cols = {md, tid, te, rm}
+        if annulus:
+            cols |= {tod, toe, cid, ce}
+        elif tubing_od:
+            cols |= {tod}
+        return cols
     if row_type == "SSSV":
         return {tid}
     if row_type in ("Restriction", "Gas Lift Mandrel", "SSD"):
@@ -274,19 +281,19 @@ def active_columns(row_type, flow_type="tubing"):
     return set()
 
 
-def blocked_mask(df, flow_type="tubing"):
+def blocked_mask(df, flow_type="tubing", lift=False, tubing_od=False):
     """Boolean frame: True where a cell is locked for its row's type (Label and Type are always open)."""
     m = pd.DataFrame(False, index=df.index, columns=df.columns)
     for i, r in df.iterrows():
         t = r.get("Type")
-        act = active_columns(t if isinstance(t, str) else "", flow_type)
+        act = active_columns(t if isinstance(t, str) else "", flow_type, lift, tubing_od)
         for c in DH_NUMERIC:
             if c in m.columns:
                 m.at[i, c] = c not in act
     return m
 
 
-def apply_cell_rules(df, flow_type="tubing"):
+def apply_cell_rules(df, flow_type="tubing", lift=False, tubing_od=False):
     """Clear locked cells and fill empty unlocked roughness / rate-multiplier cells with their defaults
     (0.0006 in and 1), which stay editable."""
     out = df.copy()
@@ -294,7 +301,7 @@ def apply_cell_rules(df, flow_type="tubing"):
         out[c] = pd.to_numeric(out[c], errors="coerce").astype(float)
     for i, r in out.iterrows():
         t = r.get("Type")
-        act = active_columns(t if isinstance(t, str) else "", flow_type)
+        act = active_columns(t if isinstance(t, str) else "", flow_type, lift, tubing_od)
         for c in DH_NUMERIC:
             if c not in act:
                 out.at[i, c] = np.nan
