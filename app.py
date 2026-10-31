@@ -3,7 +3,7 @@
 Run from the project folder:   streamlit run app.py
 
 The app is being rebuilt tab by tab. Current tabs:
-  1. Options summary - what kind of well is being modelled
+  1. Options Summary - what kind of well is being modelled
   2. PVT Input Data  - black oil: inputs, lab data, correlation matching and suggestion
                        equation of state: PRP file import, flash, saturation point, envelope
   3. IPR Data        - reservoir inflow models for oil and gas/condensate producers
@@ -440,7 +440,7 @@ ss["_units"] = {q_: (val("unit_" + q_, wu.default_unit(q_)) if val("unit_" + q_,
                      else wu.default_unit(q_)) for q_ in wu.QUANTITIES}
 wuu.install()
 
-TAB_NAMES = ["1 · Options summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP",
+TAB_NAMES = ["1 · Options Summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP",
              "6 · Calculation", "7 · Design", "8 · Well Operating Envelope", "9 · Units"]
 tabs = st.tabs(TAB_NAMES, key="main_tabs")
 
@@ -508,11 +508,11 @@ STATUS_ICON = {wopt.MODELLED_NOW: "✅ Modelled", wopt.LUMPED_IN_PI: "↪️ Abs
                wopt.NOT_YET: "⏳ Not modelled yet"}
 
 with tabs[0]:
-    st.header("Options summary")
+    st.header("Options Summary")
     st.caption("Describe the well first. These choices decide what the setup tabs ask for "
                "and which calculations apply.")
     sel_opts = {}
-    groups = [("Fluid description", ["fluid_type", "method", "separator", "water_vapour", "emulsions",
+    groups = [("Fluid Description", ["fluid_type", "method", "separator", "water_vapour", "emulsions",
                                      "viscosity_model"]),
               ("Well", ["well_type", "flow_type", "artificial_lift", "temp_model", "steam"]),
               ("Completion", ["completion", "sand_control"])]
@@ -523,8 +523,8 @@ with tabs[0]:
             for f in fields:
                 name, choices = wopt.FIELDS[f]
                 keys = list(choices)
-                sel_opts[f] = st.radio(name, keys, format_func=choices.get, key=f"opt_{f}",
-                                       captions=[CAPTIONS[f][k] for k in keys])
+                tip = "\n\n".join(f"**{choices[k]}**: {CAPTIONS[f][k]}" for k in keys)
+                sel_opts[f] = st.radio(name, keys, format_func=choices.get, key=f"opt_{f}", help=tip)
     opts = wopt.WellOptions(**sel_opts)
     ss["options"] = opts
 
@@ -777,7 +777,7 @@ def properties_plot(table: pd.DataFrame, psat):
 
 
 def render_eos(opts_now):
-    st.caption("Equation of state is selected in the Options summary: import the fluid "
+    st.caption("Equation of state is selected in the Options Summary: import the fluid "
                "description as a Petroleum Experts PRP export file.")
     c = st.columns([2, 1])
     up = c[0].file_uploader("PVT file (.prp)", type=["prp", "txt"], key="prp_upload")
@@ -843,7 +843,7 @@ def render_eos(opts_now):
     implied = FLUID_FROM_SAT.get(typ, "dry_wet_gas")
     if opts_now is not None and implied != opts_now.fluid_type:
         st.warning(f"At {t_f:g} °F this fluid has a **{typ or 'no'} point**, which makes it "
-                   f"**{wopt.FLUID_TYPES[implied].lower()}**, but the Options summary says "
+                   f"**{wopt.FLUID_TYPES[implied].lower()}**, but the Options Summary says "
                    f"**{opts_now.label('fluid_type').lower()}**. Check the fluid type.", icon="⚠️")
 
     m = st.columns(5)
@@ -1815,7 +1815,7 @@ def gas_pvt_panel(opts_now):
             fig.tight_layout()
             st.pyplot(fig, clear_figure=True)
     else:
-        c[2].caption("Condensed water vapour is off (Options summary: Water vapour).")
+        c[2].caption("Condensed water vapour is off (Options Summary: Water vapour).")
     st.subheader("Matching")
     st.caption("Laboratory (flash) data at one or more temperatures. Each correlation is fitted as Parameter 1 x "
                "correlation + Parameter 2 (least squares): Z factor, gas FVF (from the matched Z) and both viscosity "
@@ -2578,7 +2578,7 @@ def mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr):
         elif gas:
             table = wmpp.gas_correlation_table(gasp["mu_z"], wmpp.pressure_grid(pr), t_f, rel)
             notes.append("Gas correlations cannot drop out liquid, so this is single-phase gas pseudo-pressure. "
-                         "Choose Equation of state in the Options summary to model the condensate bank.")
+                         "Choose Equation of state in the Options Summary to model the condensate bank.")
         else:
             model = blackoil_model(o)
             psat = model.bubble_point(t_f)
@@ -2750,7 +2750,7 @@ def skin_panel(o, k, rw, h, gas_or_oil):
                  else ["Enter skin by hand", "Hawkins damaged zone"])
     c = st.columns(3)
     mech = sel(c[0], "Method", mech_opts, "ipr_mech",
-               help="Choices follow the completion in the Options summary. Karakas & Tariq (1991): perforation "
+               help="Choices follow the completion in the Options Summary. Karakas & Tariq (1991): perforation "
                     "(horizontal, vertical, wellbore), damaged and crushed zones. MacLeod (1983): damaged and crushed "
                     "zones. Locke's nomograph method is not available.")
     parts = {}
@@ -2880,7 +2880,7 @@ def sand_control_panel(o, fluid, h_default, res_known=None):
     if kind == "gravel_pack":
         kind = "gravel_pack_cased" if o.completion == "cased_hole" else "gravel_pack_open"
     sc = wcomp.SandControl(kind)
-    st.caption(f"{sc.label()} - from the Options summary. The IPR is calculated to the sand face; the completion "
+    st.caption(f"{sc.label()} - from the Options Summary. The IPR is calculated to the sand face; the completion "
                "adds dP = 141.2 Q µ (S + D Q) / (k H) with the in-situ rate and the fluid properties recalculated at "
                "the sand-face pressure (PROSPER).")
     if res_known:
@@ -3367,7 +3367,7 @@ with tabs[2]:
     st.header("IPR Data")
     o = ss.get("options")
     if o is None or o.errors:
-        st.info("Fix the configuration in the Options summary first.")
+        st.info("Fix the configuration in the Options Summary first.")
     elif o.is_injector:
         injector_ipr_panel(o)
     elif o.fluid_type == "cbm":
@@ -3377,7 +3377,7 @@ with tabs[2]:
         fluid = "gas" if gas else "oil"
         models = (ipr.GAS_MODELS + GAS_ADV) if gas else (ipr.OIL_MODELS + OIL_ADV)
         st.caption(f"{'Gas and condensate' if gas else 'Oil and water'} inflow models - from the fluid type "
-                   f"chosen in the Options summary. Completion: {o.label('completion').lower()}, sand control: "
+                   f"chosen in the Options Summary. Completion: {o.label('completion').lower()}, sand control: "
                    f"{o.label('sand_control').lower()}. Pressures in {ss['_units']['pressure']}.")
         c = st.columns([1.3, 2])
         model = sel(c[0], "Reservoir model", models, f"ipr_model_{fluid}")
@@ -4816,7 +4816,7 @@ def pcp_design_tab(o, eqd, ipr_curve):
                "head), and the motor and cable (downhole motor drive) or the rod (sucker rod drive).")
     if drive is None:
         drive = radio(st, "Drive", list(wpcp.DRIVES), "pcd_drive", horizontal=True,
-                      help="Set by the artificial lift in the Options summary when a PCP is chosen there.")
+                      help="Set by the artificial lift in the Options Summary when a PCP is chosen there.")
     top_, secs_, pts_ = eqd["downhole"]
     tub = secs_[secs_["Type"] == "Tubing"]
     bottom_tub = float(tub["MD bottom (ft)"].max()) if len(tub) else float(secs_["MD bottom (ft)"].max())
@@ -5823,7 +5823,7 @@ with tabs[3]:
         st.dataframe(summ_.style.format(fmt_, na_rep="—"),
                      hide_index=True, width="stretch")
         st.caption(f"Completion: {o.label('completion').lower() if o else 'cased hole'}; sand control: "
-                   f"{o.label('sand_control').lower() if o else 'none'} (from the Options summary). "
+                   f"{o.label('sand_control').lower() if o else 'none'} (from the Options Summary). "
                    "The well schematic is in the sidebar.")
     else:
         st.info("The string summary and well schematic appear once every equipment section above is complete "
@@ -6483,7 +6483,7 @@ with tabs[4]:
     o = ss.get("options")
     eqd = ss.get("equipment", {})
     if o is None or o.errors:
-        st.info("Fix the configuration in the Options summary first.")
+        st.info("Fix the configuration in the Options Summary first.")
     elif o.is_injector:
         if not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
             st.info("Complete the Equipment Data tab first (every section in its status table must be OK).")
@@ -9558,7 +9558,7 @@ with tabs[5]:
     ipr_curve = ss.get("ipr_curve")
     blocker = None
     if o is None or o.errors:
-        blocker = "Fix the configuration in the Options summary first."
+        blocker = "Fix the configuration in the Options Summary first."
     elif CHOKE:
         blocker = None
     elif o.is_injector:
@@ -12032,7 +12032,7 @@ with tabs[6]:
     ipr_curve = ss.get("ipr_curve")
     blocker = None
     if o is None or o.errors:
-        blocker = "Fix the configuration in the Options summary first."
+        blocker = "Fix the configuration in the Options Summary first."
     elif o.is_gas or o.is_injector:
         blocker = "Artificial lift design applies to oil producers."
     elif o.flow_type != "tubing":
@@ -12097,12 +12097,12 @@ with tabs[7]:
     ipr_curve = ss.get("ipr_curve")
     blocker = None
     if o is None or o.errors:
-        blocker = "Fix the configuration in the Options summary first."
+        blocker = "Fix the configuration in the Options Summary first."
     elif o.is_injector:
         blocker = "The operating envelope applies to producers."
     elif getattr(o, "artificial_lift", "none") not in ("none",):
         blocker = ("The operating envelope is for naturally flowing wells - set Artificial lift to None in the "
-                   "Options summary to use it.")
+                   "Options Summary to use it.")
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
         blocker = "Complete the Equipment Data tab first."
     elif ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil"):
