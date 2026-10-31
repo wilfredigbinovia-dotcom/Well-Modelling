@@ -20,8 +20,11 @@ tubing is also checked with gas to surface (a static gas column from the reservo
 load case), and the highest WHP the tubing tolerates at the wellhead is reported (a line on the WHP view). Segments
 shorter than 10 ft (the casing stub below the tubing shoe) are left out of the velocity limits.
 
-Not covered: surface equipment, artificial lift and diluent (the envelope is at the wellhead, natural flow); casing
-below the packer; connection ratings, wear, buckling and thermal axial loads.
+Casing: the production casing at mid-perforation - collapse (flowing BHP inside, an external column outside) sets a
+minimum flowing BHP, burst (shut-in BHP inside, pore-water backup) a maximum shut-in BHP; the tubing's maximum shut-in
+BHP with gas to surface is reported too.
+Not covered: surface equipment, artificial lift and diluent (the envelope is at the wellhead, natural flow);
+connection ratings, wear, buckling and thermal axial loads.
 Rates: oil wells liquid STB/d, gas wells MMscf/d (IPR curves in their own units, gas Mscf/d)."""
 from __future__ import annotations
 
@@ -65,6 +68,35 @@ class TubingCheck:
 
 
 @dataclass
+class CasingCheck:
+    """Production casing across the producing interval (below the packer): collapse with the flowing BHP inside and
+    the external column outside sets a minimum Pwf; burst with the shut-in BHP inside against the backup sets a
+    maximum shut-in Pwf. Checked at depth_tvd (mid-perforation), no axial load."""
+    pipe: TB.Tubular
+    depth_tvd: float
+    ext_ppg: float = 10.0               # external column for collapse (mud / deteriorated mud behind the casing)
+    backup_ppg: float = 8.6             # external backup for burst (pore water)
+    df: TB.DesignFactors = field(default_factory=TB.DesignFactors)
+    method: str = "ISO"
+
+    @property
+    def p_ext(self):
+        return 14.7 + PSI_PER_FT_PPG * self.ext_ppg * self.depth_tvd
+
+    @property
+    def p_backup(self):
+        return 14.7 + PSI_PER_FT_PPG * self.backup_ppg * self.depth_tvd
+
+    @property
+    def min_pwf(self):
+        return TB.min_internal_for_collapse(self.pipe, self.p_ext, 0.0, self.df, self.method)
+
+    @property
+    def max_shut_in_pwf(self):
+        return TB.max_internal_for_burst(self.pipe, self.p_backup, self.df)
+
+
+@dataclass
 class Limits:
     whp_min: float | None = None        # psia
     whp_max: float | None = None
@@ -77,6 +109,7 @@ class Limits:
     coning: Callable | None = None      # f(params, ipr_curve) -> critical rate (VLP units)
     coning_label: str = "Coning"
     tubing: TubingCheck | None = None
+    casing: CasingCheck | None = None
     comp: CX.CompOptions = field(default_factory=CX.CompOptions)
 
 
@@ -99,6 +132,8 @@ class CaseEnvelope:
     op: dict = field(default_factory=dict)  # operating point at the case's WHP
     notes: list = field(default_factory=list)
     whp_levels: dict = field(default_factory=dict)
+    ipr_q: np.ndarray | None = None      # the IPR curve's own points (VLP units) for plotting
+    ipr_p: np.ndarray | None = None
 
     @property
     def window(self):
@@ -246,6 +281,30 @@ def gas_column(path, p_bottom, sg):
     return p
 
 
+def tubing_max_shut_in_pwf(path, tc: TubingCheck, sg, p_hi=40000.0):
+    """Highest shut-in bottom-node pressure (psia) with gas to surface that keeps the tubing's burst and triaxial
+    safety factors at the design factors (bisection on the static gas column)."""
+    sel = path.md <= tc.packer_md + 0.5
+    tvd = path.tvd[sel]
+    bottom = float(np.interp(tc.packer_md, path.md, path.tvd))
+    p_out = tc.annulus_p + PSI_PER_FT_PPG * tc.packer_fluid_ppg * tvd
+
+    def ok(pb):
+        ck = TB.check_profile(tc.pipe, tvd, gas_column(path, pb, sg)[sel], p_out, bottom, tc.packer_fluid_ppg,
+                              tc.extra_axial, tc.df, tc.method)
+        ps = ck.passes()
+        return ps["burst"] and ps["triaxial"]
+    lo, hi = 14.7, p_hi
+    if ok(hi):
+        return hi
+    if not ok(lo):
+        return np.nan                    # fails even with nothing inside: no shut-in pressure is acceptable
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if ok(mid) else (lo, mid)
+    return lo
+
+
 def _tubing_margins(path, P, tc: TubingCheck):
     """Burst / collapse / triaxial margins (min SF / DF - 1) per row along the tubing, plus the check objects."""
     sel = path.md <= tc.packer_md + 0.5
@@ -352,6 +411,7 @@ def build(path, fluid, kind, base: dict, cases: list[dict], ipr_for, correlation
         sg = _gas_sg(fluid, lim.tubing)
         P_si = np.array([gas_column(path, float(p.get("pr", curve.pr)), sg) for p, curve, *_r in prep])
         _, checks_si = _tubing_margins(path, P_si, lim.tubing)
+        tub_si_max = tubing_max_shut_in_pwf(path, lim.tubing, sg)
     out = []
     pos = 0
     for ci, (p, curve, aof, rates) in enumerate(prep):
@@ -360,6 +420,8 @@ def build(path, fluid, kind, base: dict, cases: list[dict], ipr_for, correlation
         pwf = pwf_of(curve, rates)
         whp, wht = P[sl, 0].copy(), T[sl, 0].copy()
         env = CaseEnvelope(p, rates, pwf, whp, wht, {}, {}, [], aof)
+        o_ = np.argsort(curve.q)
+        env.ipr_q, env.ipr_p = np.asarray(curve.q, float)[o_] / scale, np.asarray(curve.pwf, float)[o_]
         env.vlp_min = vlp_of[("min", ci)]
         env.whp_levels = {"whp_min": w_min, "whp_max": lim.whp_max}
         env.vlp_max = vlp_of.get(("max", ci))
@@ -370,8 +432,17 @@ def build(path, fluid, kind, base: dict, cases: list[dict], ipr_for, correlation
         if lim.stability and np.isfinite(whp).any():
             q_peak = float(rates[int(np.nanargmax(whp))])
             mg["stability"] = rates - q_peak if q_peak > rates[0] else np.full(m, BIG)
+        flows = np.isfinite(whp)            # the column reaches surface: node values exist along the whole path
+
+        def held(arr):
+            """Margins at rates whose traverse did not reach surface: held at the nearest rate that did (those
+            rates lie beyond the minimum-WHP limit anyway; this keeps them from switching a limit there)."""
+            arr = np.asarray(arr, float).copy()
+            if flows.sum() >= 1 and (~flows).any():
+                arr[~flows] = np.interp(rates[~flows], rates[flows], arr[flows])
+            return arr
         for k in ("turner", "pe5", "erosion", "hydrate"):
-            arr = node_m[k][sl]
+            arr = held(node_m[k][sl])
             if np.any(arr < BIG):
                 mg[k] = arr
         if lim.coning is not None:
@@ -383,15 +454,31 @@ def build(path, fluid, kind, base: dict, cases: list[dict], ipr_for, correlation
             mg["sanding"] = pwf - env.sand_pwf
         if tub_m is not None:
             for k in ("burst", "collapse", "triaxial"):
-                mg[k] = tub_m[k][sl]
+                mg[k] = held(tub_m[k][sl])
             ck = checks_si[ci]
             env.shut_in = {"Shut-in WHP (psia)": float(P_si[ci, 0]),
                            **{f"Shut-in {k} SF": v for k, v in ck.min_sf().items()},
                            "Shut-in check": "Pass" if ck.ok else "Fail",
                            "Max WHP for burst (psia)": TB.max_internal_for_burst(lim.tubing.pipe, lim.tubing.annulus_p,
-                                                                                 lim.tubing.df)}
+                                                                                 lim.tubing.df),
+                           "Tubing max shut-in Pwf (psia)": tub_si_max}
             if not ck.ok:
                 env.notes.append("Tubing fails the shut-in check (gas to surface from the reservoir pressure).")
+        if lim.casing is not None:
+            cs = lim.casing
+            mg["casing_collapse"] = pwf - cs.min_pwf
+            pr_c = float(p.get("pr", curve.pr))
+            env.shut_in.update({"Casing min. Pwf, collapse (psia)": cs.min_pwf,
+                                "Casing max shut-in Pwf, burst (psia)": cs.max_shut_in_pwf})
+            if pr_c > cs.max_shut_in_pwf:
+                env.notes.append(f"Casing burst: the shut-in BHP ({pr_c:,.0f} psia) exceeds the casing's "
+                                 f"{cs.max_shut_in_pwf:,.0f} psia at the design factor.")
+        if tub_m is not None and not np.isfinite(env.shut_in["Tubing max shut-in Pwf (psia)"]):
+            env.notes.append("Tubing: the burst / triaxial design factors are not met even at atmospheric pressure "
+                             "inside - check the tubing size, grade, annulus pressure and packer fluid.")
+        elif tub_m is not None and float(p.get("pr", curve.pr)) > env.shut_in["Tubing max shut-in Pwf (psia)"]:
+            env.notes.append("Tubing burst: the reservoir pressure exceeds the tubing's maximum shut-in BHP with gas "
+                             "to surface.")
         mg = {k: np.nan_to_num(np.minimum(v, BIG), nan=-BIG if k.startswith("whp") else BIG, neginf=-BIG)
               for k, v in mg.items()}
         env.margins = mg

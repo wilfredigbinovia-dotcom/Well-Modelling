@@ -6126,3 +6126,26 @@ def test_woe_oil_well_sanding_and_coning_limits_map_through_the_ipr():
     assert f({"wc": 50.0}, None) == pytest.approx(2 * 55.8322, abs=1e-3)
     rim = wwoe.oil_coning(cone, rim=(1.02, 0.2))
     assert rim({"wc": 0.0}, None) == pytest.approx(wcone.oil_rim(cone, 1.02, 0.2)["Critical rate (STB/d)"])
+
+
+def test_woe_casing_and_shut_in_burst_limits():
+    """Casing collapse sets a minimum flowing BHP (equivalent external pressure, ISO reduced yield), burst a maximum
+    shut-in BHP; the tubing's maximum shut-in BHP puts the gas-to-surface WHP at the burst rating / DF."""
+    path, gas, ipr_for, base = _woe_gas()
+    cas = wwoe.CasingCheck(wtub.Tubular(7.0, 0.362, 26.0, "L-80"), 10444.3, 10.5, 8.6)
+    p_ext = 14.7 + wwoe.PSI_PER_FT_PPG * 10.5 * 10444.3
+    assert cas.min_pwf == pytest.approx(wtub.min_internal_for_collapse(cas.pipe, p_ext))
+    assert cas.max_shut_in_pwf == pytest.approx(14.7 + wwoe.PSI_PER_FT_PPG * 8.6 * 10444.3 + 7240 / 1.1)
+    tc = wwoe.TubingCheck(wtub.Tubular(3.5, 0.254, 9.3, "L-80"), 10000)
+    pmax = wwoe.tubing_max_shut_in_pwf(path, tc, 0.65)
+    assert wwoe.gas_column(path, pmax, 0.65)[0] == pytest.approx(14.7 + 10160 / 1.1, rel=5e-3)
+    lim = wwoe.Limits(whp_min=300, tubing=tc, casing=cas)
+    e = wwoe.build(path, gas, "gas", base, [{"pr": 4000.0}], ipr_for, "gray", lim)[0]
+    assert e.shut_in["Casing min. Pwf, collapse (psia)"] == pytest.approx(cas.min_pwf)
+    assert e.shut_in["Tubing max shut-in Pwf (psia)"] == pytest.approx(pmax)
+    assert np.allclose(e.margins["casing_collapse"], e.pwf - cas.min_pwf)
+    # a casing that collapses at a high BHP becomes the window's upper limit, where Pwf = its minimum
+    weak = wwoe.CasingCheck(wtub.Tubular(7.0, 0.317, 23.0, "J-55"), 10444.3, 12.0)
+    lim.casing = weak
+    e = wwoe.build(path, gas, "gas", base, [{"pr": 4000.0}], ipr_for, "gray", lim)[0]
+    assert e.window[3] == "casing_collapse" and e.at(e.window[1], e.pwf) == pytest.approx(weak.min_pwf, abs=1.0)

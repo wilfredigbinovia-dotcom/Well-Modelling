@@ -11261,9 +11261,12 @@ def _woe_tubing_default(eqd):
     """Catalog label matching the equipment's tubing, or the custom entry; plus OD, wall and the packer MD."""
     secs_ = eqd["downhole"][1]
     tub_ = secs_[secs_["Type"] == "Tubing"]
-    od_ = float(tub_["Tubing OD (in)"].dropna().iloc[-1]) if len(tub_) and tub_["Tubing OD (in)"].notna().any() else 3.5
+    od_ = float(tub_["Tubing OD (in)"].dropna().iloc[-1]) if len(tub_) and tub_["Tubing OD (in)"].notna().any() else None
     id_ = float(tub_["Flow ID (in)"].iloc[-1]) if len(tub_) else 2.992
-    wall_ = max((od_ - id_) / 2, 0.05)
+    if od_ is None or od_ <= id_ + 0.05:     # no (or inconsistent) OD: the catalog tubing with the nearest ID
+        lab_ = min(wtub.TUBING, key=lambda k_: abs(wtub.TUBING[k_][0] - 2 * wtub.TUBING[k_][2] - id_))
+        od_, _, wall_ = wtub.TUBING[lab_]
+    wall_ = max((od_ - id_) / 2, 0.05) if abs(od_ - 2 * wall_ - id_) > 0.01 else wall_
     lab_ = next((k_ for k_, (o_, w_, t_) in wtub.TUBING.items() if abs(o_ - od_) < 1e-3 and abs(t_ - wall_) < 0.006),
                 WOE_TUBE_CUSTOM)
     packer_ = float(tub_["MD bottom (ft)"].max()) if len(tub_) else 5000.0
@@ -11469,6 +11472,29 @@ def woe_inputs_coning(o, kind, res_):
     return limit if on else None
 
 
+def _woe_tvd_mid(eqd):
+    """Mid-perforation TVD: the bottom of the downhole equipment on the survey."""
+    smd_, stvd_ = eqd["survey"]
+    secs_ = eqd["downhole"][1]
+    return float(np.interp(float(secs_["MD bottom (ft)"].max()), smd_, stvd_))
+
+
+def woe_saturation(o, kind, t_res):
+    """(label, psia) of the bubble point (oil) or dew point (retrograde condensate) at reservoir temperature."""
+    try:
+        if kind == "oil":
+            pv_, _ = oil_pvt_at(o, 1000.0, t_res)
+            return ("Bubble point", float(pv_["pb"])) if pv_ is not None else None
+        if o.method == "eos" and ss.get("prp_text"):
+            r_ = eos_calculate(ss["prp_text"], ss.get("prp_name", ""), float(t_res))
+            return ("Dew point", float(r_["psat"])) if r_.get("sat_type") == "dew" and r_.get("psat") else None
+        if retro_bo_on(o):
+            return "Dew point", float(wrg.dew_point(retro_inputs(), float(t_res)))
+    except Exception:  # noqa: BLE001 - a reference line only
+        return None
+    return None
+
+
 def woe_inputs_tubing(eqd):
     st.caption("API TR 5C3 / ISO TR 10400 pipe-body ratings along the tubing from surface to the packer, against the "
                "A-annulus (surface pressure + packer fluid): burst, collapse (with the axial and internal-pressure "
@@ -11512,7 +11538,43 @@ def woe_inputs_tubing(eqd):
     m[1].metric("Collapse rating (psi)", f"{pipe.collapse:,.0f}", help=wtub.collapse_regime(pipe.dt, pipe.y) + " collapse")
     m[2].metric("Body yield (lbf)", f"{pipe.body_yield:,.0f}")
     m[3].metric("D/t", f"{pipe.dt:.2f}")
-    return wwoe.TubingCheck(pipe, packer, p_ann, ppg, extra, df_, method) if on else None
+    tube = wwoe.TubingCheck(pipe, packer, p_ann, ppg, extra, df_, method) if on else None
+    st.divider()
+    st.caption("Production casing across the producing interval, checked at mid-perforation: collapse with the "
+               "flowing BHP inside against the external column sets a minimum flowing BHP; burst with the shut-in BHP "
+               "inside against the backup sets a maximum shut-in BHP. Same design factors and collapse method.")
+    on_c = flag(st.toggle, "Casing limits", "woe_cs_on", False)
+    secs_ = eqd["downhole"][1]
+    cas_ = secs_[secs_["Type"] == "Casing"]
+    cid_ = float(cas_["Casing ID (in)"].dropna().iloc[-1]) if len(cas_) and cas_["Casing ID (in)"].notna().any() \
+        else 6.276
+    lab_c = min(wtub.CASING, key=lambda k_: abs(wtub.CASING[k_][0] - 2 * wtub.CASING[k_][2] - cid_))
+    c = st.columns(3)
+    csize = sel(c[0], "Casing", [WOE_TUBE_CUSTOM] + list(wtub.CASING), "woe_cs_size", lab_c,
+                help=f"Default: the catalog casing closest to the equipment's casing ID ({cid_:g} in).")
+    if csize == WOE_TUBE_CUSTOM:
+        cod = num(c[1], "Casing OD (in)", "woe_cs_od", 7.0, 2.0, 30.0, None, "%.4g")
+        cwall = num(c[2], "Casing wall thickness (in)", "woe_cs_wall", 0.362, 0.1, 2.0, None, "%.4g")
+        cwt = 10.69 * (cod - cwall) * cwall
+    else:
+        cod, cwt, cwall = wtub.CASING[csize]
+        c[1].text_input("Casing OD / wall", f'{cod:g}" / {cwall:g}"', disabled=True)
+        c[2].text_input("Casing weight", f"{cwt:g} lb/ft", disabled=True)
+    c = st.columns(4)
+    cgrade = sel(c[0], "Casing grade", list(wtub.GRADES), "woe_cs_grade", "L-80")
+    cder = num(c[1], "Casing yield derating (percent)", "woe_cs_derate", 0.0, 0.0, 60.0)
+    ext = num(c[2], "External column, collapse (ppg)", "woe_cs_ext", 10.0, 6.0, 25.0, None, "%.3g",
+              help="Mud or deteriorated mud behind the casing at mid-perforation.")
+    bkp = num(c[3], "Backup, burst (ppg)", "woe_cs_bkp", 8.6, 6.0, 25.0, None, "%.3g",
+              help="Pore-water gradient behind the casing.")
+    cpipe = wtub.Tubular(cod, cwall, cwt, cgrade, 1 - cder / 100.0)
+    cas = wwoe.CasingCheck(cpipe, float(_woe_tvd_mid(eqd)), ext, bkp, df_, method)
+    m = st.columns(4)
+    m[0].metric("Casing collapse rating (psi)", f"{cpipe.collapse:,.0f}")
+    m[1].metric("Casing burst rating (psi)", f"{cpipe.burst:,.0f}")
+    m[2].metric("Min. flowing BHP, collapse (psia)", f"{cas.min_pwf:,.0f}")
+    m[3].metric("Max. shut-in BHP, burst (psia)", f"{cas.max_shut_in_pwf:,.0f}")
+    return tube, (cas if on_c else None)
 
 
 WOE_LIM_COLORS = {"whp_min": "#2a78d6", "whp_max": "#2a78d6", "stability": "#52514e", "turner": "#1baf7a",
@@ -11627,6 +11689,104 @@ def woe_plot(envs, kind, names, view="bhp", max_curves=12):
     return fig
 
 
+WOE_RATE_LINES = ("stability", "turner", "pe5", "erosion", "hydrate", "coning", "burst", "collapse", "triaxial",
+                  "whp_min", "whp_max")
+WOE_SHORT = {"stability": "Min rate", "turner": "Turner", "pe5": "PE5", "erosion": "Erosion", "hydrate": "Hydrates",
+             "coning": "Coning", "burst": "Tubing burst", "collapse": "Tubing collapse", "triaxial": "Tubing triaxial",
+             "whp_min": "Min WHP", "whp_max": "Max WHP"}
+
+
+def woe_case_plot(e, kind, sat=None):
+    """One case: the IPR with the operating window, every rate limit as a labelled vertical line and the pressure
+    limits as labelled horizontal lines (casing and tubing burst noted when above the chart)."""
+    qunit = "STB/d" if kind == "oil" else "MMscf/d"
+    green, blue, orange, purple = "#1baf7a", "#2a78d6", "#eb6834", "#6c4fc7"
+    fig, ax = plt.subplots(figsize=(10, 5.2))
+    if e.ipr_q is not None:
+        q0, p0 = e.ipr_q, e.ipr_p
+    else:
+        ok = np.isfinite(e.pwf)
+        q0, p0 = e.rates[ok], e.pwf[ok]
+    ax.plot(q0, p0, color=blue, lw=1.8, zorder=3, label="IPR")
+    ax.plot(e.rates, e.vlp_min, color=wplt.INK2, lw=0.9, ls="--", alpha=0.55, label="VLP at min. WHP")
+    if e.vlp_max is not None:
+        ax.plot(e.rates, e.vlp_max, color=wplt.INK2, lw=0.9, ls=":", alpha=0.7, label="VLP at max. WHP")
+    for a, b, la, lb in e.windows:
+        q = np.unique(np.r_[a, e.rates[(e.rates > a) & (e.rates < b)], b])
+        yy = np.interp(q, e.rates, e.pwf)
+        ax.plot(q, yy, color=green, lw=7, solid_capstyle="round", alpha=0.85, zorder=4)
+        ax.scatter([q[0], q[-1]], [yy[0], yy[-1]], s=110, color=green, edgecolor="white", linewidth=1.2, zorder=5)
+    if e.op:
+        ax.scatter([e.op["Rate"]], [e.op["Pwf (psia)"]], marker="*", s=170, color=wplt.INK, zorder=6,
+                   label=f"At the operating WHP ({e.op['WHP (psia)']:,.0f} psia)")
+    p_top = float(np.nanmax(p0))
+    ytop = p_top * 1.12
+    q_max = float(e.aof) * 1.04
+    # rate limits: one dotted vertical line per switching rate; lines closer than 2.5 % of the axis share a label
+    vl = []
+    for k_, xs in e.crossings.items():
+        if k_ not in WOE_RATE_LINES:
+            continue
+        for qx, side in xs:
+            if k_ in ("whp_min", "whp_max") and side == "min" and k_ == "whp_min":
+                continue                     # the unstable left-hand intersection - shown by the stability line
+            if 0 < qx < q_max:
+                lab_ = WOE_SHORT.get(k_, k_)
+                if k_ in ("hydrate", "turner", "pe5", "erosion", "burst", "collapse", "triaxial") and \
+                        ((side == "min") != (k_ in ("hydrate", "turner", "pe5"))):
+                    lab_ += " (min)" if side == "min" else " (max)"
+                vl.append((qx, lab_))
+    if e.cone_rate is not None and not e.crossings.get("coning") and 0 < e.cone_rate < q_max:
+        vl.append((e.cone_rate, "Coning"))
+    vl.sort()
+    groups = []
+    for qx, lab_ in vl:
+        ax.axvline(qx, color=wplt.INK2, lw=1.0, ls=":", zorder=2)
+        if groups and qx - groups[-1][-1][0] < 0.025 * q_max:
+            groups[-1].append((qx, lab_))
+        else:
+            groups.append([(qx, lab_)])
+    for g in groups:
+        ax.text(g[-1][0], ytop * 0.985, " " + " / ".join(dict.fromkeys(l_ for _, l_ in g)), rotation=90, va="top",
+                ha="right", fontsize=8, color=wplt.INK2)
+    # pressure limits
+    hl = []
+    if e.sand_pwf is not None and e.sand_pwf > 0:
+        hl.append((e.sand_pwf, f"Sanding {e.sand_pwf:,.0f} psia", orange, "--"))
+    if sat:
+        hl.append((sat[1], f"{sat[0]} {sat[1]:,.0f} psia", orange, (0, (6, 3))))
+    cmin = e.shut_in.get("Casing min. Pwf, collapse (psia)")
+    if cmin is not None and cmin > 0:
+        hl.append((cmin, f"Casing collapse {cmin:,.0f} psia", purple, "--"))
+    for y_, lab_, col_, ls_ in hl:
+        if 0 < y_ < ytop:
+            ax.axhline(y_, color=col_, lw=1.3, ls=ls_, zorder=2)
+            ax.text(q_max * 0.62, y_, lab_, va="bottom", fontsize=8.5, color=wplt.INK2)
+    above = []
+    for k_, lab_ in (("Casing max shut-in Pwf, burst (psia)", "casing"), ("Tubing max shut-in Pwf (psia)", "tubing")):
+        v_ = e.shut_in.get(k_)
+        if v_ is None or not np.isfinite(v_):
+            continue
+        if v_ < ytop:
+            ax.axhline(v_, color="#c0392b", lw=1.3, ls="--")
+            ax.text(q_max * 0.62, v_, f"{lab_.capitalize()} burst {v_:,.0f} psia (max shut-in Pwf)", va="bottom",
+                    fontsize=8.5, color=wplt.INK2)
+        else:
+            above.append(f"{lab_} {v_:,.0f} psia")
+    if above:
+        ax.set_title("Burst limits above chart: " + " · ".join(above) + " (max shut-in Pwf)", loc="right",
+                     fontsize=8.5, color=wplt.INK2)
+    ax.set_xlim(0, q_max)
+    ax.set_ylim(0, ytop)
+    ax.set_xlabel(f"Rate ({qunit})")
+    ax.set_ylabel("Pwf (psia)")
+    ax.grid(alpha=0.35)
+    ax.legend(fontsize=7.5, loc="lower left", frameon=True, framealpha=0.92, edgecolor="none")
+    fig.tight_layout()
+    return fig
+
+
+
 def woe_pr_plot(envs, kind, names):
     """Window against reservoir pressure, one band per combination of the other swept variables."""
     qunit = "STB/d" if kind == "oil" else "MMscf/d"
@@ -11668,7 +11828,7 @@ def woe_tab(o, eqd, ipr_curve):
     smd_, stvd_ = eqd["survey"]
     path = with_thermal(wvlp.build_flow_path(top_, secs_, pts_, smd_, stvd_, gmd, gt, o.flow_type, []))
     tvd_mid = float(path.tvd[-1])
-    t_in, t_sd, t_cn, t_tb, t_res = st.tabs(["Operating limits and sweeps", "Sanding", "Coning", "Tubing stress",
+    t_in, t_sd, t_cn, t_tb, t_res = st.tabs(["Operating limits and sweeps", "Sanding", "Coning", "Tubing and casing",
                                              "Results"])
     with t_in:
         st.caption("The range of rates the well can be produced at, for every combination of the swept reservoir "
@@ -11761,13 +11921,13 @@ def woe_tab(o, eqd, ipr_curve):
     with t_cn:
         cone = woe_inputs_coning(o, kind, res_)
     with t_tb:
-        tube = woe_inputs_tubing(eqd)
+        tube, casing = woe_inputs_tubing(eqd)
     with t_res:
         lim = wwoe.Limits(whp_min=whp_min, whp_max=whp_max, stability=stab, turner=tur and kind == "gas", pe5=pe5,
                           erosion=ero, hydrate=hyd and hyd_curve is not None, sanding=sand, coning=cone, tubing=tube,
-                          comp=comp_current())
+                          casing=casing, comp=comp_current())
         sig = (kind, whp_min, whp_max, whp_op, stab, tur, pe5, ero, hyd, corr, p1, p2, u_, repr(sweeps), repr(sand),
-               cone is not None, repr(tube), float(ipr_curve.pr), float(ipr_curve.aof),
+               cone is not None, repr(tube), repr(casing), float(ipr_curve.pr), float(ipr_curve.aof),
                tuple(sorted((k_, repr(v_)) for k_, v_ in ss.items() if isinstance(k_, str) and k_.startswith("_v_woe_cn"))))
         go = st.button("Calculate envelope", type="primary", key="woe_go")
         if go:
@@ -11798,7 +11958,8 @@ def woe_tab(o, eqd, ipr_curve):
                 with st.spinner(f"Calculating the envelope of {len(combos)} case(s)..."):
                     envs = wwoe.build(path, fluid, kind, base, combos, ipr_for, corr, lim, p1, p2,
                                       eqd["heat_capacities"])
-                ss["woe_res"] = {"sig": sig, "envs": envs, "kind": kind, "names": names, "note": fluid_note}
+                ss["woe_res"] = {"sig": sig, "envs": envs, "kind": kind, "names": names, "note": fluid_note,
+                                 "sat": woe_saturation(o, kind, float(np.max(gt)))}
             except (ValueError, TypeError, KeyError) as e:
                 st.error(f"Calculation failed: {e}")
         out = ss.get("woe_res")
@@ -11814,15 +11975,18 @@ def woe_tab(o, eqd, ipr_curve):
         st.dataframe(tab_, hide_index=True, width="stretch")
         st.download_button("Download the windows (CSV)", tab_.to_csv(index=False).encode(), "operating_envelope.csv",
                            "text/csv", key="woe_dl")
-        c = st.columns(2)
-        c[0].pyplot(woe_plot(envs, kind, names_shown, "bhp"), clear_figure=True)
-        c[1].pyplot(woe_plot(envs, kind, names_shown, "whp"), clear_figure=True)
-        if "pr" in names_shown and len({e.params["pr"] for e in envs}) > 1 and any(e.window for e in envs):
-            st.columns(2)[0].pyplot(woe_pr_plot(envs, kind, names_shown), clear_figure=True)
-        st.markdown("**Case detail**")
         labels_ = [f"{i + 1}: " + (_woe_label(e, names_shown) or "Base case") for i, e in enumerate(envs)]
-        pick = st.selectbox("Case", labels_, key="woe_case")
+        pick = st.selectbox("Case", labels_, key="woe_case") if len(envs) > 1 else labels_[0]
         e = envs[labels_.index(pick)]
+        st.pyplot(woe_case_plot(e, kind, out.get("sat")), clear_figure=True)
+        c = st.columns(2)
+        c[0].pyplot(woe_plot([e], kind, {}, "whp"), clear_figure=True)
+        if len(envs) > 1:
+            c[1].pyplot(woe_plot(envs, kind, names_shown, "bhp"), clear_figure=True)
+            if "pr" in names_shown and len({x.params["pr"] for x in envs}) > 1 and any(x.window for x in envs):
+                c[0].pyplot(woe_pr_plot(envs, kind, names_shown), clear_figure=True)
+            c[1].pyplot(woe_plot(envs, kind, names_shown, "whp"), clear_figure=True)
+        st.markdown(f"**Case detail** - {pick}")
         for n_ in e.notes:
             st.warning(n_)
         c = st.columns(2)
