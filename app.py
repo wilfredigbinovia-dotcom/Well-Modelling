@@ -2493,6 +2493,140 @@ STILL_NOT = {
 }
 
 
+def rebuild_ipr(changes):
+    """Rebuild the tab-3 IPR with some arguments changed (pr, skin, j). Raises ValueError if not possible."""
+    rec = ss.get("ipr_recipe")
+    if rec is None:
+        raise ValueError("No IPR recipe - recalculate the IPR tab.")
+    fn, a, k = rec
+    b = inspect.signature(fn).bind(*a, **k)
+    changes = dict(changes)
+    if "wc" in changes and "wc" not in inspect.signature(fn).parameters:
+        changes.pop("wc")                          # models without a water-cut input ignore it
+    gor_new = changes.pop("gor", None)
+    params0 = inspect.signature(fn).parameters
+    if gor_new is not None and "glr" in params0:          # CBM Producer: the GLR sets the water saturation
+        changes["glr"] = float(gor_new)
+        gor_new = None
+    if gor_new is not None and "mu" in params0 and "bo" in params0 and ss.get("ipr_pvt_ctx") is not None:
+        # PROSPER re-evaluates a Darcy-type PI with the oil at the calculation's GOR (and its bubble point)
+        o_, t_ = ss["ipr_pvt_ctx"]
+        pv0, _ = oil_pvt_at(o_, 1000.0, t_)
+        if pv0 is not None and abs(float(gor_new) - float(pv0.get("gor", gor_new))) > 1e-6:
+            changes["_gor"] = float(gor_new)
+    if not changes:
+        if ss.get("ipr_curve") is not None:
+            return ss["ipr_curve"]
+        c = fn(*b.args, **b.kwargs)
+        return wcomp.apply_sand_control(c, ss["ipr_sc_dp"]) if ss.get("ipr_sc_dp") is not None else c
+    gor_eval = changes.pop("_gor", None)
+    if not changes and gor_eval is None:
+        if ss.get("ipr_curve") is not None:
+            return ss["ipr_curve"]
+    for key, v in changes.items():
+        if key not in inspect.signature(fn).parameters:
+            raise ValueError(f"The {ss.get('ipr_meta', {}).get('model', 'current')} IPR has no '{key}' input.")
+        b.arguments[key] = v
+    # A new reservoir pressure changes the oil viscosity and FVF the Darcy-type PI is evaluated with (PROSPER
+    # recalculates them at the reservoir pressure).
+    params = inspect.signature(fn).parameters
+    if ("pr" in changes or gor_eval is not None) and "mu" in params and "bo" in params \
+            and ss.get("ipr_pvt_ctx") is not None:
+        o_, t_ = ss["ipr_pvt_ctx"]
+        b.apply_defaults()
+        pv_, _ = oil_pvt_at(o_, float(b.arguments["pr"]), t_, gor_eval)
+        if pv_ is not None:
+            b.arguments["mu"], b.arguments["bo"] = pv_["mu"], pv_["bo"]
+            if gor_eval is not None and "pb" in params:
+                b.arguments["pb"] = float(pv_["pb"])
+    c = fn(*b.args, **b.kwargs)
+    if ss.get("ipr_sc_dp") is not None:
+        c = wcomp.apply_sand_control(c, ss["ipr_sc_dp"])
+    return c
+
+
+def ipr_arg(name):
+    rec = ss.get("ipr_recipe")
+    if rec is None:
+        return None
+    fn, a, k = rec
+    b = inspect.signature(fn).bind(*a, **k)
+    b.apply_defaults()
+    return b.arguments.get(name)
+
+
+IPR_SENS_VARS = {"wc": ("Water cut (%)", "0, 10, 20, 50, 75, 90", 0.01),
+                 "pr": ("Reservoir pressure (psia)", None, 1.0),
+                 "skin": ("Skin", "-2, 0, 2, 5, 10", 1.0),
+                 "k": ("Reservoir permeability (md)", None, 1.0),
+                 "h": ("Reservoir thickness (ft)", None, 1.0),
+                 "j": ("Productivity index (STB/d/psi)", None, 1.0)}
+
+
+def ipr_sensitivity_variables(gas):
+    """IPR sensitivity variables the current IPR model takes (PROSPER: IPR Sensitivity / Cases)."""
+    rec = ss.get("ipr_recipe")
+    if rec is None:
+        return {}
+    params = inspect.signature(rec[0]).parameters
+    out = {}
+    for k_, (lab, _, _) in IPR_SENS_VARS.items():
+        if k_ in params and not (gas and k_ in ("wc", "j")):
+            out[k_] = lab
+    return out
+
+
+def ipr_sensitivity_panel(curve, gas):
+    """PROSPER's IPR Sensitivity (Cases): the IPR recalculated for a list of values of one input, every curve on
+    one plot with its AOF (Tutorial 08: water cut 0-90 % on the Darcy IPR)."""
+    vars_ = ipr_sensitivity_variables(gas)
+    if not vars_:
+        return
+    with st.expander("IPR sensitivity (cases)", expanded=False):
+        st.caption("The IPR recalculated for each value of one input, the other inputs as above (PROSPER: "
+                   "Sensitivity - Cases). With water in an oil IPR, PROSPER's Vogel below the bubble point acts on the "
+                   "oil only, so the AOF rises with the water cut.")
+        c = st.columns([0.35, 0.65])
+        var = sel(c[0], "Variable", list(vars_), "ipr_sens_var", format_func=vars_.get)
+        lab, dflt_txt, factor = IPR_SENS_VARS[var]
+        if dflt_txt is None:
+            cur = ipr_arg(var)
+            base_v = float(cur) if cur is not None else 1.0
+            dflt_txt = _fmt_list([base_v * f for f in (0.5, 0.75, 1.0, 1.25, 1.5)])
+        try:
+            vals = num_list(c[1], lab, f"ipr_sens_vals_{var}", dflt_txt, note="up to 10, comma separated")[:10]
+        except ValueError:
+            st.warning("Enter numbers separated by commas.")
+            return
+        if not vals:
+            return
+        curves, rows = [], []
+        for v in vals:
+            try:
+                cv = rebuild_ipr({var: v * factor})
+            except (ValueError, KeyError, ZeroDivisionError) as e:
+                st.warning(f"{lab} = {v:g}: {e}")
+                continue
+            curves.append((v, cv))
+            rows.append({lab: v, "AOF (MMscf/d)" if gas else "AOF (STB/d)": cv.aof / (1e3 if gas else 1)})
+        if not curves:
+            return
+        scale = 1e-3 if gas else 1.0
+        fig, ax = plt.subplots(figsize=(7.5, 4.4))
+        for i, (v, cv) in enumerate(curves):
+            ax.plot(np.asarray(cv.q) * scale, cv.pwf, color=plt.cm.viridis(i / max(len(curves) - 1, 1) * 0.9),
+                    label=f"{lab.split(' (')[0]} {v:g}")
+        ax.set_xlim(0, max(cv.aof for _, cv in curves) * scale * 1.05)
+        ax.set_ylim(0, max(cv.pr for _, cv in curves) * 1.05)
+        ax.set_xlabel("Gas rate (MMscf/d)" if gas else "Liquid rate (STB/d)")
+        ax.set_ylabel("Flowing bottom-hole pressure (psia)")
+        ax.set_title(f"IPR sensitivity - {lab}", fontsize=10)
+        ax.legend(loc="lower left", fontsize=8)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+        st.dataframe(pd.DataFrame(rows).style.format(precision=1), hide_index=True)
+
+
 def ipr_plot(curve: ipr.IPRCurve, pb=None, raw: ipr.IPRCurve | None = None):
     gas = curve.fluid == "gas"
     scale = 1e-3 if gas else 1.0
@@ -3844,6 +3978,7 @@ with tabs[2]:
                     with st.expander("Modified isochronal corrections", expanded=True):
                         st.dataframe(curve.isochronal.style.format(precision=4), hide_index=True, width="stretch")
                 st.download_button("Download IPR (CSV)", table.to_csv(index=False).encode(), "ipr.csv")
+                ipr_sensitivity_panel(curve, gas)
     if o is not None and not o.errors and not o.is_injector and o.fluid_type == "oil":
         st.divider()
         with st.expander("Stimulation - hydraulic fracturing (PROSPER Tutorial 49)",
@@ -5962,68 +6097,6 @@ def vlp_path(eqd, flow_type, extra_md):
     smd, stvd = eqd["survey"]
     gmd, gt = eqd["geothermal"]
     return with_thermal(wvlp.build_flow_path(top, secs, pts, smd, stvd, gmd, gt, flow_type, extra_md))
-
-
-def rebuild_ipr(changes):
-    """Rebuild the tab-3 IPR with some arguments changed (pr, skin, j). Raises ValueError if not possible."""
-    rec = ss.get("ipr_recipe")
-    if rec is None:
-        raise ValueError("No IPR recipe - recalculate the IPR tab.")
-    fn, a, k = rec
-    b = inspect.signature(fn).bind(*a, **k)
-    changes = dict(changes)
-    if "wc" in changes and "wc" not in inspect.signature(fn).parameters:
-        changes.pop("wc")                          # models without a water-cut input ignore it
-    gor_new = changes.pop("gor", None)
-    params0 = inspect.signature(fn).parameters
-    if gor_new is not None and "glr" in params0:          # CBM Producer: the GLR sets the water saturation
-        changes["glr"] = float(gor_new)
-        gor_new = None
-    if gor_new is not None and "mu" in params0 and "bo" in params0 and ss.get("ipr_pvt_ctx") is not None:
-        # PROSPER re-evaluates a Darcy-type PI with the oil at the calculation's GOR (and its bubble point)
-        o_, t_ = ss["ipr_pvt_ctx"]
-        pv0, _ = oil_pvt_at(o_, 1000.0, t_)
-        if pv0 is not None and abs(float(gor_new) - float(pv0.get("gor", gor_new))) > 1e-6:
-            changes["_gor"] = float(gor_new)
-    if not changes:
-        if ss.get("ipr_curve") is not None:
-            return ss["ipr_curve"]
-        c = fn(*b.args, **b.kwargs)
-        return wcomp.apply_sand_control(c, ss["ipr_sc_dp"]) if ss.get("ipr_sc_dp") is not None else c
-    gor_eval = changes.pop("_gor", None)
-    if not changes and gor_eval is None:
-        if ss.get("ipr_curve") is not None:
-            return ss["ipr_curve"]
-    for key, v in changes.items():
-        if key not in inspect.signature(fn).parameters:
-            raise ValueError(f"The {ss.get('ipr_meta', {}).get('model', 'current')} IPR has no '{key}' input.")
-        b.arguments[key] = v
-    # A new reservoir pressure changes the oil viscosity and FVF the Darcy-type PI is evaluated with (PROSPER
-    # recalculates them at the reservoir pressure).
-    params = inspect.signature(fn).parameters
-    if ("pr" in changes or gor_eval is not None) and "mu" in params and "bo" in params \
-            and ss.get("ipr_pvt_ctx") is not None:
-        o_, t_ = ss["ipr_pvt_ctx"]
-        b.apply_defaults()
-        pv_, _ = oil_pvt_at(o_, float(b.arguments["pr"]), t_, gor_eval)
-        if pv_ is not None:
-            b.arguments["mu"], b.arguments["bo"] = pv_["mu"], pv_["bo"]
-            if gor_eval is not None and "pb" in params:
-                b.arguments["pb"] = float(pv_["pb"])
-    c = fn(*b.args, **b.kwargs)
-    if ss.get("ipr_sc_dp") is not None:
-        c = wcomp.apply_sand_control(c, ss["ipr_sc_dp"])
-    return c
-
-
-def ipr_arg(name):
-    rec = ss.get("ipr_recipe")
-    if rec is None:
-        return None
-    fn, a, k = rec
-    b = inspect.signature(fn).bind(*a, **k)
-    b.apply_defaults()
-    return b.arguments.get(name)
 
 
 def comp_current():

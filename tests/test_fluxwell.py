@@ -6197,3 +6197,32 @@ def test_pe5_extended_style_t43():
                                                          "cgr": np.full(2, 1e6 / 7431.94)}, "pe5_extended_style",
                          1.0, 1.0, 2.0)
     assert P[1, -1] < P[0, -1] - 150
+
+
+def test_darcy_ipr_prosper_t08():
+    """PROSPER Tutorial 08 (Darcy IPR on the Tutorial 05 Logie well: 50 md, 100 ft, 500 acres, Dietz 31.6, rw 0.354 ft,
+    skin 0, Pr 5200 psig, 210 F, GOR 800): formation PI 7.84 and AOF 28,580.9 STB/d within 0.5 %; the water-cut
+    sensitivity raises the AOF (Vogel on the oil only) to about 35,000 STB/d at 90 % as PROSPER's plot; system at
+    500 psig (PE2, U 8) 16,135.1 STB/d at 3096.35 psig within 1 % / 20 psi. The example project reproduces it."""
+    import json
+    from fluxwell import inflow as I
+    G = 14.696
+    fl = _t05_oil()
+    m = fl.m
+    pr = 5200 + G
+    tab = m.table(210.0, [pr])
+    mu, bo = float(tab["Oil viscosity (cp)"].iloc[0]), float(tab["Oil FVF (RB/STB)"].iloc[0])
+    assert I.darcy_pi(50, 100, mu, bo, 500, 31.6, 0.354, 0.0) == pytest.approx(7.84, rel=0.005)
+    aof = [max(I.darcy(pr, m.bubble_point(210.0), 50, 100, 500, 31.6, 0.354, 0.0, mu, bo, wc / 100).q)
+           for wc in (0, 10, 20, 50, 75, 90)]
+    assert aof[0] == pytest.approx(28580.9, rel=0.005)
+    assert np.all(np.diff(aof) > 0) and aof[-1] == pytest.approx(35000, rel=0.02)
+    c = I.darcy(pr, m.bubble_point(210.0), 50, 100, 500, 31.6, 0.354, 0.0, mu, bo, 0.0)
+    path, _ = _t23_path()
+    res, _ = wsys.solve_cases(lambda tid: path, fl, "oil", {"whp": 500 + G, "u": 8.0, "wc": 0.0, "gor": 800.0}, [{}],
+                              lambda ch: c, "pe2_style", 1.0, 1.0, method="Automatic - Geometric")
+    assert res[0].q == pytest.approx(16135.1, rel=0.01) and res[0].pwf - G == pytest.approx(3096.35, abs=20)
+    proj = json.load(open(Path(__file__).parent.parent / "examples" / "T08_Darcy_IPR_Model.fluxwell.json"))
+    i = proj["inputs"]
+    assert i["ipr_model_oil"] == "Darcy" and i["ipr_area"] == 500.0 and i["ipr_skin"] == 0.0
+    assert i["sys_whp"] == pytest.approx(514.696) and i["ipr_sens_vals_wc"] == "0, 10, 20, 50, 75, 90"
