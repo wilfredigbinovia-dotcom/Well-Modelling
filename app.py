@@ -20,6 +20,30 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+
+def _drop_stale_fluxwell():
+    """A redeploy (Streamlit Cloud pulls on push) re-runs this script but keeps the fluxwell modules already imported
+    in the process, so new app code could call old engine code. If any fluxwell source file changed since it was
+    imported, forget them all so the imports below load the current files."""
+    import os
+    mods = {n: m for n, m in sys.modules.items() if n == "fluxwell" or n.startswith("fluxwell.")}
+    stale = False
+    for m in mods.values():
+        f, t0 = getattr(m, "__file__", None), getattr(m, "_fw_loaded_mtime", None)
+        try:
+            mt = os.path.getmtime(f) if f else None
+        except OSError:
+            mt = None
+        if mt is not None and (t0 is None or mt > t0):
+            stale = stale or t0 is not None
+            m._fw_loaded_mtime = mt
+    if stale:
+        for n in mods:
+            sys.modules.pop(n, None)
+
+
+_drop_stale_fluxwell()
+
 from fluxwell import blackoil as bo
 from fluxwell import eos as wm_eos
 import inspect
@@ -87,6 +111,7 @@ from fluxwell import equipment as weq
 from fluxwell import schematic as wsch
 from fluxwell import options as wopt
 from fluxwell import plotting as wplt
+_drop_stale_fluxwell()          # record the load time of the modules just imported
 
 _ASSETS = Path(__file__).resolve().parent / "assets"
 st.set_page_config(page_title="FluxWell", page_icon=str(_ASSETS / "fluxwell_icon.png"), layout="wide")
