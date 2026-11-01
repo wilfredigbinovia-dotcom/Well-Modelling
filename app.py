@@ -3121,16 +3121,20 @@ def sand_control_panel(o, fluid, h_default, res_known=None):
     return sc, (k_, h_, rw_), multiphase
 
 
-def sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, multiphase):
-    """In-situ property function for the sand-control dP: oil at the reservoir pressure (as PROSPER - Tutorials
-    15-18), gas at the sand-face pressure."""
+def sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, multiphase, kind=None):
+    """In-situ property function for the sand-control dP: oil through screens and liners at the reservoir pressure
+    (as PROSPER - Tutorials 16-18), oil through a cased-hole gravel pack and gas at the sand-face pressure (PROSPER
+    Tutorials 14 and 15: the gravel pack AOF 19,667 against about 19,700 STB/d with the free gas at the sand face,
+    20,766 at the reservoir pressure)."""
     if fluid == "oil":
         if o.method != "eos":
             m = blackoil_model(o)
             if m is not None:
-                return wcomp.props_at_pressure(wcomp.props_from_fluid(wvlp.BlackOilFluid(m), "oil", t_f,
-                                                                      {"wc": wc, "gor": float(m.inp.rsb)},
-                                                                      multiphase), float(val("ipr_pr", 5000.0))), \
+                f_ = wcomp.props_from_fluid(wvlp.BlackOilFluid(m), "oil", t_f, {"wc": wc, "gor": float(m.inp.rsb)},
+                                            multiphase)
+                if kind == "gravel_pack_cased":
+                    return f_, "black oil at the sand-face pressure (as PROSPER for a gravel pack)"
+                return wcomp.props_at_pressure(f_, float(val("ipr_pr", 5000.0))), \
                     "black oil at the reservoir pressure (as PROSPER)"
         return wcomp.props_constant(pvt["bo"], pvt["rho"], pvt["mu"], "oil"), "oil properties at reservoir pressure"
     if o.method != "eos":
@@ -3882,7 +3886,7 @@ with tabs[2]:
                         "by layer for it; not available here yet) - the IPR is at the sand face of each layer.")
             elif curve is not None and err is None and sc.kind != "none":
                 try:
-                    props_, props_note = sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, sc_multi)
+                    props_, props_note = sc_fluid_props(o, fluid, pvt, gasp, t_f, wc, wgr, cgr, sc_multi, sc.kind)
                     dp_fn = wcomp.sand_control_dp(sc, props_, *sc_res)
                     st.caption(f"Sand-control dP with {props_note}.")
                     curve = wcomp.apply_sand_control(curve, dp_fn)
@@ -7260,6 +7264,23 @@ def _fmt_result(v):
     return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:.4g}"
 
 
+def sand_control_at_solution(r):
+    """Sand-control results at the solution rate (PROSPER's system results: dP sand control, gravel pack casing
+    velocity), interpolated on the IPR's sand-control columns."""
+    c = r.ipr_curve
+    if c is None or getattr(c, "dp_sand_control", None) is None or r.q is None:
+        return []
+    q = np.asarray(c.q, float)
+    o = np.argsort(q)
+    at = lambda a: float(np.interp(r.q, q[o], np.asarray(a, float)[o]))
+    rows = [("Sand-face pressure (psia)", at(c.p_sandface)), ("dP sand control (psi)", at(c.dp_sand_control))]
+    if getattr(c, "sc_skin", None) is not None:
+        rows.append(("Sand control skin", at(c.sc_skin)))
+    if getattr(c, "sc_velocity", None) is not None:
+        rows.append(("Gravel pack casing velocity (ft/s)", at(c.sc_velocity)))
+    return rows
+
+
 def solution_panel(kind, r, det, regimes):
     sr = wsys.surface_rates(kind, r.params, r.q)
     rows = [(k_, v_) for k_, v_ in sr.items()]
@@ -7271,6 +7292,7 @@ def solution_panel(kind, r, det, regimes):
     if r.pwh_q is not None:
         rows += [("Wellhead pressure (psia)", r.pwh_q)]
     rows += [("Wellhead temperature (°F)", r.wht_q)]
+    rows += sand_control_at_solution(r)
     rows += [(k_, v_) for k_, v_ in det.items() if k_ not in ("Wellhead pressure (psia)", "Wellhead temperature (°F)",
                                                               "Manifold pressure (psia)") and not k_.startswith("_")]
     rows += [(f"Regime - {k_}", f"{v_[0]} (dP {v_[1]:.1f} psi)") for k_, v_ in regimes.items()]

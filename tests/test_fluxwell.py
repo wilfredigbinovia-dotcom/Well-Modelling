@@ -6226,3 +6226,43 @@ def test_darcy_ipr_prosper_t08():
     i = proj["inputs"]
     assert i["ipr_model_oil"] == "Darcy" and i["ipr_area"] == 500.0 and i["ipr_skin"] == 0.0
     assert i["sys_whp"] == pytest.approx(514.696) and i["ipr_sens_vals_wc"] == "0, 10, 20, 50, 75, 90"
+
+
+def test_gravel_pack_prosper_t13_t14():
+    """PROSPER Tutorials 13 and 14 on the Logie well (T05 PVT, Pr 5200 psig, Darcy 50 md / 100 ft / 500 acres with
+    the Karakas & Tariq perforation + crushed-zone skin 1.600337 and Cinco (2) deviation skin -0.016550). T13 system at
+    500 psig (PE2, U 8) 14,485 STB/d within 1.3 %. T14 cased-hole gravel pack (35,000 md, 6 in, 100 ft, 0.43 in,
+    8 spf, 0.9, 13 deg, beta calculated, Multi Phase) with the fluid at the sand-face pressure (as PROSPER for a gravel
+    pack): AOF about 19,700 STB/d (PROSPER's plot; at the reservoir pressure 20,766), solution 12,230 STB/d at 2693
+    psig within 1.3 % / 5 psi, gravel pack dP 608 psi within 3 % and the casing velocity 1.6 ft/s within 0.06. The
+    sand-face pressure also fits T15's frac-and-pack AOF (13,275 against 13,282.3)."""
+    import json
+    from fluxwell import inflow as I, completion as C
+    G = 14.696
+    fl = _t05_oil()
+    m = fl.m
+    pr = 5200 + G
+    tab = m.table(210.0, [pr])
+    mu, bo = float(tab["Oil viscosity (cp)"].iloc[0]), float(tab["Oil FVF (RB/STB)"].iloc[0])
+    base = I.darcy(pr, m.bubble_point(210.0), 50, 100, 500, 31.6, 0.354, 1.600337 - 0.016550, mu, bo, 0.0)
+    path, _ = _t23_path()
+    solve = lambda c: wsys.solve_cases(lambda tid: path, fl, "oil", {"whp": 500 + G, "u": 8.0, "wc": 0.0, "gor": 800.0},
+                                       [{}], lambda ch: c, "pe2_style", 1.0, 1.0, method="Automatic - Geometric")[0][0]
+    assert solve(base).q == pytest.approx(14485, rel=0.013)
+    props = C.props_from_fluid(fl, "oil", 210.0, {"wc": 0.0, "gor": 800.0}, True)
+    sc = C.SandControl("gravel_pack_cased", {"interval": 100, "perf_diameter_in": 0.43, "spf": 8, "perf_efficiency": 0.9,
+                                             "pack_length_in": 6, "gravel_perm": 35000, "deviation": 13})
+    mdl = C.sand_control_dp(sc, props, 50, 100, 0.354)
+    c = C.apply_sand_control(base, mdl)
+    assert max(c.q) == pytest.approx(19700, rel=0.01)
+    r = solve(c)
+    assert r.q == pytest.approx(12230, rel=0.013) and r.pwf - G == pytest.approx(2693, abs=5)
+    o = np.argsort(c.q)
+    at = lambda a: float(np.interp(r.q, np.asarray(c.q)[o], np.asarray(a, float)[o]))
+    assert at(c.dp_sand_control) == pytest.approx(608, rel=0.03)
+    assert at(c.sc_velocity) == pytest.approx(1.6, abs=0.06)
+    ex = Path(__file__).parent.parent / "examples"
+    p13 = json.load(open(ex / "T13_Darcy_IPR_Perforation_Skin.fluxwell.json"))
+    p14 = json.load(open(ex / "T14_Gravel_Pack.fluxwell.json"))
+    assert p13["inputs"]["ipr_mech"] == "Karakas & Tariq" and p13["widgets"]["opt_sand_control"] == "none"
+    assert p14["widgets"]["opt_sand_control"] == "gravel_pack" and p14["inputs"]["sc_kg"] == 35000.0
