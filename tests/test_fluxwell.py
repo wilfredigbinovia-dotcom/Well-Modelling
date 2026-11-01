@@ -5085,7 +5085,9 @@ def test_multilateral_ipr_t12():
     from fluxwell import multilateral as ML, gaspvt as gp, project
     G = 14.696
     D = Path(__file__).parent / "data"
-    proj = project.loads(open(Path(__file__).parent.parent / "examples" / "T06_PVT_Matching_For_Gas_Well.fluxwell.json").read())
+    # the T12 project's lab table (the tutorial's: FVF 0.005239 / 0.006733 at 3020 / 2140 psig - with the T06 file's
+    # 0.005269 / 0.06733 the finite-conductivity rate is 3 % low, so the user's T12 file evidently has the former)
+    proj = project.loads(open(Path(__file__).parent.parent / "examples" / "T12_Multilateral_Well_IPR.fluxwell.json").read())
     g = gp.GasPVTInputs(gas_sg=0.58, sep_p=200, cgr=1, cond_api=50, wgr=1, salinity_ppm=100000, co2=0.5, n2=2.0,
                         t_res=250, p_res=5300)
     g.match = gp.match_gas(g, [(166.0, proj["tables"]["pvt_gas_match"])])
@@ -6275,3 +6277,41 @@ def test_gravel_pack_prosper_t13_t14():
     assert json.load(open(ex / "T18_Slotted_Liner.fluxwell.json"))["inputs"]["sc_kout"] == "50000"
     assert C._beta(None, 50) == pytest.approx(1709558, rel=1e-6) and C._beta(None, 500) == pytest.approx(481819, rel=1e-6)
     assert C._beta(None, 50000) == pytest.approx(38272.2, rel=1e-6)
+
+
+def test_gas_fvf_match_anchored_prosper_t06_t20():
+    """PROSPER anchors the gas FVF match at standard pressure at the table temperature (as its oil FVF match at
+    stock-tank conditions). The user's Tutorial 06 file has the lab FVF 0.06733 ft3/scf at 2140 psig (ten times the
+    trend; the tutorial prints 0.006733): PROSPER's match is 0.98623 / +0.015111 on its correlations, its PVT table
+    at 166 F equivalent to 0.98732 / +0.015111 on ours; the anchored fit gives 0.98741 / +0.015109 (plain least
+    squares 0.550 / +0.0186) and PROSPER's PVT table within 0.1 % (FVF), 0.2 % (density), 0.05 % (Z, viscosity).
+    The T06 project then gives 62.4 MMscf/d against PROSPER's 61.746 at 1500 psig; Tutorial 20 (the T07 tests and
+    workflow, example project) the manual's WGR sensitivity plot within about 2 %."""
+    import dataclasses
+    import json
+    from fluxwell import gaspvt as gp, project
+    G = 14.696
+    base = gp.GasPVTInputs(0.58, 200, 1, 50, 1, 100000, 0, 0.5, 2, "lee", 166, 5300)
+    lab = pd.DataFrame({"Pressure (psia)": np.array([5300, 3020, 2140, 1000.0]) + G,
+                        "Z factor": [1.03183, 0.9053, 0.89365, 0.9287],
+                        "Gas viscosity (cp)": [0.024644, 0.01869, 0.01648, 0.014213],
+                        "Gas FVF (ft3/scf)": [0.0034174, 0.005269, 0.06733, 0.016213]})
+    m = gp.match_gas(base, [(166.0, lab)])
+    assert m["bg"].p1 == pytest.approx(0.98732, abs=3e-4) and m["bg"].p2 == pytest.approx(0.015111, abs=1e-5)
+    mi = dataclasses.replace(base, match=m)
+    p = np.array([0, 291.667, 1458.33, 2916.67, 5250, 7000]) + G
+    z, bg, rho, mu = gp.gas_props(mi, p, np.full(p.size, 166.0))
+    assert np.abs(bg / [1.20206, 0.070738, 0.025872, 0.020487, 0.018522, 0.018008] - 1).max() < 0.001
+    assert np.abs(rho / [0.037064, 0.62983, 1.72204, 2.17466, 2.40543, 2.47401] - 1).max() < 0.002
+    assert np.abs(z / [0.99913, 0.97588, 0.90769, 0.90243, 1.02824, 1.16378] - 1).max() < 5e-4
+    assert np.abs(mu / [0.013159, 0.013346, 0.01501, 0.018423, 0.024519, 0.028587] - 1).max() < 5e-4
+    # a consistent table still matches close to 1 / 0
+    lab2 = lab.assign(**{"Gas FVF (ft3/scf)": [0.0034174, 0.005239, 0.006733, 0.016213]})
+    m2 = gp.match_gas(base, [(166.0, lab2)])["bg"]
+    assert abs(m2.p1 - 1) < 0.02 and abs(m2.p2) < 1e-3
+    ex = Path(__file__).parent.parent / "examples"
+    for f in ("T06_PVT_Matching_For_Gas_Well", "T07_Gas_Well_Test_Matching", "T20_Gas_Well_Test_Matching_WGR_Sensitivity"):
+        t = project.loads(open(ex / f"{f}.fluxwell.json").read())["tables"]["pvt_gas_match"]
+        assert list(t["Gas FVF (ft3/scf)"])[:4] == [0.0034174, 0.005269, 0.06733, 0.016213], f
+    p20 = json.load(open(ex / "T20_Gas_Well_Test_Matching_WGR_Sensitivity.fluxwell.json"))
+    assert p20["widgets"]["sys_vars"] == ["whp", "wgr"] and p20["inputs"]["sys_p2_pe2_style"] == pytest.approx(0.9364)

@@ -184,8 +184,12 @@ def match_gas(inp: GasPVTInputs, tables):
     for k in ("z", "lee", "carr"):
         if xs[k] and sum(a.size for a in xs[k]):
             out[k] = bo.fit_linear(np.concatenate(xs[k]), np.concatenate(ys[k]))
-    # gas FVF: against the FVF from the matched Z
-    bx, by = [], []
+    # gas FVF: against the FVF from the matched Z, anchored at standard pressure at each table's temperature
+    # (as PROSPER - its oil FVF match is anchored at stock-tank conditions the same way). Found on the user's
+    # Tutorial 06 file, whose lab FVF at 2140 psig is 0.06733 (ten times the trend): the anchored fit gives
+    # 0.98740 / +0.015109 on our correlations against PROSPER's effective 0.98732 / +0.015111 (its own
+    # 0.98623 / +0.015111 on its correlations); a plain least-squares fit gives 0.550 / +0.0186.
+    bx, by, anchors = [], [], []
     for p, t, z, bg, df, ok in zcorr_store:
         if "Gas FVF (ft3/scf)" not in df:
             continue
@@ -193,10 +197,24 @@ def match_gas(inp: GasPVTInputs, tables):
         zm = out["z"].apply(z) if "z" in out else z
         x = bg * zm / z
         f = np.isfinite(y)
-        bx.append(x[f])
-        by.append(y[f])
+        if f.any():
+            bx.append(x[f])
+            by.append(y[f])
+            z0, bg0 = raw_props(inp, np.array([P_STD]), np.array([float(t)]))[:2]
+            anchors.append(float(bg0[0] * (out["z"].apply(z0) / z0)[0] if "z" in out else bg0[0]))
     if bx and sum(a.size for a in bx):
-        out["bg"] = bo.fit_linear(np.concatenate(bx), np.concatenate(by))
+        xs_, ys_ = np.concatenate(bx), np.concatenate(by)
+        if len(anchors) > 1:                         # one anchor per table: the extras as plain points
+            xs_, ys_ = np.append(xs_, anchors[1:]), np.append(ys_, anchors[1:])
+        m_ = bo.fit_linear(xs_, ys_, anchor=(anchors[0], anchors[0]))
+        if len(anchors) > 1:                         # count and score the lab points only
+            lab = bo.fit_linear(np.concatenate(bx), np.concatenate(by))
+            fit_ = m_.p1 * np.concatenate(bx) + m_.p2
+            yl = np.concatenate(by)
+            m_ = bo.LinearMatch(m_.p1, m_.p2, float(np.sqrt(np.sum(((fit_ - yl) / yl) ** 2) / max(yl.size - 2, 1))),
+                                lab.raw_error_pct, yl.size, lab.scale,
+                                float(np.mean(np.abs(fit_ - np.concatenate(bx)) / np.abs(yl))))
+        out["bg"] = m_
     return out
 
 
