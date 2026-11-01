@@ -6152,3 +6152,48 @@ def test_woe_casing_and_shut_in_burst_limits():
     lim.casing = weak
     e = wwoe.build(path, gas, "gas", base, [{"pr": 4000.0}], ipr_for, "gray", lim)[0]
     assert e.window[3] == "casing_collapse" and e.at(e.window[1], e.pwf) == pytest.approx(weak.min_pwf, abs=1.0)
+
+
+def test_pe5_extended_style_t43():
+    """PE5 Extended-style against the user's 22 PE5 Extended traverses of the T43 well (500 psig 1.5-5 MMscf/d, 100 and
+    1000 psig, 60 deg below 2000 ft) at PROSPER's own node properties: the slug / annular regime of every vertical
+    tubing node within one node per traverse (60 deg all slug), the gravity loss of each traverse within 4.5 % (100 psig
+    within 7 %, near-dry 1.5 MMscf/d there 15 %), friction within 15 % or 12 psi (except 60 deg / 5 MMscf/d, PROSPER's 'Slug
+    (Induced)'). Full traverses with the T38 black-oil condensate: BHP within 4 % at 500 psig (PE5: up to 26 % - no
+    annular transition, low-rate film reversal) and 2 % at 1000 psig."""
+    from fluxwell import pe5x as X
+    d = pd.read_csv(Path(__file__).parent / "data" / "pe5x_t43_nodes.csv")
+    t = d[(d.d < 4) & d.stf.notna()].copy()
+    sin_t = np.cos(np.radians(t.ang.to_numpy()))
+    st, fr, hl = X.pe5_extended_style(t.vsl, t.vsg, t.rl, t.rg, t.ml, t.mg, t.sig, t.d.to_numpy() / 12, 0.0018 / 12,
+                                      sin_t, t.p)
+    t["x_st"], t["x_fr"] = st, fr
+    t["x_ann"] = X.regime(t.vsl, t.vsg, t.rl, t.rg, t.ml, t.mg, t.d.to_numpy() / 12, sin_t) == "Annular"
+    t["ann"] = t.reg.str.contains("Annular")
+    for (whp, dev, q), r in t.groupby(["whp", "dev", "q"]):
+        if dev == 0:
+            assert abs(int(r.x_ann.sum()) - int(r.ann.sum())) <= 1, (whp, q)
+        else:
+            assert not r.x_ann.any() and not r.ann.any()
+        ps, xs = r.stf.sum() * 250, r.x_st.sum() * 250
+        tol = 0.15 if (whp, q) == (100, 1.5) else 0.07 if whp == 100 else 0.045
+        assert abs(xs / ps - 1) < tol, (whp, dev, q, xs, ps)
+        pf, xf = r.frf.sum() * 250, r.x_fr.sum() * 250
+        if (dev, q) != (60, 5.0):
+            assert abs(xf - pf) < max(12.0, 0.15 * pf) or abs(xf / pf - 1) < 0.15, (whp, dev, q, xf, pf)
+    # full traverses (vertical; the 60 deg and 100 psig traverses differ through the fluid: PROSPER's EoS gives
+    # 8-25 % more gas volume there than the black-oil condensate)
+    path = _t43_deviated_path(12000)
+    fl = _t38_retro()
+    for whp, qs, ref, tol in ((500, [1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5],
+                               [1411.18, 1283.21, 1210.42, 1166.95, 1118.72, 980.44, 965.13, 972.05], 0.04),
+                              (1000, [1.5, 3, 5], [2310.44, 2053.01, 1911.05], 0.02)):
+        q = np.array(qs, float)
+        case = {"q": q, "wgr": np.full(len(q), 50.0), "cgr": np.full(len(q), 1e6 / 7431.94)}
+        P, _ = wvlp.traverse(path, fl, np.full(len(q), whp + 14.696), case, "pe5_extended_style", 1.0, 1.0, 2.0)
+        assert np.all(np.abs((P[:, -1] - 14.696) / np.array(ref) - 1) < tol), (whp, P[:, -1] - 14.696)
+    # PE5 Extended drops at the annular transition (4 MMscf/d) where PE5 does not
+    P, _ = wvlp.traverse(path, fl, np.full(2, 514.696), {"q": np.array([3.0, 4.5]), "wgr": np.full(2, 50.0),
+                                                         "cgr": np.full(2, 1e6 / 7431.94)}, "pe5_extended_style",
+                         1.0, 1.0, 2.0)
+    assert P[1, -1] < P[0, -1] - 150

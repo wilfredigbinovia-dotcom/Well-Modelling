@@ -188,6 +188,12 @@ def gradient_table(path, fluid, case, P, T, correlation, p1=1.0, p2=1.0, u=np.na
             regime = str(tuffp_details([s_["vsl"]], [s_["vsg"]], [s_["rho_l"]], [s_["rho_g"]], [ph["mu_l"]],
                                        [ph["mu_g"]], [s_["sig"]], path.d_h[i], path.rough[i], path.sin_t[i],
                                        [0.5 * (P[i] + P[node])])["regime"][0])
+        elif correlation == "pe5_extended_style" and 1e-6 < lam < 0.99999 and \
+                flow_regime(correlation, s_["vsl"], s_["vsg"], s_["rho_l"], s_["rho_g"], s_["sig"], path.d_h[i],
+                            path.sin_t[i]) != "Bubble":
+            from .pe5x import regime as _pe5x_regime
+            regime = str(_pe5x_regime([s_["vsl"]], [s_["vsg"]], [s_["rho_l"]], [s_["rho_g"]], [ph["mu_l"]],
+                                      [ph["mu_g"]], path.d_h[i], path.sin_t[i])[0])
         else:
             regime = flow_regime(correlation, s_["vsl"], s_["vsg"], s_["rho_l"], s_["rho_g"], s_["sig"],
                                  path.d_h[i], path.sin_t[i])

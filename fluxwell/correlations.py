@@ -829,6 +829,7 @@ def pe5_style(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
 
 
 from .unified import tuffp_unified  # noqa: E402  (unified uses friction_factor above)
+from .pe5x import pe5_extended_style  # noqa: E402  (pe5x uses pe5_style above)
 
 class _Correlations(dict):
     """The selectable correlations; special-purpose ones (EXTRA: foam lift) are found by name but not listed."""
@@ -842,6 +843,7 @@ EXTRA = {"foam_homogeneous": foam_homogeneous}
 CORRELATIONS = _Correlations({
     "tuffp_unified": tuffp_unified,
     "pe5_style": pe5_style,
+    "pe5_extended_style": pe5_extended_style,
     "pe2_style": pe2_style,
     "beggs_brill": beggs_brill,
     "hagedorn_brown": hagedorn_brown,
@@ -861,6 +863,7 @@ LABELS = {
     "foam_homogeneous": "Foam-Homogeneous",
     "tuffp_unified": "TUFFP Unified (Zhang et al. 2003)",
     "pe5_style": "PE5-style (calibrated approximation)",
+    "pe5_extended_style": "PE5 Extended-style (calibrated approximation)",
     "pe2_style": "PE2-style (calibrated approximation)",
     "beggs_brill": "Beggs & Brill",
     "hagedorn_brown": "Hagedorn & Brown (mod.)",
