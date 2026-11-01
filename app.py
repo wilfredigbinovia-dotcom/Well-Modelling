@@ -3018,7 +3018,9 @@ def skin_dp_plot(q, dps, qunit):
 
 def _opt_num(col, label, key, help=None):
     """Optional number (blank = not entered) for PROSPER's 'leave blank to calculate' fields."""
-    txt = col.text_input(label, key=wkey(key), help=help, **dflt(key, value=""))
+    stored = val(key, "")
+    stored = "" if stored is None else str(stored)
+    txt = col.text_input(label, key=wkey(key), help=help, **dflt(wkey(key), value=stored))
     ss["_v_" + key] = txt
     txt = (txt or "").strip()
     if not txt:

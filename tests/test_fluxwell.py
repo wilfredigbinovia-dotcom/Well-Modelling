@@ -6266,3 +6266,12 @@ def test_gravel_pack_prosper_t13_t14():
     p14 = json.load(open(ex / "T14_Gravel_Pack.fluxwell.json"))
     assert p13["inputs"]["ipr_mech"] == "Karakas & Tariq" and p13["widgets"]["opt_sand_control"] == "none"
     assert p14["widgets"]["opt_sand_control"] == "gravel_pack" and p14["inputs"]["sc_kg"] == 35000.0
+    # Tutorials 16-18 (screens and liner on the T13 well; validated in test_sand_control_prosper_t15_t18): the manual's
+    # 14,300 / 14,407 / 13,595 STB/d at 2909 / 2920 / 2836 psig with 52.4 / 22 / 242 psi across the screen
+    for f, kind in (("T16_Wire_Wrapped_Screen", "wire_wrapped_screen"), ("T17_Pre_Packed_Screen", "pre_packed_screen"),
+                    ("T18_Slotted_Liner", "slotted_liner")):
+        pj = json.load(open(ex / f"{f}.fluxwell.json"))
+        assert pj["widgets"]["opt_sand_control"] == kind and pj["inputs"]["sc_int"] == 100.0
+    assert json.load(open(ex / "T18_Slotted_Liner.fluxwell.json"))["inputs"]["sc_kout"] == "50000"
+    assert C._beta(None, 50) == pytest.approx(1709558, rel=1e-6) and C._beta(None, 500) == pytest.approx(481819, rel=1e-6)
+    assert C._beta(None, 50000) == pytest.approx(38272.2, rel=1e-6)
