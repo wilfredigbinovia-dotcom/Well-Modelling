@@ -13,33 +13,33 @@ gradients from its cumulative losses), the constants then checked on the travers
   4 MMscf/d).
 
   regime    annular when the Barnea liquid-film ratio (PE5 stability ratio, K = 55) reaches PE5X_FILM_RATIO = 2.74:
-            both vertical boundaries in the data sit at 2.73-2.77 (500 psig / 3.5 MMscf/d, 3 % liquid; 1000 psig /
-            5 MMscf/d, 6 % liquid), where a gas Froude or Kutateladze number does not separate them; and the liquid
-            Froude number vsl (rho_l / (drho g d))^0.5 is at least PE5X_FL_MIN (near-dry flow stays slug: 100 psig at
-            1.5 MMscf/d, 0.065, against 0.095 for the least annular node). Off vertical the threshold is x (1 + 1.0
-            sin^2 deviation): the 60 deg runs stay slug up to a ratio of 4.5 at 5 MMscf/d, and the second set (T43 at
-            30 and 60 deg, 8-20 MMscf/d, ratios from 6.9; T38 at 60 deg) is annular at every node, as PROSPER.
-  slug      drift flux vsg / (1 - HL) = C0 vm + vd, C0 = 1.0233 - 0.08 sin^2 dev, vd = 0.1666 (drho / rho_g)^0.398
-            vm^-0.078 (1 + 3.7 sin^2 dev) ft/s (vertical nodes within 3 %, 60 deg within 5 %, 10th-90th percentile);
-            friction = Moody (no-slip mixture) x exp(1.9549) vm^-0.8403 lambda^0.1575 (rho_g / rho_l)^-0.2069
-            exp(-0.2077 sin^2 dev) - fitted on the condensate and the T13 oil well together (19 % rms on the
-            condensate nodes, no bias on the oil: PROSPER's slug friction there is a steady 0.64 x no-slip Moody at
-            35-82 % liquid; the condensate-only fit gave 3 x that).
-  annular   holdup between the slug holdup at the transition and no slip: HL = lambda + w (HL_slug - lambda),
-            w = min(1, exp(-3.714) (Fr_g - 0.94)^-1.071) with the gas Froude number vsg (rho_g / (drho g d))^0.5. In
-            PROSPER the annular holdup also carries the flow's history (it starts at the slug value where the flow turns
-            annular and develops upward - entrainment and deposition along the pipe), which a local closure cannot:
-            about +-40 % on the film part, small in absolute terms above Fr_g ~ 1.1. Friction = Moody (no-slip) x
-            exp(-0.4737) Fr_g^-0.3635 lambda^-0.0774 max(HL / lambda, 1)^-1.0481 (rho_g / rho_l)^-0.127 (12 % rms on
-            the vertical, deviated and oil annular nodes; Fr_g 1-5.7, no separate deviation term needed).
+            both vertical boundaries in the first set sit at 2.73-2.77 (500 psig / 3.5 MMscf/d, 3 % liquid; 1000 psig /
+            5 MMscf/d, 6 % liquid); the liquid Froude number vsl (rho_l / (drho g d))^0.5 is at least PE5X_FL_MIN
+            (near-dry flow stays slug); and the no-slip liquid fraction is at most PE5X_LIQ_MAX = 0.65 (PROSPER's oil
+            annular flow reaches 62 % liquid - the 30 % cut of the PE5 stability check does not apply). Off vertical
+            the threshold is x (1 + 1.0 sin^2 deviation). Every node of the second and third sets (T43 / T38 at 30 and
+            60 deg, T13 oil, T38 at 100 psig) as PROSPER. Not reproduced: PROSPER's "Slug (Induced)" at 35-82 % liquid
+            in the GOR 800 oil run (14,482 STB/d), which depends on the flow below (bubble flow in the casing), not on
+            local conditions.
+  slug      drift flux vsg / (1 - HL) = C0 vm + vd, C0 = 1.0233 - 0.08 sin^2 dev, vd = exp(-1.2868) (drho / rho_g)^0.1512
+            vm^-0.0283 (1 + 4.2985 sin^2 dev) ft/s - fitted on the holdup PROSPER's gravity term implies (its reported
+            holdup is 1-6 % lower), all three sets: every run within 6.5 % (the earlier vd, (drho/rho_g)^0.398, was
+            19 % high at 1 lb/ft3 of gas). Friction = Moody (no-slip mixture) x exp(1.9621) vm^-0.7953
+            lambda^0.1026 (rho_g / rho_l)^-0.1057 exp(-0.2142 sin^2 dev) (18 % rms; condensate and oil: PROSPER's
+            oil-well slug friction is a steady 0.64 x no-slip Moody).
+  annular   holdup between the slug holdup at the transition and its high-velocity limit (1.055 + 0.12 lambda)
+            lambda (PROSPER's gravity-implied annular holdup settles at 1.05-1.11 x no slip): HL = lambda_a +
+            w (HL_slug - lambda_a), w = min(1, exp(-3.714) (Fr_g - 0.94)^-1.071), Fr_g = vsg (rho_g / (drho g d))^0.5.
+            PROSPER's annular holdup also develops along the pipe (entrainment / deposition), which a local closure
+            approximates. Friction = Moody (no-slip) x exp(-0.351) Fr_g^-0.3747 lambda^-0.0383
+            max(HL / lambda_a, 1)^-1.1328 (rho_g / rho_l)^-0.1343 (15.5 % rms over all annular nodes; Fr_g 1-5.7).
   bubble / single phase as PE5-style.
 
-Data: the user's 22 T43 PE5 Extended traverses (first set) and a second set - T43 at 30 / 60 deg below 2000 ft (8, 12,
-20 MMscf/d at 500 psig), T38's black-oil condensate at 60 deg (25 MMscf/d, 100 psig) and the T13 Logie oil well
-(14,482 STB/d; VLP tables at water cut 0 / 50 % and GOR 2000, 2000-16,000 STB/d). Bottom-hole pressures: first set mean
-4.4 %, T43 deviated -3 to -6 % (PROSPER's EoS fluid; T38 on the same black-oil fluid -5.8 %), T13 within 9.4 % (mean
-3.6 %). PROSPER's reported holdup is not exactly what its gravity term uses (the static gradient implies 1-6 % more
-liquid); the closures follow the static and friction gradients.
+Data (the user's PROSPER PE5 Extended exports): 22 T43 traverses (first set); T43 at 30 / 60 deg, 8-20 MMscf/d, T38 at
+60 deg / 25 MMscf/d and the T13 oil well with VLP tables at water cut 0 / 50 % and GOR 2000 (second); T13 at 2000-16,000
+STB/d and GOR 2000 / 50 % water, T38's black-oil condensate at 100 psig vertical (1.5-5 MMscf/d) and 60 deg (10, 15)
+(third). Bottom-hole pressures: 47 points, mean 3.4 %, max 11.6 % (T43 100 psig / 3 MMscf/d on PROSPER's EoS fluid -
+7 % on the black-oil fluid); T13 oil within 5 %; 500 psig vertical within 3.3 %, 1000 psig 1.9 %.
 
 A screening approximation: check it against PROSPER before relying on it, oil wells rest on one gradient and three VLP tables."""
 from __future__ import annotations
@@ -53,15 +53,17 @@ G_FT = 32.174
 PE5X_FILM_RATIO = 2.74
 PE5X_FILM_RATIO_DEV = 1.0          # threshold x (1 + k sin^2 deviation)
 PE5X_FL_MIN = 0.08
+PE5X_LIQ_MAX = 0.65                 # annular possible up to this no-slip liquid fraction (oil wells: 0.62 seen)
 PE5X_C0 = (1.0233, 0.08)           # C0 = a - b sin^2 dev
-PE5X_VD = (-1.792, 0.398, -0.078, 3.7)     # vd = exp(a) (drho/rho_g)^b vm^c (1 + k sin^2 dev), ft/s
-PE5X_SLUG_FRICTION = (1.9549, -0.8403, 0.1575, -0.2069, -0.2077)  # x Moody_ns: exp(a) vm^b lam^c (rg/rl)^d exp(e s2)
+PE5X_VD = (-1.2868, 0.1512, -0.0283, 4.2985)     # vd = exp(a) (drho/rho_g)^b vm^c (1 + k sin^2 dev), ft/s
+PE5X_SLUG_FRICTION = (1.9621, -0.7953, 0.1026, -0.1057, -0.2142)  # x Moody_ns: exp(a) vm^b lam^c (rg/rl)^d exp(e s2)
 PE5X_ANN_W = (-3.714, -1.071, 0.94)        # w = exp(a) (Fr - c)^b
-PE5X_ANN_FRICTION = (-0.4737, -0.3635, -0.0774, -1.0481, -0.127)  # x Moody_ns: exp(a) Fr^b lam^c max(HL/lam,1)^d (rg/rl)^e
+PE5X_ANN_FLOOR = (1.055, 0.12)             # high-velocity annular holdup = (a + b lambda) lambda
+PE5X_ANN_FRICTION = (-0.351, -0.3747, -0.0383, -1.1328, -0.1343) # x Moody_ns: exp(a) Fr^b lam^c max(HL/lam,1)^d (rg/rl)^e
 _FILM_H = np.geomspace(1e-5, 0.6, 600)
 
 
-def film_ratio(vsl, vsg, rho_l, rho_g, mu_l, mu_g, d_ft, sin_t):
+def film_ratio(vsl, vsg, rho_l, rho_g, mu_l, mu_g, d_ft, sin_t, liq_cut=None):
     """Vectorised Barnea film ratio (complementary.pe5_stability_ratio): > 1 an upward film exists; NaN above
     PE5_LIQ_CUT liquid fraction or without gas, inf horizontal / downward."""
     vsl, vsg, rho_l, rho_g, mu_l, mu_g, sin_t, d_ft = np.broadcast_arrays(*(np.asarray(x, float) for x in
@@ -69,7 +71,7 @@ def film_ratio(vsl, vsg, rho_l, rho_g, mu_l, mu_g, d_ft, sin_t):
                                                                            d_ft)))
     vm = vsl + vsg
     ok = (vm > 0) & (vsg > 0) & (vsl > 0) & (rho_l > rho_g) & (rho_g > 0) & (mu_l > 0) & (mu_g > 0)
-    ok &= vsl / np.where(vm > 0, vm, 1) <= CX.PE5_LIQ_CUT
+    ok &= vsl / np.where(vm > 0, vm, 1) <= (CX.PE5_LIQ_CUT if liq_cut is None else liq_cut)
     out = np.full(vm.shape, np.nan)
     if not ok.any():
         return out
@@ -105,13 +107,14 @@ def _parts(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
     vd = np.exp(a) * (drho / rg) ** b * np.maximum(vm, 1e-6) ** c * (1 + k * s2) * np.clip(sin_arr, 0.0, 1.0) ** 0.0
     hl_s = np.clip(1 - vsg / np.maximum(c0 * vm + vd, 1e-9), lam, 1.0)
     # regime
-    ratio = film_ratio(vsl, vsg, rho_l, rg, mu_l, mu_g, d, sin_arr)
+    ratio = film_ratio(vsl, vsg, rho_l, rg, mu_l, mu_g, d, sin_arr, PE5X_LIQ_MAX)
     fl = vsl * np.sqrt(rho_l / (drho * G_FT * d))
     annular = np.isfinite(ratio) & (ratio >= PE5X_FILM_RATIO * (1 + PE5X_FILM_RATIO_DEV * s2)) & (fl >= PE5X_FL_MIN)
     fr = vsg * np.sqrt(rg / (drho * G_FT * d))
     wa, wb, wc = PE5X_ANN_W
     w = np.where(fr > wc, np.minimum(1.0, np.exp(wa) * np.maximum(fr - wc, 1e-9) ** wb), 1.0)
-    hl_a = lam + w * (hl_s - lam)
+    lam_a = np.minimum((PE5X_ANN_FLOOR[0] + PE5X_ANN_FLOOR[1] * lam) * lam, np.maximum(hl_s, lam))
+    hl_a = lam_a + w * (hl_s - lam_a)
     hl = np.where(annular, hl_a, hl_s)
     # friction: Moody on the no-slip mixture x the regime's factor
     rho_ns = lam * rho_l + (1 - lam) * rg
@@ -123,7 +126,7 @@ def _parts(vsl, vsg, rho_l, rho_g, mu_l, mu_g, sig_l, d, rough, sin_t, p):
         * np.exp(fe * s2)
     ga, gb, gc, gd, ge = PE5X_ANN_FRICTION
     mult_a = np.exp(ga) * np.maximum(fr, 0.05) ** gb * np.maximum(lam, 1e-6) ** gc \
-        * np.maximum(hl / np.maximum(lam, 1e-9), 1.0) ** gd * (rg / np.maximum(rho_l, 1e-3)) ** ge
+        * np.maximum(hl / np.maximum(lam_a, 1e-9), 1.0) ** gd * (rg / np.maximum(rho_l, 1e-3)) ** ge
     f = base * np.where(annular, mult_a, mult_s)
     e = (rho_l * hl + rg * (1 - hl)) * sin_arr / 144.0
     return e, f, hl, annular, vm, lam
