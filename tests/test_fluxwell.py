@@ -6315,3 +6315,63 @@ def test_gas_fvf_match_anchored_prosper_t06_t20():
         assert list(t["Gas FVF (ft3/scf)"])[:4] == [0.0034174, 0.005269, 0.06733, 0.016213], f
     p20 = json.load(open(ex / "T20_Gas_Well_Test_Matching_WGR_Sensitivity.fluxwell.json"))
     assert p20["widgets"]["sys_vars"] == ["whp", "wgr"] and p20["inputs"]["sys_p2_pe2_style"] == pytest.approx(0.9364)
+
+
+def test_pe5_extended_style_deviated_annular_and_oil():
+    """PE5 Extended-style on the user's second set of PE5 Extended exports: the T43 well at 30 and 60 deg below 2000 ft
+    (8, 12, 20 MMscf/d, 500 psig), T38's black-oil condensate at 60 deg (25 MMscf/d, 100 psig) and the T13 Logie oil
+    well (14,482 STB/d, 500 psig; VLP tables at water cut 0 / 50 % and GOR 2000). PROSPER calls every deviated node
+    annular, as ours (the film-ratio threshold x (1 + sin^2 dev) holds). With PROSPER's node properties: friction per
+    traverse within 6 % (T38 11 %, T13 with its 0.0006 in tubing 10 %), gravity within 9 %. Full traverses: T43
+    deviated within 6.5 % (low: PROSPER's EoS fluid has more gas volume than the black-oil condensate; T38, on the
+    same black-oil fluid as PROSPER, -5.8 %), T13 within 10 % (mean 3.6 %; PE5-style against PROSPER's PE5 up to
+    20 % off) - after refitting the slug and annular friction on the old and new nodes together (annular: Moody no-slip
+    x exp(-0.4737) Fr^-0.3635 lambda^-0.0774 max(HL/lambda, 1)^-1.0481 (rho_g/rho_l)^-0.127; before: 30-73 % high in
+    deviated annular flow and 3 x PROSPER's slug friction in the oil well)."""
+    from fluxwell import pe5x as X
+    G = 14.696
+    d = pd.read_csv(Path(__file__).parent / "data" / "pe5x_runs2_nodes.csv")
+    t = d[d.stf.notna() & d.frf.notna()].copy()
+    t = t[~((t.tut == "T13") & (t.d > 5))]                         # the casing node below the tubing
+    rough = np.where(t.tut == "T13", 0.0006, 0.0018) / 12
+    sin_t = np.cos(np.radians(t.ang.to_numpy()))
+    D = t.d.to_numpy() / 12
+    st, fr, hl = X.pe5_extended_style(t.vsl, t.vsg, t.rl, t.rg, t.ml, t.mg, t.sig, D, rough, sin_t, t.p)
+    t["x_st"], t["x_fr"] = st * t.L, fr * t.L
+    t["x_ann"] = X.regime(t.vsl, t.vsg, t.rl, t.rg, t.ml, t.mg, D, sin_t) == "Annular"
+    for (tut, dev, q), r in t.groupby(["tut", "dev", "q"]):
+        ps, pf = (r.stf * r.L).sum(), (r.frf * r.L).sum()
+        assert abs(r.x_st.sum() / ps - 1) < 0.09, (tut, dev, q, r.x_st.sum(), ps)
+        assert abs(r.x_fr.sum() / pf - 1) < (0.12 if tut in ("T38", "T13") else 0.07), (tut, dev, q, r.x_fr.sum(), pf)
+        if tut != "T13":
+            assert r.x_ann.mean() > 0.95 and r.reg.str.contains("Annular").mean() > 0.95
+    # full traverses
+    fl = _t38_retro()
+    for dev, tvd, ref in ((30, 10660, [1051.23, 1263.81, 1723.82]), (60, 7000, [953.35, 1121.86, 1559.72])):
+        q = np.array([8.0, 12.0, 20.0])
+        P, _ = wvlp.traverse(_t43_deviated_path(tvd), fl, np.full(3, 500 + G),
+                             {"q": q, "wgr": np.full(3, 50.0), "cgr": np.full(3, 1e6 / 7431.94)}, "pe5_extended_style",
+                             1.0, 1.0, 2.0)
+        assert np.all(np.abs((P[:, -1] - G) / np.array(ref) - 1) < 0.065), (dev, P[:, -1] - G)
+    rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 0},
+            {"Type": "Tubing", "Measured Depth (ft)": 11800, "Tubing Inside Diameter (in)": 3.992,
+             "Tubing Inside Roughness (in)": 0.0018},
+            {"Type": "Casing", "Measured Depth (ft)": 12000, "Casing Inside Diameter (in)": 8.3,
+             "Casing Inside Roughness (in)": 0.0018}]
+    top, secs, pts = weq.downhole_sections(_downhole(rows))
+    p38 = wvlp.build_flow_path(top, secs, pts, [0, 2000, 12000], [0, 2000, 7000], [0, 12000], [70, 300])
+    P, _ = wvlp.traverse(p38, fl, np.array([100 + G]), {"q": np.array([25.0]), "wgr": np.array([0.0]),
+                                                         "cgr": np.array([1e6 / 7431.94])}, "pe5_extended_style",
+                         1.0, 1.0, 4.0)
+    assert abs((P[0, -1] - G) / 1508.63 - 1) < 0.075
+    path, _ = _t23_path()
+    oil = _t05_oil()
+    errs = []
+    for wc, gor, ref in ((0.0, 800.0, [2220.0, 2182.9, 2782.3]), (0.5, 800.0, [2991.5, 3012.3, 3209.2]),
+                         (0.0, 2000.0, [1401.1, 1730.3, 2657.9])):
+        q = np.array([2000.0, 8000.0, 16000.0])
+        P, _ = wvlp.traverse(path, oil, np.full(3, 500 + G), {"q": q, "wc": np.full(3, wc), "gor": np.full(3, gor)},
+                             "pe5_extended_style", 1.0, 1.0, 8.0)
+        errs += list((P[:, -1] - G) / np.array(ref) - 1)
+    errs = np.abs(errs)
+    assert errs.max() < 0.10 and errs.mean() < 0.045, errs
