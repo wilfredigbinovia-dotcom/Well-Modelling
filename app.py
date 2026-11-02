@@ -9865,8 +9865,8 @@ with tabs[5]:
                 c2 = st.columns(2)
                 if m_fit is not None and use_fit:
                     p1, p2 = float(m_fit.p1), float(m_fit.p2)
-                    c2[0].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True)
-                    c2[1].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True)
+                    c2[0].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True, key="sys_p1_show")
+                    c2[1].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True, key="sys_p2_show")
                     st.caption("Parameters from Match VLP.")
                 else:
                     p1 = num(c2[0], "Parameter 1 (gravity)", f"sys_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
@@ -12008,8 +12008,8 @@ def woe_tab(o, eqd, ipr_curve):
             m_fit = ms.get(corr)
             if m_fit is not None:
                 p1, p2 = float(m_fit.p1), float(m_fit.p2)
-                c[1].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True)
-                c[2].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True)
+                c[1].text_input("Parameter 1 (gravity)", f"{p1:.4f}", disabled=True, key="woe_p1_show")
+                c[2].text_input("Parameter 2 (friction)", f"{p2:.4f}", disabled=True, key="woe_p2_show")
                 st.caption("Parameters from Match VLP.")
             else:
                 p1 = num(c[1], "Parameter 1 (gravity)", f"woe_p1_{corr}", 1.0, 0.3, 3.0, None, "%.4f")
