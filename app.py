@@ -106,6 +106,20 @@ try:                                    # PROSPER-style grids with per-cell lock
     HAVE_AGGRID = True
 except ImportError:                     # falls back to st.data_editor
     HAVE_AGGRID = False
+
+
+def _switch_grid_editor():
+    """Keep the equipment tables' edits when switching editors (each editor starts from the stored table)."""
+    for k_, df_ in (ss.get("_tables") or {}).items():
+        if isinstance(df_, pd.DataFrame) and k_.startswith("eq_"):
+            ss[k_] = df_.copy()
+            ss["_ver_" + k_] = ss.get("_ver_" + k_, 0) + 1
+
+
+def use_aggrid():
+    """AG Grid for the equipment tables unless it is missing or the user chose the simple editor (the AG Grid
+    component's browser files can fail to load on some deployments)."""
+    return HAVE_AGGRID and not bool(ss.get("_v_eq_simple_grid", False))
 from fluxwell.correlations import LABELS as VLP_LABELS
 from fluxwell import equipment as weq
 from fluxwell import schematic as wsch
@@ -4034,7 +4048,7 @@ def type_grid(name, types, active, numeric_cols, select_cols=None, height=None):
     select_cols = select_cols or {}
     base = ss["eq_" + name]
     ver = ss.get("_ver_eq_" + name, 0)
-    if not HAVE_AGGRID:
+    if not use_aggrid():
         cfg = {"Type": st.column_config.SelectboxColumn(options=types),
                **{c_: st.column_config.SelectboxColumn(options=o_, width="medium") for c_, o_ in select_cols.items()},
                **{c_: st.column_config.NumberColumn(c_, format="%g") for c_ in numeric_cols}}
@@ -5768,6 +5782,11 @@ with tabs[3]:
     c[0].button("Load example", on_click=load_equipment_example, width="stretch",
                 help="Synthetic J-shaped well with the downhole and temperature data from the PROSPER screenshots.")
     c[1].button("Clear all", on_click=clear_equipment, width="stretch")
+    if HAVE_AGGRID:
+        flag(c[2].toggle, "Simple table editor", "eq_simple_grid", False, on_change=_switch_grid_editor,
+             help="Use Streamlit's own table editor for the equipment tables instead of the grid with shaded locked "
+                  "cells - for when the grid does not load ('trouble loading the st_aggrid component'). Values typed "
+                  "into locked cells are then cleared instead of blocked.")
     status_box = st.container()
     sub = st.tabs(["Deviation survey", "Surface equipment", "Downhole equipment", "Geothermal gradient",
                    "Average heat capacities"])
@@ -5840,10 +5859,10 @@ with tabs[3]:
         u_sur = num(c[1], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_usur", 8.0, 0.0, 1000.0,
                     help="Flowline to surroundings: roughly 1-2 buried, 5-10 bare pipe in air, higher in water.")
         st.caption(("Cells open according to the type in each row, as in PROSPER: shaded cells take no input. "
-                    if HAVE_AGGRID else "Cells open according to the type in each row, as in PROSPER: a value typed "
+                    if use_aggrid() else "Cells open according to the type in each row, as in PROSPER: a value typed "
                     "into a locked cell is cleared. ")
                    + "Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed.")
-        if not HAVE_AGGRID:
+        if not use_aggrid():
             with st.expander("Which cells each type opens", expanded=True):
                 s_cols = ["Fitting"] + weq.SURFACE_NUMERIC
                 s_short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Pipe Inside ", "Pipe ") for c_ in s_cols}
@@ -5881,14 +5900,14 @@ with tabs[3]:
         with st.expander("Equipment types"):
             st.markdown("\n".join(f"- **{k}** - {v}" for k, v in weq.TYPE_HELP.items()))
         st.caption(("Cells open according to the type in each row, as in PROSPER: shaded cells take no input. "
-                    if HAVE_AGGRID else "Cells open according to the type in each row, as in PROSPER: a value typed "
+                    if use_aggrid() else "Cells open according to the type in each row, as in PROSPER: a value typed "
                     "into a locked cell is cleared. ")
                    + "Roughness defaults to 0.0006 in and the rate multiplier to 1 - both can be changed."
                    + (" Annular flow and artificial lift also open tubing OD/outside roughness and casing ID/"
                       "roughness on tubing rows." if ft != "tubing" or lift_dh else
                       " Tubing OD and casing ID open on tubing rows when artificial lift or annular flow is chosen in "
                       "the Options Summary" + ("; the temperature model opens the tubing OD." if tod_dh else ".")))
-        if not HAVE_AGGRID:
+        if not use_aggrid():
             with st.expander("Which cells each type opens", expanded=True):
                 short = {c_: c_.replace(" (in)", "").replace(" (ft)", "").replace("Tubing ", "Tbg ").replace(
                     "Casing ", "Csg ").replace("Inside ", "In. ").replace("Outside ", "Out. ") for c_ in weq.DH_NUMERIC}
