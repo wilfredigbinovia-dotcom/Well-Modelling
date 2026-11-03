@@ -51,7 +51,8 @@ LIMIT_LABELS = {
     "whp_min": "Minimum WHP", "whp_max": "Maximum WHP", "stability": "Stability (VLP minimum)",
     "turner": "Liquid loading (Turner)", "pe5": "PE5 film stability", "erosion": "Erosional velocity",
     "hydrate": "Hydrates", "coning": "Coning", "sanding": "Sanding", "burst": "Tubing burst",
-    "collapse": "Tubing collapse", "triaxial": "Tubing triaxial", "aof": "AOF", "grid": "None (lowest rate)",
+    "collapse": "Tubing collapse", "triaxial": "Tubing triaxial", "casing_collapse": "Casing collapse", "aof": "AOF",
+    "grid": "None (lowest rate)",
 }
 
 
@@ -609,5 +610,5 @@ def curve_table(kind, e: CaseEnvelope) -> pd.DataFrame:
         ok &= m >= 0
     df["Inside envelope"] = np.where(ok, "Yes", "No")
     for k, m in e.margins.items():
-        df[f"{LIMIT_LABELS.get(k, k)} margin"] = np.where(np.abs(m) >= BIG, np.nan, m)
+        df[f"{LIMIT_LABELS.get(k, k)} margin"] = np.where(np.abs(m) >= 1e6, np.nan, m)   # no load: blank
     return df

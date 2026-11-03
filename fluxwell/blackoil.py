@@ -610,9 +610,15 @@ def fit_linear(x, y, lam: float = 1e-8, anchor=None) -> LinearMatch:
     u, v = np.linalg.solve(M, np.array([a @ d, d.sum()]))
     p1, p2 = 1 + u, v * s
     fit = p1 * xl + p2
-    std = float(np.sqrt(np.sum(((fit - yl) / yl) ** 2) / (n - 2))) if n >= 3 else np.nan
-    raw = float(np.mean(np.abs(xl - yl) / np.abs(yl)) * 100)
-    applied = float(np.mean(np.abs(fit - xl) / np.abs(yl)))
+    # relative measures over the non-zero lab values (a stock-tank GOR of 0 takes part in the fit only)
+    nz = np.abs(yl) > 1e-12
+    nr = int(nz.sum())
+    if nr == 0:
+        std, raw, applied = np.nan, np.nan, 0.0
+    else:
+        std = float(np.sqrt(np.sum(((fit[nz] - yl[nz]) / yl[nz]) ** 2) / (nr - 2))) if nr >= 3 else np.nan
+        raw = float(np.mean(np.abs(xl[nz] - yl[nz]) / np.abs(yl[nz])) * 100)
+        applied = float(np.mean(np.abs(fit[nz] - xl[nz]) / np.abs(yl[nz])))
     return LinearMatch(float(p1), float(p2), std, raw, n_lab, float(np.mean(np.abs(yl))), applied)
 
 
