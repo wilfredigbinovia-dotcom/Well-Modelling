@@ -11421,11 +11421,16 @@ def _woe_tubing_default(eqd):
     return lab_, od_, wall_, packer_
 
 
+ROCK_STRENGTH_TIP = 'Typical values (screening only - use core tests or a log-derived strength profile where you have them):\n\n| Sand | UCS (psi) | TWC (psi) |\n|---|---|---|\n| Unconsolidated | < 150 | < 500 |\n| Friable / weak (often 28-35 % porosity) | 150 - 1,000 | 500 - 2,500 |\n| Weakly to moderately consolidated (20-28 %) | 1,000 - 3,000 | 2,500 - 6,000 |\n| Consolidated (12-20 %) | 3,000 - 8,000 | 6,000 - 15,000 |\n| Strong / tight (< 12 %) | > 8,000 | > 15,000 |\n\nTWC / UCS is usually 1.5 - 4 (about 2.5 for a standard 1.5 in x 0.5 in hollow cylinder; higher for weak rock). The sanding limit is very sensitive to this value: a few hundred psi can move the critical drawdown from zero to no limit.'
+
+
 def woe_inputs_sanding(res_, tvd_mid):
     st.caption("Willson et al. (2002): critical bottom-hole flowing pressure CBHFP = (3 sigma1 - sigma3 - U - A Pr) / "
                "(2 - A), U = 3.1 TWC, A = (1 - 2 nu) alpha / (1 - nu). Depletion lowers the horizontal stresses by the "
                "stress path. The envelope keeps Pwf above Pr - (1 - margin) x critical drawdown.")
-    on = flag(st.toggle, "Sanding limit", "woe_sand_on", False)
+    on = flag(st.toggle, "Sanding limit", "woe_sand_on", False,
+              help="On: flowing BHPs below the sanding limit are outside the envelope. Off: the critical drawdown is "
+                   "still shown here but does not limit the envelope.")
     c = st.columns(3)
     tvd = num(c[0], "Mid-perforation depth (ft TVD)", "woe_sd_tvd", float(round(tvd_mid)), 100.0, 60000.0)
     p_i = num(c[1], "Initial reservoir pressure (psia)", "woe_sd_pi", float(round(res_["pr"])), 15.0, 30000.0,
@@ -11440,13 +11445,16 @@ def woe_inputs_sanding(res_, tvd_mid):
     alpha = num(c[1], "Biot coefficient", "woe_sd_biot", 1.0, 0.0, 1.0, None, "%.3f")
     gam = num(c[2], "Stress path (d sigma_h / d Pp)", "woe_sd_gamma", 0.6, 0.0, 1.0, None, "%.3f")
     c = st.columns(3)
-    src = sel(c[0], "Rock strength", ["TWC measured", "From UCS"], "woe_sd_src")
+    src = sel(c[0], "Rock strength", ["TWC measured", "From UCS"], "woe_sd_src",
+              help="Thick-wall cylinder (TWC) strength from a hollow-cylinder test, or the unconfined compressive "
+                   "strength (UCS) times a TWC / UCS ratio. " + ROCK_STRENGTH_TIP)
     if src == "TWC measured":
-        twc = num(c[1], "TWC strength (psi)", "woe_sd_twc", 2000.0, 0.0, 1e5)
+        twc = num(c[1], "TWC strength (psi)", "woe_sd_twc", 2000.0, 0.0, 1e5, help=ROCK_STRENGTH_TIP)
         ucs, k_ = 800.0, 2.5
     else:
-        ucs = num(c[1], "UCS (psi)", "woe_sd_ucs", 800.0, 0.0, 1e5)
-        k_ = num(c[2], "TWC / UCS", "woe_sd_k", 2.5, 0.5, 10.0, None, "%.3g")
+        ucs = num(c[1], "UCS (psi)", "woe_sd_ucs", 800.0, 0.0, 1e5, help=ROCK_STRENGTH_TIP)
+        k_ = num(c[2], "TWC / UCS", "woe_sd_k", 2.5, 0.5, 10.0, None, "%.3g",
+                 help="Usually 1.5 - 4: about 2.5 for a standard hollow cylinder, higher for weak rock.")
         twc = None
     c = st.columns(3)
     margin = num(c[0], "Safety margin (percent)", "woe_sd_margin", 20.0, 0.0, 90.0) / 100.0
@@ -11479,7 +11487,10 @@ def woe_inputs_coning(o, kind, res_):
                    "mobility and (kv/kh)^0.07, converted with Bg; the lower one, then the non-Darcy correction "
                    "(Smulski 2012) with the turbulent / laminar ratio of the case's IPR. Screening values: against a "
                    "numerical model they were 44-68 % high on average even after the correction.")
-    on = flag(st.toggle, "Coning limit", "woe_cn_on", False)
+    on = flag(st.toggle, "Coning limit", "woe_cn_on", False,
+              help="On: rates above the critical coning rate are outside the envelope. Off: the critical rate, "
+                   "breakthrough time and water cut are still shown here but do not limit the envelope - thin "
+                   "columns often give a critical rate of a few STB/d, below any practical rate.")
     mode = sel(st, "Coning", modes, "woe_cn_mode")
     st.button("Fill from PVT and IPR", on_click=_woe_fill, args=(res_,), key="woe_cn_fill",
               help=f"Reservoir properties at {res_['pr']:,.0f} psia and {res_['t']:.0f} °F, k, h, re and rw from the IPR.")
@@ -12009,7 +12020,8 @@ def woe_tab(o, eqd, ipr_curve):
             c = st.columns(2)
             pe5 = flag(c[0].checkbox, "PE5 film stability", "woe_pe5", kind == "gas",
                        help="PROSPER's PE5 stability flag: no liquid film reversal at any node. Meant for gas-"
-                            "dominated flow; oil wells with free gas near the top are often flagged.")
+                            "dominated flow; oil wells with free gas near the top are often flagged, so it is off by "
+                            "default for oil wells - tick it to make it a limit.")
             ero = flag(c[1].checkbox, "Erosional velocity", "woe_erosion", True,
                        help="API RP 14E with the C-factor (and sand rate) of the Calculation tab options.")
             hyd_curve = hydrate_curve_current()
