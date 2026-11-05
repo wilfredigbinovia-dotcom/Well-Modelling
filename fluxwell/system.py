@@ -487,6 +487,85 @@ def rate_table(kind, r: CaseResult) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def restriction_labels(path) -> list[str]:
+    """PROSPER names of the downhole restrictions, top down: SSSV 1, SSSV 2, ... and Restriction 1, 2, ..."""
+    kinds = getattr(path, "restriction_kinds", {}) or {}
+    n, out = {}, []
+    for node in sorted(path.restrictions):
+        k = kinds.get(node, "Restriction")
+        n[k] = n.get(k, 0) + 1
+        out.append(f"{k} {n[k]}")
+    return out
+
+
+def pe5_flag(det, r: CaseResult, q):
+    """PROSPER's PE5 stability flag at one rate of a VLP curve: unstable where Barnea's film reverses anywhere along
+    the string (complementary.pe5_stability_ratio) or where the rate is left of the VLP minimum (the tubing curve
+    falls with rate - heading). The user's 30 API oil well (40 % water cut, PE5): every rate below the VLP minimum
+    unstable, from it stable; the T43 gas well VLPs (Runs 2, 3A, 4): no stable rate left of the minimum."""
+    f = det.get("PE5 stability flag")
+    if f is None:
+        return "—"
+    qm = r.q_vlp_min
+    if f == "Stable" and qm is not None and np.isfinite(qm) and q < qm * (1 - 1e-6):
+        return "Unstable"
+    return f
+
+
+def vlp_ipr_table(path, fluid, kind, r: CaseResult, correlation, p1=1.0, p2=1.0, hc=None,
+                  surface: SurfaceSetup | None = None, comp=None) -> pd.DataFrame:
+    """PROSPER's VLP/IPR Table (System | Calculate | Results): the rate table with, at every rate, the boundary
+    node, wellhead, first and last node conditions, the dP split, the regime at every restriction and the choke,
+    the transit time and the worst values along the string (velocities, pressures, erosional velocity, C factor,
+    grain size, corrosion) and the erosional velocity and PE5 stability flags."""
+    labels = restriction_labels(path)
+    has_choke = surface is not None and bool(surface.items) and SF.has_choke(surface.items)
+    rows = []
+    for i, q in enumerate(r.rates):
+        prm = mixed_params(kind, r.params, r.ipr_curve, q)
+        row = {"Point": i + 1, **surface_rates(kind, prm, q),
+               "VLP pressure (psia)": r.vlp[i], "IPR pressure (psia)": r.ipr_pwf[i]}
+        if r.node == "top" and r.top_in is not None:
+            row["Inflow pressure at top node (psia)"] = r.top_in[i]
+        det, reg = {}, {}
+        if np.isfinite(r.vlp[i]):
+            try:
+                det, reg, _ = solution_details(path, fluid, kind, prm, q, correlation, p1, p2, hc, surface, comp)
+            except (ValueError, FloatingPointError, ZeroDivisionError, IndexError):
+                det, reg = {}, {}
+        g = lambda k: det.get(k, np.nan)
+        pwh = r.pwh[i] if r.pwh is not None else g("Wellhead pressure (psia)")
+        twh = g("Wellhead temperature (°F)") if det else (r.wht[i] if r.wht is not None else np.nan)
+        row.update({"Boundary node pressure (psia)": float(r.params["whp"]),
+                    "Boundary node temperature (°F)": det.get("Manifold temperature (°F)", twh),
+                    "Wellhead pressure (psia)": pwh, "Wellhead temperature (°F)": twh,
+                    "First node pressure (psia)": pwh, "First node temperature (°F)": twh,
+                    "Last node temperature (°F)": g("Bottom node temperature (°F)"),
+                    "dP friction (psi)": g("dP friction - production string (psi)"),
+                    "dP gravity (psi)": g("dP gravity - production string (psi)")})
+        rr = [v for k, v in reg.items() if k.startswith("Restriction")]
+        for j, lab in enumerate(labels):
+            row[f"Regime - {lab}"] = rr[j][0] if j < len(rr) else "—"
+        ch = [v for k, v in reg.items() if k.startswith("Surface choke")]
+        row["Regime - Choke"] = (("Critical" if any(v[0] == "Critical" for v in ch) else "SubCritical") if ch
+                                 else ("—" if not has_choke or not det else "SubCritical"))
+        row.update({"Cumulative transit time (s)": g("Cumulative transit time (s)"),
+                    "Max. no-slip velocity (ft/s)": g("Max. no-slip velocity (ft/s)"),
+                    "Min. no-slip velocity (ft/s)": g("Min. no-slip velocity (ft/s)"),
+                    "Max. pressure (psia)": g("Max. pressure (psia)"), "Min. pressure (psia)": g("Min. pressure (psia)"),
+                    "Max. erosional velocity (ft/s)": g("Max. erosional velocity (ft/s)"),
+                    "Min. erosional velocity (ft/s)": g("Min. erosional velocity (ft/s)"),
+                    "Max. C factor": g("Max. C factor (flow)"), "Min. C factor": g("Min. C factor (flow)"),
+                    "Max. grain diameter (in)": g("Max. grain diameter (in)"),
+                    "Min. grain diameter (in)": g("Min. grain diameter (in)"),
+                    "Max. corrosion rate (0.001 in/yr)": g("Max. corrosion rate (0.001 in/yr)"),
+                    "Min. corrosion rate (0.001 in/yr)": g("Min. corrosion rate (0.001 in/yr)"),
+                    "Erosional velocity flag": det.get("Erosional velocity flag", "—"),
+                    "PE5 stability flag": pe5_flag(det, r, q)})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 # ---------------------------------------------------------------- details
 def _free_gas(fluid, kind, s, case, p, t):
     """Free gas at the node in MMscf/d: in-situ gas mass rate over the gas density at standard conditions."""

@@ -954,6 +954,37 @@ def test_system_solution_matches_vlp_intersection_and_sensitivity_trends():
     assert res[1].q > res[0].q
 
 
+def test_vlp_ipr_table_prosper_columns():
+    """PROSPER's VLP/IPR Table (the user's Abura well export): at every rate the boundary node, wellhead, first and
+    last node, dP friction / gravity, the regime at each SSSV / restriction and the choke, transit time, the worst
+    values along the string and the erosional velocity and PE5 stability flags. PE5 flag: every rate left of the VLP
+    minimum unstable (PROSPER: points 1-15 unstable, from the VLP minimum at point 16 stable). Corrosion: shear below
+    1 Pa no longer floored, so the maximum falls with rate as PROSPER's does (62 mpy at 4 STB/d, 256 at 3956)."""
+    from fluxwell import complementary as CX
+    top, secs, pts, smd, stvd, path, oil = _vlp_setup()
+    pb = oil.m.bubble_point(205.0)
+    ipr_for = lambda ch: iflow.pi_entry(3000.0, pb, 2.0)
+    base = {"whp": 250.0, "u": 4.17, "wc": 20.0, "gor": 750.0}
+    res, paths = wsys.solve_cases(lambda t: path, oil, "oil", base, [{}], ipr_for, "hagedorn_brown", 1.04, 1.15)
+    r = res[0]
+    tab = wsys.vlp_ipr_table(path, oil, "oil", r, "hagedorn_brown", 1.04, 1.15)
+    assert len(tab) == len(r.rates)
+    for c in ("Liquid rate (STB/d)", "VLP pressure (psia)", "IPR pressure (psia)", "Boundary node pressure (psia)",
+              "Wellhead temperature (°F)", "Last node temperature (°F)", "dP friction (psi)", "dP gravity (psi)",
+              "Regime - Choke", "Cumulative transit time (s)", "Max. no-slip velocity (ft/s)", "Max. C factor",
+              "Max. grain diameter (in)", "Erosional velocity flag", "PE5 stability flag"):
+        assert c in tab, c
+    ok = np.isfinite(tab["VLP pressure (psia)"].astype(float))
+    assert np.allclose(tab.loc[ok, "Max. pressure (psia)"], tab.loc[ok, "VLP pressure (psia)"], rtol=1e-6)
+    left = ok & (tab["Liquid rate (STB/d)"] < r.q_vlp_min * 0.999)
+    assert (tab.loc[left, "PE5 stability flag"] == "Unstable").all()
+    assert list(tab["Max. no-slip velocity (ft/s)"][ok]) == sorted(tab["Max. no-slip velocity (ft/s)"][ok])
+    labs = wsys.restriction_labels(path)
+    assert all(f"Regime - {l}" in tab for l in labs)
+    # NORSOK below 1 Pa: lower shear, lower rate (no floor)
+    assert CX.norsok_rate(70.0, 0.5, 0.05, 5.0) < CX.norsok_rate(70.0, 0.5, 1.0, 5.0)
+
+
 # ------------------------------------------------------------ surface equipment (choke and flowline)
 from fluxwell import surface as wsurf
 

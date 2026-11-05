@@ -366,11 +366,14 @@ def _cr_at(j, fco2, shear, ph):
 
 def norsok_rate(t_c, fco2_bar, shear_pa, ph):
     """Uninhibited CO2 corrosion rate (mm/y). Inputs kept in the model's validity ranges: T 5-150 degC,
-    shear 1-150 Pa, pH 3.5-6.5 (CR linear in temperature between the Table 1 temperatures)."""
+    shear up to 150 Pa, pH 3.5-6.5 (CR linear in temperature between the Table 1 temperatures). Shear below NORSOK's
+    1 Pa is not raised to it (PROSPER: the user's 30 API oil well, 40 % water cut, 0.28 % CO2 - max/min corrosion
+    along the string 62/11 mpy at 4 STB/d to 256/68 at 3956 STB/d; with the 1 Pa floor the maximum stayed at 152 mpy
+    below 1000 STB/d, without it 56-223 mpy, min 9-69)."""
     if not (np.isfinite(fco2_bar) and fco2_bar > 0):
         return 0.0
     t = float(np.clip(t_c, 5.0, 150.0))
-    s = float(np.clip(shear_pa, 1.0, 150.0))
+    s = float(np.clip(shear_pa, 1e-4, 150.0))
     ph = float(np.clip(ph, 3.5, 6.5))
     j = int(np.clip(np.searchsorted(NORSOK_T, t) - 1, 0, len(NORSOK_T) - 2))
     lo, hi = _cr_at(j, fco2_bar, s, ph), _cr_at(j + 1, fco2_bar, s, ph)

@@ -7302,7 +7302,37 @@ def sand_control_at_solution(r):
     return rows
 
 
+def vlp_ipr_table_cached(out, r, kind, fluid, eqd):
+    """PROSPER-style VLP/IPR Table for one system case (details at every rate), cached with the results.
+    Gas lift keeps the plain rate table (the injection changes the string below the injection point)."""
+    if out.get("lift") is not None:
+        return wsys.rate_table(kind, r)
+    cache = out.setdefault("_vit", {})
+    key = id(r)
+    if key not in cache:
+        with st.spinner("Building the VLP/IPR table..."):
+            cache[key] = wsys.vlp_ipr_table(out["paths"][r.params.get("tubing_id")], fluid, kind, r, out["corr"],
+                                            out["p1"], out["p2"], eqd["heat_capacities"], surface=out.get("surface"),
+                                            comp=comp_current())
+    return cache[key]
+
+
+def fmt_rate_table(df):
+    """Numbers to 2 decimals (small values to 4 significant figures), text columns as they are, NaN as a dash."""
+    show = df.copy()
+    for c_ in show.columns[1:]:
+        if pd.api.types.is_numeric_dtype(show[c_]):
+            v_ = show[c_].astype(float)
+            show[c_] = [("—" if not np.isfinite(x) else (f"{x:.4g}" if 0 < abs(x) < 0.1 else f"{x:,.2f}"))
+                        for x in v_]
+        else:
+            show[c_] = show[c_].fillna("—")
+    return show
+
+
 def solution_panel(kind, r, det, regimes):
+    if "PE5 stability flag" in det:                  # PROSPER: also unstable left of the VLP minimum
+        det = {**det, "PE5 stability flag": wsys.pe5_flag(det, r, r.q)}
     sr = wsys.surface_rates(kind, r.params, r.q)
     rows = [(k_, v_) for k_, v_ in sr.items()]
     rows += [("Solution node", "Bottom node" if r.node == "bottom" else
@@ -10197,11 +10227,12 @@ with tabs[5]:
                                                        "always lists every rate.")
                                 st.pyplot(sys_plot(res, kind, full=full_), clear_figure=True)
                             st.markdown("**IPR / VLP curve data**")
-                            rt_ = wsys.rate_table(kind, r)
-                            rt_show_ = rt_.copy()
-                            for c_ in rt_show_.columns[1:]:
-                                rt_show_[c_] = [f"{v_:,.2f}" if np.isfinite(v_) else "—" for v_ in rt_show_[c_].astype(float)]
-                            st.dataframe(rt_show_, hide_index=True, width="stretch", height=330)
+                            rt_ = vlp_ipr_table_cached(out, r, kind, fluid, eqd)
+                            st.dataframe(fmt_rate_table(rt_), hide_index=True, width="stretch", height=330)
+                            if out.get("lift") is None:
+                                st.caption("PROSPER's VLP/IPR Table: scroll right for the dP split, the regime at every "
+                                           "restriction and the choke, the transit time, the worst values along the "
+                                           "string and the erosional velocity and PE5 stability flags at each rate.")
                             if r.node == "top":
                                 st.caption("Inflow pressure at top node: — where the well cannot lift the rate to the top "
                                            "node or, with a critical choke, where the bean cannot pass it.")

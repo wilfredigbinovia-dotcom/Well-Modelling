@@ -61,6 +61,7 @@ class FlowPath:
     fric_mult: np.ndarray | None = None   # per segment: multiplier on the correlation's friction (None = 1)
     thermal: dict | None = None    # temperature model coupled to pressure: {"model": "improved", "u_seg": array}
                                    # or {"model": "enthalpy", ...}; None = Rough Approximation (U from the caller)
+    restriction_kinds: dict = field(default_factory=dict)   # node index -> equipment type (SSSV, Restriction, ...)
 
     def node(self, md):
         i = int(np.argmin(np.abs(self.md - md)))
@@ -120,14 +121,16 @@ def build_flow_path(top_md, secs: pd.DataFrame, points: pd.DataFrame, survey_md,
         else:
             d = r["Flow ID (in)"] / 12
             area[j], dh[j], rough[j], dht[j] = np.pi / 4 * d * d, d, e, d
-    restr = {}
+    restr, kinds = {}, {}
     if points is not None and len(points):
         for _, p in points.iterrows():
             if p["Type"] in ("SSSV", "Restriction", "Gas Lift Mandrel", "SSD") and pd.notna(p["ID (in)"]):
                 k_ = int(np.argmin(np.abs(md - p["MD (ft)"])))
-                restr[k_] = min(restr.get(k_, np.inf), float(p["ID (in)"]))      # two at one depth: the smaller ID
+                if float(p["ID (in)"]) < restr.get(k_, np.inf):          # two at one depth: the smaller ID
+                    kinds[k_] = "SSSV" if p["Type"] == "SSSV" else "Restriction"
+                restr[k_] = min(restr.get(k_, np.inf), float(p["ID (in)"]))
     t_form = np.interp(md, geo_md, geo_t)
-    return FlowPath(md, tvd, t_form, seg, sin_t, area, dh, rough, dht, restr)
+    return FlowPath(md, tvd, t_form, seg, sin_t, area, dh, rough, dht, restr, restriction_kinds=kinds)
 
 
 # ================================================================== fluids
