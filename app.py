@@ -480,7 +480,8 @@ ss["_units"] = {q_: (val("unit_" + q_, wu.default_unit(q_)) if val("unit_" + q_,
 wuu.install()
 
 TAB_NAMES = ["1 · Options Summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP",
-             "6 · Calculation", "7 · Design", "8 · Well Operating Envelope", "9 · Units"]
+             "6 · Calculation", "7 · Design", "8 · Stimulation", "9 · Well Operating Envelope",
+             "10 · Units"]
 tabs = st.tabs(TAB_NAMES, key="main_tabs")
 
 CAPTIONS = {
@@ -1447,9 +1448,8 @@ def _frac_well(o):
 
 
 def frac_panel(o):
-    """PROSPER Stimulation | Hydraulic Fracturing (Tutorial 49): screening of treatment volume and pump rate."""
-    st.subheader("Hydraulic fracturing (stimulation screening)")
-    st.caption("PROSPER's Stimulation | Hydraulic Fracturing (Tutorial 49): a linear/vertical (KGD) fracture of the "
+    """PROSPER Stimulation | Hydraulic Fracturing: screening of treatment volume and pump rate."""
+    st.caption("A linear/vertical (KGD) fracture of the "
                "gross thickness grown with a power-law fluid and Carter leak-off, PROSPER's 100-stage treatment (pad, "
                "proppant ramp) with the proppant bank that settles behind it, and the PI after from the propped "
                "length and conductivity. A screening tool, as PROSPER says - not a fracture simulator. See "
@@ -1601,9 +1601,8 @@ def _pi_at_test(curve, q_test):
 
 
 def mudacid_panel(o):
-    """PROSPER Stimulation | Mud Acidization of Sandstones (Tutorial 50)."""
-    st.subheader("Mud acidization of sandstones (stimulation screening)")
-    st.caption("PROSPER's Stimulation | Mud Acidization of Sandstones (Tutorial 50): the rock's composition sets the "
+    """PROSPER Stimulation | Mud Acidization of Sandstones."""
+    st.caption("The rock's composition sets the "
                "HF / HCl formulation, the porosity and permeability gained, the pumping schedule and limits, and the "
                "PI after treatment. A screening tool, as PROSPER says. See mudacid.py for what was reconstructed and "
                "how closely (fitted to the T50 file's runs).")
@@ -3999,14 +3998,6 @@ with tabs[2]:
                         st.dataframe(curve.isochronal.style.format(precision=4), hide_index=True, width="stretch")
                 st.download_button("Download IPR (CSV)", table.to_csv(index=False).encode(), "ipr.csv")
                 ipr_sensitivity_panel(curve, gas)
-    if o is not None and not o.errors and not o.is_injector and o.fluid_type == "oil":
-        st.divider()
-        with st.expander("Stimulation - hydraulic fracturing (PROSPER Tutorial 49)",
-                         expanded=bool(ss.get("frac_res"))):
-            frac_panel(o)
-        with st.expander("Stimulation - mud acidization of sandstones (PROSPER Tutorial 50)",
-                         expanded=bool(ss.get("acid_res"))):
-            mudacid_panel(o)
 
 
 
@@ -11389,7 +11380,7 @@ def ct_design_tab(o, eqd, ipr_curve):
             st.download_button("Download (CSV)", res.profile.to_csv(index=False).encode(), "ct_design_gradient.csv")
 
 
-# ================================================================ well operating envelope (tab 8)
+# ================================================================ well operating envelope (tab 9)
 WOE_CONE_OIL = ["Water coning (bottom water)", "Gas coning (gas cap)", "Thin oil rim (gas cap and aquifer)"]
 WOE_CONE_GAS = ["Water coning (bottom water)"]
 WOE_TUBE_CUSTOM = "From the equipment / custom"
@@ -12263,7 +12254,7 @@ with tabs[6]:
         gaslift_tab(o, eqd, ipr_curve)
 
 
-# ================================================================ tab 8: units
+# ================================================================ tab 10: units
 def _commit_tables():
     """Before the units change, make every table's current edits its base (the editors restart in new units)."""
     for k_, df_ in (ss.get("_tables") or {}).items():
@@ -12282,6 +12273,21 @@ def _apply_preset(box_key):
 
 
 with tabs[7]:
+    st.header("Stimulation")
+    o = ss.get("options")
+    if o is None or o.errors:
+        st.info("Fix the configuration in the Options Summary first.")
+    elif o.is_injector or o.fluid_type != "oil":
+        st.info("Stimulation screening applies to oil producers.")
+    else:
+        st.caption("Screening of a hydraulic fracture or a sandstone mud-acid treatment; each gives the PI after "
+                   "treatment, which a button puts into the IPR.")
+        st_hf, st_ma = st.tabs(["Hydraulic Fracturing", "Mud Acidization of Sandstones"])
+        with st_hf:
+            frac_panel(o)
+        with st_ma:
+            mudacid_panel(o)
+with tabs[8]:
     st.header("Well Operating Envelope")
     o = ss.get("options")
     eqd = ss.get("equipment", {})
@@ -12304,7 +12310,7 @@ with tabs[7]:
         st.caption("Erosional velocity, Turner constant and sand rate: the Options panel of the Calculation tab. "
                    "Hydrate curve: the PVT tab warnings.")
         woe_tab(o, eqd, ipr_curve)
-with tabs[8]:
+with tabs[9]:
     st.header("Units")
     st.caption("Choose the units for inputs and results. Every value is stored in oilfield units, so changing units "
                "never changes the model - inputs, tables, plots and downloads are converted on screen. Pressure "
