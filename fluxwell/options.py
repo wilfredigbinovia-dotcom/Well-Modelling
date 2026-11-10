@@ -7,6 +7,7 @@ calculations apply. `WellOptions.validate()` checks the combination,
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass
 
 FLUID_TYPES = {
@@ -62,6 +63,7 @@ VISCOSITY_MODELS = {
 ARTIFICIAL_LIFT = {
     "none": "None",
     "gas_lift": "Gas lift (continuous)",
+    "igl": "Gas lift (intermittent)",
     "ct_gas_lift": "Coiled tubing gas lift (gas down the coiled tubing, production up the annulus)",
     "esp": "Electrical submersible pump",
     "srp": "Sucker rod pump",
@@ -86,20 +88,30 @@ STEAM = {
     "allow": "Allow steam calculations",
 }
 
+def _title(text: str) -> str:
+    """Capital first letter on every word (after a space, hyphen, slash or bracket); other letters untouched."""
+    return re.sub(r"(^|[\s\-(/])([a-z])", lambda m: m.group(1) + m.group(2).upper(), text)
+
+
+for _d in (FLUID_TYPES, METHODS, FLOW_TYPES, WELL_TYPES, COMPLETIONS, SAND_CONTROL, SEPARATORS, WATER_VAPOUR,
+           EMULSIONS, VISCOSITY_MODELS, ARTIFICIAL_LIFT, TEMP_MODELS, STEAM):
+    for _k in _d:
+        _d[_k] = _title(_d[_k])
+
 FIELDS = {  # field -> (display name, choices)
     "fluid_type": ("Fluid", FLUID_TYPES),
     "method": ("Method", METHODS),
     "separator": ("Separator", SEPARATORS),
-    "water_vapour": ("Water vapour", WATER_VAPOUR),
+    "water_vapour": ("Water Vapour", WATER_VAPOUR),
     "emulsions": ("Emulsions", EMULSIONS),
-    "viscosity_model": ("Viscosity model", VISCOSITY_MODELS),
-    "flow_type": ("Flow type", FLOW_TYPES),
-    "well_type": ("Well type", WELL_TYPES),
+    "viscosity_model": ("Viscosity Model", VISCOSITY_MODELS),
+    "flow_type": ("Flow Type", FLOW_TYPES),
+    "well_type": ("Well Type", WELL_TYPES),
     "completion": ("Completion", COMPLETIONS),
-    "sand_control": ("Sand control", SAND_CONTROL),
-    "artificial_lift": ("Artificial lift", ARTIFICIAL_LIFT),
-    "temp_model": ("Temperature model", TEMP_MODELS),
-    "steam": ("Steam calculation", STEAM),
+    "sand_control": ("Sand Control", SAND_CONTROL),
+    "artificial_lift": ("Artificial Lift", ARTIFICIAL_LIFT),
+    "temp_model": ("Temperature Model", TEMP_MODELS),
+    "steam": ("Steam Calculation", STEAM),
 }
 
 # What the calculation engine models today. Anything else is accepted as a
@@ -109,7 +121,7 @@ MODELLED = {   # what the tabs built so far (PVT, IPR, equipment, VLP) can calcu
     "method": {"black_oil", "eos"},
     "flow_type": {"tubing", "annular", "tubing_annular"},
     "well_type": {"producer", "water_injector", "gas_injector"},
-    "artificial_lift": {"none", "gas_lift", "ct_gas_lift", "esp", "srp", "jet", "pcp_motor", "pcp_rod", "hsp",
+    "artificial_lift": {"none", "gas_lift", "igl", "ct_gas_lift", "esp", "srp", "jet", "pcp_motor", "pcp_rod", "hsp",
                         "diluent_gl", "diluent", "mpump", "foam_lift"},
     "separator": {"single_stage"},
     "water_vapour": {"none", "calculate"},
@@ -237,7 +249,7 @@ class WellOptions:
                     "An electrical submersible pump applies to oil (and water) producers.")
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
-                    "An ESP produces up the tubing: choose Tubing flow (gas from the separator goes up the "
+                    "An ESP produces up the tubing: choose Tubing Flow (gas from the separator goes up the "
                     "annulus).")
         if self.artificial_lift == "srp":
             if self.well_type != "producer" or self.fluid_type != "oil":
@@ -245,7 +257,7 @@ class WellOptions:
                     "A sucker rod pump applies to oil (and water) producers.")
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
-                    "A rod pump produces up the tubing: choose Tubing flow (separated gas goes up the annulus).")
+                    "A rod pump produces up the tubing: choose Tubing Flow (separated gas goes up the annulus).")
         if self.artificial_lift == "jet":
             if self.well_type != "producer" or self.fluid_type != "oil":
                 add("error", ["artificial_lift", "fluid_type", "well_type"],
@@ -279,14 +291,25 @@ class WellOptions:
                     "friction in the annulus; the lift gas joins the produced gas above the injection point.")
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
-                    "Gas lift injects down the annulus and produces up the tubing: choose Tubing flow.")
+                    "Gas lift injects down the annulus and produces up the tubing: choose Tubing Flow.")
+        if self.artificial_lift == "igl":
+            if self.well_type != "producer" or self.fluid_type != "oil":
+                add("error", ["artificial_lift", "fluid_type", "well_type"],
+                    "Intermittent gas lift is modelled for oil (and water) producers.")
+            elif self.flow_type != "tubing":
+                add("error", ["artificial_lift", "flow_type"],
+                    "Intermittent gas lift injects down the annulus and lifts slugs up the tubing: choose Tubing Flow.")
+            else:
+                add("info", ["artificial_lift"],
+                    "Intermittent gas lift: valve spacing, cycle and the system calculation (starting slug against "
+                    "the IPR) are in the Design tab (Gas lift (intermittent)).")
         if self.artificial_lift in ("diluent", "diluent_gl"):
             if self.well_type != "producer" or self.fluid_type != "oil":
                 add("error", ["artificial_lift", "fluid_type", "well_type"],
                     "Diluent injection is modelled for oil (and water) producers.")
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
-                    "The diluent goes down the annulus and the well produces up the tubing: choose Tubing flow.")
+                    "The diluent goes down the annulus and the well produces up the tubing: choose Tubing Flow.")
         if self.artificial_lift == "ct_gas_lift":
             if self.well_type != "producer" or self.fluid_type != "oil":
                 add("error", ["artificial_lift", "fluid_type", "well_type"],
@@ -294,7 +317,7 @@ class WellOptions:
             if self.flow_type != "tubing":
                 add("error", ["artificial_lift", "flow_type"],
                     "Coiled tubing gas lift injects down a coiled tubing inside the tubing and produces up the coiled "
-                    "tubing - tubing annulus: choose Tubing flow (the annulus is applied above the coiled tubing end).")
+                    "tubing - tubing annulus: choose Tubing Flow (the annulus is applied above the coiled tubing end).")
         if self.artificial_lift == "foam_lift":
             if self.well_type != "producer" or not self.is_gas:
                 add("error", ["artificial_lift", "fluid_type", "well_type"],
@@ -302,7 +325,7 @@ class WellOptions:
             elif self.flow_type == "tubing":
                 add("warning", ["artificial_lift", "flow_type"],
                     "Foam lift (PROSPER Tutorial 48): the surfactant goes down a coiled tubing and the gas is produced "
-                    "up the annulus - choose Annular flow and enter the coiled tubing as the tubing (its OD) inside "
+                    "up the annulus - choose Annular Flow and enter the coiled tubing as the tubing (its OD) inside "
                     "the production tubing (as the casing ID).")
             else:
                 add("info", ["artificial_lift"],
@@ -317,7 +340,7 @@ class WellOptions:
                 "Steam calculations need a coupled temperature model: choose the Improved Approximation.")
         if self.steam == "allow" and self.well_type != "water_injector":
             add("error", ["steam", "well_type"],
-                "Steam calculations are for a steam injector: choose Water injector (the water is injected as steam).")
+                "Steam calculations are for a steam injector: choose Water Injector (the water is injected as steam).")
         if self.steam == "allow" and self.well_type == "water_injector" and self.temp_model == "improved":
             add("info", ["steam", "well_type"],
                 "Steam injector (PROSPER Tutorial 42): the injected water's enthalpy (or steam quality) at the wellhead "

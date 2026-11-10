@@ -520,6 +520,8 @@ CAPTIONS = {
                        "Approximation)"},
     "artificial_lift": {"none": "Natural flow",
                         "gas_lift": "Continuous gas lift: Gas lift data in Equipment, Calculation (design in Design)",
+                        "igl": "Gas injected periodically at the operating valve lifts liquid slugs: valve spacing, "
+                               "cycle and the system calculation (starting slug against the IPR) in Design",
                         "ct_gas_lift": "Lift gas down a coiled tubing, production up the annulus: Coiled tubing data in "
                                        "Equipment, Calculation (design in Design)",
                         "esp": "Pump in the well: Equipment, VLP at the pump discharge, Calculation",
@@ -9737,6 +9739,9 @@ with tabs[5]:
         blocker = "Complete the Equipment Data tab first."
     elif (SYS or QLK or EQC or EQL or HQL) and (ipr_curve is None or ipr_curve.fluid != ("gas" if o.is_gas else "oil")):
         blocker = "Calculate an IPR for this fluid type in the IPR Data tab first."
+    elif getattr(o, "artificial_lift", "none") == "igl" and SYS:
+        blocker = ("Intermittent gas lift: the system calculation (the starting slug against the IPR) is in the "
+                   "Design tab, Gas lift (intermittent) - PROSPER method.")
     elif SRP_ON and mode == CALC_MODES[1]:
         blocker = ("PROSPER has no gradient traverse for a sucker rod pump well: use System analysis (solution at the "
                    "pump intake) or Lift curves.")
@@ -12202,6 +12207,10 @@ def woe_tab(o, eqd, ipr_curve):
 
 with tabs[6]:
     st.header("Design")
+    _al_now = getattr(ss.get("options"), "artificial_lift", None)
+    if _al_now == "igl" and ss.get("_dk_lift") != "igl":       # Options Summary picked intermittent gas lift
+        ss["design_kind"] = "Gas lift (intermittent)"
+    ss["_dk_lift"] = _al_now
     design_kind = st.radio("Artificial lift", ["Gas lift (continuous)", "Gas lift (intermittent)",
                                                "Gas lift (coiled tubing)",
                                                "Electrical submersible pump", "Sucker rod pump", "Jet pump",
@@ -12298,7 +12307,7 @@ with tabs[8]:
     elif o.is_injector:
         blocker = "The operating envelope applies to producers."
     elif getattr(o, "artificial_lift", "none") not in ("none",):
-        blocker = ("The operating envelope is for naturally flowing wells - set Artificial lift to None in the "
+        blocker = ("The operating envelope is for naturally flowing wells - set Artificial Lift to None in the "
                    "Options Summary to use it.")
     elif not eqd.get("valid") or eqd.get("survey") is None or not len(eqd["downhole"][1]):
         blocker = "Complete the Equipment Data tab first."
