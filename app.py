@@ -5542,7 +5542,7 @@ def mpump_data_panel(o, surface_df):
                "(p_out / p_in)^C, clipped to its limits; the intake cannot fall below 0 psig. The power available can "
                "be a system sensitivity variable. Use the manifold as the top node in the Calculation tab.")
     has = any(r["Type"] == "Pump" for r in weq.surface_rows(surface_df)) if surface_df is not None else False
-    if not has:
+    if not has and surface_df is not None:
         st.warning("Add a **Pump** row to the surface equipment table at the pump's place in the flowline.")
     c = st.columns(4)
     power = num(c[0], "Power available (hp)", "mpump_power", 350.0, 1.0, 1e5)
@@ -5847,6 +5847,13 @@ with tabs[3]:
         st.caption("Flowline, choke and pipe fittings between the wellhead and the manifold. Enter the "
                    "Manifold first, then the equipment back towards the wellhead. Fittings are converted to an "
                    "equivalent pipe length (L/D method).")
+        surf_off = flag(st.checkbox, "Disable Surface Equipment", "eq_surf_off", default=False,
+                        help="As PROSPER's Disable Surface Equipment: the table below is kept (and saved with the "
+                             "project) but ignored - the wellhead becomes the top node in the VLP, Calculation and "
+                             "Design tabs. Untick to use it again.")
+        if surf_off:
+            st.info("Surface equipment disabled: calculations start at the wellhead. The entries below are kept "
+                    "but not used.")
         c = st.columns(4)
         t_sur = num(c[0], "Surrounding temperature (deg F)", "eq_tsur", 60.0, -60.0, 200.0)
         u_sur = num(c[1], "Overall heat transfer coefficient (BTU/h/ft2/F)", "eq_usur", 8.0, 0.0, 1000.0,
@@ -5872,11 +5879,11 @@ with tabs[3]:
         if not weq.same_table(s_clean, ed_s):            # entry in a locked cell, or a new type needing defaults
             set_grid("surface", s_clean)
             st.rerun()
-        iss = weq.check_surface(ed_s, t_sur, u_sur)
+        iss = weq.check_surface(ed_s, t_sur, u_sur) if not surf_off else []
         status["Surface equipment"] = iss
         show_issues(iss)
         summ = weq.surface_summary(ed_s)
-        if len(summ) and not any(l == "error" for l, _ in iss):
+        if len(summ) and not any(l == "error" for l, _ in iss) and not surf_off:
             st.markdown("**Summary** (manifold to wellhead)")
             st.dataframe(summ.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
             st.caption(f"Total equivalent length {summ['Equivalent length (ft)'].sum():,.0f} ft.")
@@ -5985,7 +5992,7 @@ with tabs[3]:
     st.divider()
     st.subheader("String summary")
     if all_ok and len(secs):
-        has_choke = "Choke" in set(weq.surface_summary(ed_s).get("Type", pd.Series(dtype=str)))
+        has_choke = not surf_off and "Choke" in set(weq.surface_summary(ed_s).get("Type", pd.Series(dtype=str)))
         svg = wsch.well_schematic_svg(top_md, secs, pts, o.completion if o else "cased_hole",
                                       o.sand_control if o else "none", has_choke)
         schematic_svg = svg
@@ -6050,7 +6057,10 @@ with tabs[3]:
         ss.pop("foam_setup", None)
     if o is not None and getattr(o, "artificial_lift", "none") == "mpump":
         st.divider()
-        mpump_data_panel(o, ed_s)
+        if surf_off:
+            st.warning("Surface equipment is disabled in the Surface Equipment tab, so the multiphase pump in it "
+                       "is not used. Untick Disable Surface Equipment to include it.")
+        mpump_data_panel(o, None if surf_off else ed_s)
     else:
         ss.pop("mpump_setup", None)
     if o is not None and getattr(o, "artificial_lift", "none") == "gas_lift":
@@ -6061,7 +6071,8 @@ with tabs[3]:
         coiled_data_panel(o, top_md, secs)
     else:
         ss.pop("gl_setup", None)
-    ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": ed_s, "t_surround": t_sur,
+    ss["equipment"] = {"survey": (md_s, tvd_s) if survey_ok else None, "surface": None if surf_off else ed_s,
+                       "surface_disabled": bool(surf_off), "t_surround": t_sur,
                        "u_surface": u_sur, "downhole": (top_md, secs, pts), "geothermal": (gmd, gtemp),
                        "u_geo": u_geo, "heat_capacities": hc,
                        "valid": all(not any(l == "error" for l, _ in v) for v in status.values())}
