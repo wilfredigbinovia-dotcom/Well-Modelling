@@ -87,9 +87,10 @@ TUTORIAL_GUN = 43                             # its row in PROSPER's gun databas
 
 def gun_database():
     """PROSPER's perforating gun database (PXWell.pxdb, 824 guns in PROSPER's order): wireline then TCP, each by
-    gun OD. Read from the binary file - section 1 (API RP 43 / 19B concrete target) penetration and entry hole,
-    the normalised penetration PROSPER's SPOT uses, the test's concrete strength and casing, charge weight,
-    ratings and the vendor's notes."""
+    gun OD. Read from the binary file, columns named as PROSPER's gun table (checked against the user's export of
+    it: 823 of 824 rows, the same values bar the export's transcription slips) - section 1 (API RP 43 / 19B
+    concrete target) penetration and entry hole, the normalised penetration PROSPER's SPOT uses, the test's cement
+    strength, casing and standoff, explosive weight, ratings, minimum restriction, gun swell, debris and remarks."""
     import pandas as pd
     from pathlib import Path
     return pd.read_csv(Path(__file__).parent / "data" / "perforating_guns.csv", index_col="Gun",
@@ -107,8 +108,8 @@ def gun_from_row(row) -> SpotGun:
             f"{row['Gun Phasing (deg)']:g} deg / {str(row['Gun Type']).lower()}, {row['Gun OD (in)']:g} in)")
     return SpotGun(name=name, gun_od=float(row["Gun OD (in)"]), spf=float(row["Shot Density (spf)"]),
                    phasing=float(row["Gun Phasing (deg)"]), lp_api=float(row["Lp sec 1 (in)"]),
-                   lp_norm=float(row["Normalised Lp (in)"]), ehd=float(row["EHD sec 1 (in)"]),
-                   cement_strength=float(row["Concrete Strength (psi)"]))
+                   lp_norm=float(row["Norm. Penetration (in)"]), ehd=float(row["EHD sec 1 (in)"]),
+                   cement_strength=float(row["Cement sec 1 (psi)"]))
 
 
 @dataclass

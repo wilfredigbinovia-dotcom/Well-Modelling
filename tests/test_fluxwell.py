@@ -5941,6 +5941,13 @@ def test_spot_gun_database_pxwell():
     assert (g.gun_od, g.spf, g.phasing, g.lp_api, g.lp_norm, g.ehd, g.cement_strength) == \
         (2.0, 6.0, 60.0, 19.2, 20.1883, 0.23, 5658.3)
     assert [SP.kt_phasing(a) for a in (0, 10, 30, 60, 72, 135, 180, 350)] == [0, 0, 45, 60, 60, 120, 180, 0]
+    r0 = db.iloc[0]     # PROSPER's columns (user's export): Min Restriction 1.75, Press. Rating 14985.3, ...
+    assert (r0["Carrier Type"], r0["Debris Desc."], r0["Explosive Type"], r0["Min Restriction (in)"],
+            r0["Press. Rating (psig)"], r0["Expl. Weight (g)"], r0["Norm. Penetration (in)"], r0["Cement sec 1 (psi)"],
+            r0["Vendor Info"], r0["Test Spec API"], r0["Casing OD (in)"], r0["Casing Weight (lb/ft)"],
+            r0["Min Pen. sec 1 (in)"], r0["Max Pen. sec 1 (in)"], r0["Test Date"]) == \
+        ("H(SC)", "STEEL", "HMX", 1.75, 14985.3, 3.4, 12.1787, 5952.3, "JRC", "43", 4.5, 11.6, 9.45, 12.55, "05/14/1998")
+    assert (db["Perforation Type"] == "Cased and Perforated").all()
 
 
 def test_spot_ipr_t09():

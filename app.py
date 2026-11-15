@@ -2770,11 +2770,12 @@ SPOT_RELPERM_COLS = ["Phase", "Residual saturation", "End point relative permeab
 
 
 SPOT_GUN_COLS = ["Gun Type", "Gun OD (in)", "Perforation Type", "Vendor", "Charge Name", "Charge Type",
-                 "Shot Density (spf)", "Gun Phasing (deg)", "Lp sec 1 (in)", "EHD sec 1 (in)", "Normalised Lp (in)",
-                 "Concrete Strength (psi)", "Lp min (in)", "Lp max (in)", "EHD min (in)", "EHD max (in)",
-                 "Charge Weight (g)", "Gun OD after Shooting (in)", "Temperature Rating (F)",
-                 "Pressure Rating (psig)", "Test Casing OD (in)", "Test Casing Weight (lb/ft)", "Gun Code", "Debris",
-                 "Explosive", "API Edition", "Date", "Manufacturer", "Comments"]
+                 "Shot Density (spf)", "Gun Phasing (deg)", "Lp sec 1 (in)", "EHD sec 1 (in)", "Carrier Type",
+                 "Debris Desc.", "Explosive Type", "Temp. Rating (F)", "Min Restriction (in)",
+                 "Press. Rating (psig)", "Expl. Weight (g)", "Norm. Penetration (in)", "Cement sec 1 (psi)",
+                 "Vendor Info", "Remarks", "Test Spec API", "Casing OD (in)", "Casing Weight (lb/ft)",
+                 "Min Pen. sec 1 (in)", "Max Pen. sec 1 (in)", "Min EHD sec 1 (in)", "Max EHD sec 1 (in)",
+                 "Test Standoff (in)", "Gun Swell (in)", "Debris Weight (g)", "Test Date"]
 
 
 @st.cache_data
@@ -2801,10 +2802,10 @@ def spot_gun_panel():
     od = sel(c[1], "Gun OD", ["All gun sizes"] + [f"{x:g}" for x in ods], "spot_gun_od")
     gtype = sel(c[2], "Gun Type", ["All gun types", "Wireline", "TCP"], "spot_gun_type")
     minr = num(c[3], "Minimum Restriction (in)", "spot_gun_minr", 0.0, 0.0, 30.0, 0.125, "%.4f",
-               help="The smallest ID the gun must pass. 0 = no restriction filter.")
+               help="The smallest ID in the well the gun must pass. 0 = no restriction filter.")
     tol = num(c[4], "Tolerance (in)", "spot_gun_tol", 0.0, 0.0, 5.0, 0.0625, "%.4f",
-              help="Clearance kept between the gun and the minimum restriction: guns with OD + tolerance up to the "
-                   "restriction are listed.")
+              help="Clearance to keep: guns are listed when their Min Restriction (the gun OD where the vendor "
+                   "gave none) plus the tolerance is no more than the well's minimum restriction.")
     view = db
     if vendor != "All vendors":
         view = view[view["Vendor"] == vendor]
@@ -2812,8 +2813,9 @@ def spot_gun_panel():
         view = view[np.isclose(view["Gun OD (in)"], float(od))]
     if gtype != "All gun types":
         view = view[view["Gun Type"] == gtype]
+    need = db["Min Restriction (in)"].where(db["Min Restriction (in)"] > 0, db["Gun OD (in)"])
     if minr > 0:
-        view = view[view["Gun OD (in)"] + tol <= minr + 1e-9]
+        view = view[need.loc[view.index] + tol <= minr + 1e-9]
     cur = int(ss["_v_spot_gun_row"])
     if cur not in db.index:
         cur = wspot.TUTORIAL_GUN
@@ -2827,13 +2829,13 @@ def spot_gun_panel():
     row = db.loc[cur]
     gun = wspot.gun_from_row(row)
     st.markdown(f"**Gun used:** {gun.name} - Lp {row['Lp sec 1 (in)']:g} in, EHD {row['EHD sec 1 (in)']:g} in, "
-                f"normalised Lp {row['Normalised Lp (in)']:g} in (row {cur}).")
+                f"normalised penetration {row['Norm. Penetration (in)']:g} in (row {cur}).")
     if wspot.kt_phasing(gun.phasing) != gun.phasing % 360:
         st.info(f"Karakas & Tariq tabulate 0, 45, 60, 90, 120 and 180 deg phasing: this gun's "
                 f"{gun.phasing:g} deg uses the {wspot.kt_phasing(gun.phasing)} deg constants.")
-    if isinstance(row.get("Comments"), str) and row["Comments"]:
-        st.caption(f"Vendor note: {row['Comments']}")
-    if minr > 0 and row["Gun OD (in)"] + tol > minr + 1e-9:
+    if isinstance(row.get("Remarks"), str) and row["Remarks"]:
+        st.caption(f"Remarks: {row['Remarks']}")
+    if minr > 0 and need.loc[cur] + tol > minr + 1e-9:
         st.warning("The gun in use does not pass the minimum restriction - pick one from the filtered list.")
     return gun
 
