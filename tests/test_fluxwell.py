@@ -5922,6 +5922,27 @@ def test_mud_acidization_t50():
     assert proj["inputs"]["sys_whp"] == 514.696 and proj["widgets"]["sys_vals_j"] == "5, 5.38858"
 
 
+def test_spot_gun_database_pxwell():
+    """PROSPER's perforating gun database (PXWell.pxdb, decoded): 824 guns in PROSPER's order - 388 wireline then
+    436 TCP - first rows as PROSPER's gun table (Halliburton HMX SUPER DP 1.5625 in, 4 spf, 0 deg, Lp 11.34 in;
+    6 spf / 60 deg, 10.2 in; ...; ETA RTG DP HMX 1.5625 in, 9.493 in; Schlumberger Retrievable Enerjet 1.625 in).
+    Row 43 is Tutorial 09's Baker 2007 Predator XP LS (wireline, 2 in, 6 spf / 60 deg, Lp 19.2 in, EHD 0.23 in,
+    normalised Lp 20.1883 in, concrete 5658.3 psi) and gives the same SPOT gun as before."""
+    from fluxwell import spot as SP
+    db = SP.gun_database()
+    assert len(db) == 824 and (db["Gun Type"] == "Wireline").sum() == 388
+    assert list(db["Gun Type"].iloc[:388].unique()) == ["Wireline"] and list(db["Gun Type"].iloc[388:].unique()) == ["TCP"]
+    first = db.iloc[:13]
+    assert list(first["Gun OD (in)"]) == [1.5625] * 11 + [1.625] * 2
+    assert list(first["Lp sec 1 (in)"].iloc[:5]) == [11.34, 10.2, 6.05, 5.76, 2.5]
+    assert list(first["Shot Density (spf)"].iloc[:5]) == [4, 6, 4, 4, 6] and first["Charge Type"].iloc[4] == "Big hole"
+    assert first["Charge Name"].iloc[10] == "RTG DP HMX" and first["Lp sec 1 (in)"].iloc[10] == 9.493
+    g = SP.gun_from_row(db.loc[SP.TUTORIAL_GUN])
+    assert (g.gun_od, g.spf, g.phasing, g.lp_api, g.lp_norm, g.ehd, g.cement_strength) == \
+        (2.0, 6.0, 60.0, 19.2, 20.1883, 0.23, 5658.3)
+    assert [SP.kt_phasing(a) for a in (0, 10, 30, 60, 72, 135, 180, 350)] == [0, 0, 45, 60, 60, 120, 180, 0]
+
+
 def test_spot_ipr_t09():
     """PROSPER Tutorial 09 (the user's file): SPOT IPR on the Logie well (110 ft MD layer, 50 md, Pr 4000 psig, water
     cut 20 %, Baker Predator XP LS 6 spf / 60 deg) and 24 one-at-a-time runs. Per-segment perforation and crushed-zone

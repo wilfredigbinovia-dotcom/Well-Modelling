@@ -10,7 +10,8 @@ Per segment (exact on all runs unless stated):
   penetration Lp (in)  = 1.85055 (Lp_norm / 20.1883) ln(32357 / UCS) ln(26990 / (sigma_v - 1.0256 Pr))
                          sigma_v = overburden gradient x TVD, Pr the layer pressure (psig) - fitted: within 0.04 %
                          of the Lp behind PROSPER's skins on 12 depth / strength / stress points; the underbalance does
-                         not enter. Scaling with the gun's normalised Lp is assumed (one gun was available).
+                         not enter. Scaling with the gun's normalised Lp (stored in PROSPER's gun database) is
+                         assumed (one gun was available).
   entry hole           = 0.97509 x the gun's EHD (PROSPER: 0.22427 in for 0.23; casing and standoff effects not
                          separated - one gun / casing).
   perforation skin     = Karakas & Tariq with spf x perforation efficiency / cos(deviation) shots per ft of
@@ -79,7 +80,35 @@ class SpotGun:
     cement_strength: float = 5658.3
 
 
-GUNS = {SpotGun().name: SpotGun()}
+GUNS = {SpotGun().name: SpotGun()}          # the Tutorial 09 gun (older projects store this name)
+KT_PHASINGS = (0, 45, 60, 90, 120, 180)       # Karakas & Tariq's tabulated phasings
+TUTORIAL_GUN = 43                             # its row in PROSPER's gun database (wireline)
+
+
+def gun_database():
+    """PROSPER's perforating gun database (PXWell.pxdb, 824 guns in PROSPER's order): wireline then TCP, each by
+    gun OD. Read from the binary file - section 1 (API RP 43 / 19B concrete target) penetration and entry hole,
+    the normalised penetration PROSPER's SPOT uses, the test's concrete strength and casing, charge weight,
+    ratings and the vendor's notes."""
+    import pandas as pd
+    from pathlib import Path
+    return pd.read_csv(Path(__file__).parent / "data" / "perforating_guns.csv", index_col="Gun",
+                       keep_default_na=False, na_values=[""])
+
+
+def kt_phasing(phasing):
+    """Nearest of Karakas & Tariq's tabulated phasings (0 for in-line guns; 360 counts as 0)."""
+    p = float(phasing) % 360
+    return min(KT_PHASINGS, key=lambda a: min(abs(p - a), 360 - abs(p - a)) if a == 0 else abs(p - a))
+
+
+def gun_from_row(row) -> SpotGun:
+    name = (f"{row['Vendor']} - {row['Charge Name']} ({row['Shot Density (spf)']:g} spf / "
+            f"{row['Gun Phasing (deg)']:g} deg / {str(row['Gun Type']).lower()}, {row['Gun OD (in)']:g} in)")
+    return SpotGun(name=name, gun_od=float(row["Gun OD (in)"]), spf=float(row["Shot Density (spf)"]),
+                   phasing=float(row["Gun Phasing (deg)"]), lp_api=float(row["Lp sec 1 (in)"]),
+                   lp_norm=float(row["Normalised Lp (in)"]), ehd=float(row["EHD sec 1 (in)"]),
+                   cement_strength=float(row["Concrete Strength (psi)"]))
 
 
 @dataclass
@@ -152,7 +181,7 @@ class Spot:
             ehd[np.abs(self.md - self.holdup) < 0.5] *= HOLDUP_EHD
         rp_in = ehd / 2
         n_eff = gun.spf * f.perf_eff / self.cos
-        sp = np.array([wcomp.kt_perforation_skin(f.rw, L / 12, r / 12, n_eff, int(gun.phasing), f.kv_kh)["perforation"]
+        sp = np.array([wcomp.kt_perforation_skin(f.rw, L / 12, r / 12, n_eff, kt_phasing(gun.phasing), f.kv_kh)["perforation"]
                        for L, r in zip(lp, rp_in)])
         sc = (1 / f.crush_factor - 1) * np.log((rp_in + f.crush_thickness) / rp_in) / (n_eff * lp / 12)
         sdev = self.deviation_skin()

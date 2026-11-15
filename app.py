@@ -2769,6 +2769,75 @@ def mpp_model(o, gas, pr, t_f, r, skin, pvt, gasp, wc, wgr):
 SPOT_RELPERM_COLS = ["Phase", "Residual saturation", "End point relative permeability", "Corey exponent"]
 
 
+SPOT_GUN_COLS = ["Gun Type", "Gun OD (in)", "Perforation Type", "Vendor", "Charge Name", "Charge Type",
+                 "Shot Density (spf)", "Gun Phasing (deg)", "Lp sec 1 (in)", "EHD sec 1 (in)", "Normalised Lp (in)",
+                 "Concrete Strength (psi)", "Lp min (in)", "Lp max (in)", "EHD min (in)", "EHD max (in)",
+                 "Charge Weight (g)", "Gun OD after Shooting (in)", "Temperature Rating (F)",
+                 "Pressure Rating (psig)", "Test Casing OD (in)", "Test Casing Weight (lb/ft)", "Gun Code", "Debris",
+                 "Explosive", "API Edition", "Date", "Manufacturer", "Comments"]
+
+
+@st.cache_data
+def spot_gun_db():
+    return wspot.gun_database()
+
+
+def spot_gun_panel():
+    """PROSPER's perforating gun database with its filters (vendor, gun OD, gun type, minimum restriction and
+    tolerance); a row picked in the table is the gun used."""
+    db = spot_gun_db()
+    if ss.get("_v_spot_gun_row") is None:                  # older projects stored the Tutorial 09 gun's name
+        ss["_v_spot_gun_row"] = wspot.TUTORIAL_GUN
+    st.caption(f"PROSPER's perforating gun database ({len(db)} guns: section 1 data of the API RP 43 / 19B "
+               "concrete-target test). Filter it as in PROSPER, then click a row to use that gun. SPOT uses the "
+               "shot density, phasing, entry hole and normalised penetration.")
+    if st.button("Clear All Filtering", key="spot_gun_clear"):
+        for k_ in ("spot_gun_vendor", "spot_gun_od", "spot_gun_type", "spot_gun_minr", "spot_gun_tol"):
+            reset(k_)
+    c = st.columns(5)
+    vendor = sel(c[0], "Vendor", ["All vendors"] + sorted(db["Vendor"].dropna().unique(), key=str.lower),
+                 "spot_gun_vendor")
+    ods = sorted(db["Gun OD (in)"].unique())
+    od = sel(c[1], "Gun OD", ["All gun sizes"] + [f"{x:g}" for x in ods], "spot_gun_od")
+    gtype = sel(c[2], "Gun Type", ["All gun types", "Wireline", "TCP"], "spot_gun_type")
+    minr = num(c[3], "Minimum Restriction (in)", "spot_gun_minr", 0.0, 0.0, 30.0, 0.125, "%.4f",
+               help="The smallest ID the gun must pass. 0 = no restriction filter.")
+    tol = num(c[4], "Tolerance (in)", "spot_gun_tol", 0.0, 0.0, 5.0, 0.0625, "%.4f",
+              help="Clearance kept between the gun and the minimum restriction: guns with OD + tolerance up to the "
+                   "restriction are listed.")
+    view = db
+    if vendor != "All vendors":
+        view = view[view["Vendor"] == vendor]
+    if od != "All gun sizes":
+        view = view[np.isclose(view["Gun OD (in)"], float(od))]
+    if gtype != "All gun types":
+        view = view[view["Gun Type"] == gtype]
+    if minr > 0:
+        view = view[view["Gun OD (in)"] + tol <= minr + 1e-9]
+    cur = int(ss["_v_spot_gun_row"])
+    if cur not in db.index:
+        cur = wspot.TUTORIAL_GUN
+    st.caption(f"{len(view)} of {len(db)} guns listed.")
+    ev = st.dataframe(view[SPOT_GUN_COLS], on_select="rerun", selection_mode="single-row", width="stretch",
+                      height=360, key=f"spot_gun_tbl_{vendor}_{od}_{gtype}_{minr}_{tol}")
+    rows = getattr(getattr(ev, "selection", None), "rows", None) or []
+    if rows:
+        cur = int(view.index[rows[0]])
+        ss["_v_spot_gun_row"] = cur
+    row = db.loc[cur]
+    gun = wspot.gun_from_row(row)
+    st.markdown(f"**Gun used:** {gun.name} - Lp {row['Lp sec 1 (in)']:g} in, EHD {row['EHD sec 1 (in)']:g} in, "
+                f"normalised Lp {row['Normalised Lp (in)']:g} in (row {cur}).")
+    if wspot.kt_phasing(gun.phasing) != gun.phasing % 360:
+        st.info(f"Karakas & Tariq tabulate 0, 45, 60, 90, 120 and 180 deg phasing: this gun's "
+                f"{gun.phasing:g} deg uses the {wspot.kt_phasing(gun.phasing)} deg constants.")
+    if isinstance(row.get("Comments"), str) and row["Comments"]:
+        st.caption(f"Vendor note: {row['Comments']}")
+    if minr > 0 and row["Gun OD (in)"] + tol > minr + 1e-9:
+        st.warning("The gun in use does not pass the minimum restriction - pick one from the filtered list.")
+    return gun
+
+
 def spot_ui(o, pr, t_f, wc):
     """PROSPER's SPOT IPR (Shell Perforation Optimisation Tool, Tutorial 09): one layer split into 1 ft segments."""
     model = blackoil_model(o)
@@ -2780,7 +2849,7 @@ def spot_ui(o, pr, t_f, wc):
                "skins segment by segment (1 ft), combined into the layer skin; the water cut sets the water "
                "saturation (relative permeabilities). Reservoir pressure, water cut and temperature are the ones "
                "above. See spot.py for what was reconstructed and how closely.")
-    t1, t2, t3, t4 = st.tabs(["Options", "Layer", "Log data", "Completion"])
+    t1, t2, t3, t4, t5 = st.tabs(["Options", "Layer", "Log data", "Completion", "Perforating gun"])
     with t1:
         c = st.columns(4)
         wt = sel(c[0], "Well type", ["Deviated", "Vertical"], "spot_wt")
@@ -2803,9 +2872,6 @@ def spot_ui(o, pr, t_f, wc):
         c = st.columns(4)
         ub = num(c[0], "Underbalance pressure (psi)", "spot_ub", d.underbalance, 0.0, 1e4, 50.0)
         obg = num(c[1], "Overburden pressure gradient (psi/ft)", "spot_obg", d.ob_grad, 0.3, 2.0, 0.01)
-        gun = sel(c[2], "Perforating gun", list(wspot.GUNS), "spot_gun",
-                  help="Baker 2007 Predator XP LS (6 spf, 60 deg, wireline; API RP 19B Lp 19.2 in, EHD 0.23 in) - "
-                       "the gun of PROSPER's Tutorial 09; other guns are not available.")
         key = "spot_relperm"
         if key not in ss:
             ss[key] = pd.DataFrame([["Oil", 0.15, 0.8, 1.5], ["Water", 0.2, 0.6, 1.5]], columns=SPOT_RELPERM_COLS)
@@ -2825,8 +2891,11 @@ def spot_ui(o, pr, t_f, wc):
         holdup = num(c[1], "Holdup depth (ft MD)", "spot_holdup", d.bottom_md, 0.0, 4e4, 10.0,
                      help="The deepest point the gun can be run to. Above the layer bottom the rest of the layer is not "
                           "perforated (partial penetration); the segment at the holdup depth has a smaller entry hole.")
-        st.caption("The completion and gun enter through the entry-hole size (PROSPER's 0.22427 in for this gun in "
-                   "this casing); other casings are not distinguished.")
+        st.caption("The completion and gun enter through the entry-hole size (PROSPER's 0.22427 in for the Tutorial 09 "
+                   "gun in this casing: 0.975 x the gun's entry hole, applied to every gun); other casings are not "
+                   "distinguished.")
+    with t5:
+        gun = spot_gun_panel()
     try:
         rpv = pd.DataFrame(rp)[SPOT_RELPERM_COLS[1:]].apply(pd.to_numeric, errors="coerce").to_numpy()
         relperm = (float(rpv[0, 0]), float(rpv[1, 0]), float(rpv[0, 1]), float(rpv[1, 1]), float(rpv[0, 2]),
@@ -2836,7 +2905,7 @@ def spot_ui(o, pr, t_f, wc):
     if bot <= top + 1:
         raise ValueError("SPOT: the bottom MD must be below the top MD.")
     fi = wspot.SpotInputs(top, bot, ((top, ttop), (bot, tbot)), wt == "Deviated", inflow, rw, re_, eff, pr, ub, obg,
-                          wc, kvkh, kh, phi, ucs, kcf, kct, wspot.GUNS[gun], relperm, holdup)
+                          wc, kvkh, kh, phi, ucs, kcf, kct, gun, relperm, holdup)
     pwf_log = num(st.columns(4)[0], "Log results at FBHP (psia)", "spot_pwf_log", round(min(2764.7, pr * 0.7), 1),
                   14.7, 3e4, 50.0)
     curve = wspot.spot_ipr(pr, wc, fi, model, t_f, pwf_log)
