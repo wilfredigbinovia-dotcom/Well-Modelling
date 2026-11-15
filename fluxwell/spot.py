@@ -78,6 +78,7 @@ class SpotGun:
     lp_norm: float = 20.1883        # normalised penetration, in
     ehd: float = 0.23               # in
     cement_strength: float = 5658.3
+    test_standoff: float = 0.5      # in, the API test's
 
 
 GUNS = {SpotGun().name: SpotGun()}          # the Tutorial 09 gun (older projects store this name)
@@ -109,7 +110,8 @@ def gun_from_row(row) -> SpotGun:
     return SpotGun(name=name, gun_od=float(row["Gun OD (in)"]), spf=float(row["Shot Density (spf)"]),
                    phasing=float(row["Gun Phasing (deg)"]), lp_api=float(row["Lp sec 1 (in)"]),
                    lp_norm=float(row["Norm. Penetration (in)"]), ehd=float(row["EHD sec 1 (in)"]),
-                   cement_strength=float(row["Cement sec 1 (psi)"]))
+                   cement_strength=float(row["Cement sec 1 (psi)"]),
+                   test_standoff=float(row.get("Test Standoff (in)", 0.0) or 0.0))
 
 
 # ---------------------------------------------------------------- PROSPER's SPOT screens beyond Tutorial 09
@@ -117,22 +119,32 @@ def gun_from_row(row) -> SpotGun:
 # Shell correlation without giving it, a placeholder is used and listed in PROVISIONAL - each is to be calibrated
 # against PROSPER runs; until then the factor is neutral (the Tutorial 09 result is unchanged).
 PROVISIONAL = {
-    "casing": "Lp correction for a casing other than the test casing (OD, weight, grade): factor 1",
-    "standoff": "Lp correction for the downhole standoff: factor 1",
-    "synthetic": "Synthetic Rock Lp correlation: as Conventional",
-    "carbonate": "Carbonate Lp correlation: as Sandstone",
-    "multi_casing": "Lp through 2 or 3 casing strings: factor 1",
-    "qinetiq_crush": "QinetiQ Test Results crushed zone: factor 0.2, thickness 0.5 in",
-    "double_run": "Double run / re-perforation: shots add (no overlap), shot-weighted Lp and entry hole",
-    "invasion_calc": "Calculated invasion: static filter-cake filtration (Darcy cake, piston-like filtrate)",
+    "casing": "casing grades L80 / P105 (entry hole from hardness; J55 and P110 calibrated)",
+    "multi_casing": "a third casing string (the second-string correction applied again)",
+    "synthetic": "Synthetic Rock Lp at other UCS (calibrated at 8000 psi)",
+    "gun": "guns other than Tutorial 09's (normalised-penetration scaling, test standoff)",
+    "gravel_ext": "external (underreamed) gravel pack (PROSPER's -24 perforation skin not reproduced)",
+    "invasion_calc": "Calculated invasion depths (exposure time and radial sqrt(t) as PROSPER; magnitude from filtration theory)",
     "ucs_twc": "UCS / TWC equations 1-7: published correlations (McNally, Moos, Vernik, Rzhevsky, TWC = 2.5 / 3 UCS)",
     "sanding": "QinetiQ sanding: Shields traction (horizontal perforations) / settling velocity (vertical)",
     "non_darcy": "Perforation non-Darcy skin: Forchheimer flow through the crushed zone (McLeod)",
-    "gravel": "Gravel pack: linear Darcy + Forchheimer through the packed tunnels / radial through the pack",
+    "gravel": "gravel-pack non-Darcy (Golan / Geertsma)",
     "extensions": "SPOT IPR Extensions = No: as Yes",
 }
-QINETIQ_CRUSH = (0.2, 0.5)                       # permeability factor, thickness (in) - provisional
-HARDNESS = {"J55": 180, "L80": 230, "P105": 275, "P110": 320}
+# --- calibrated against the user's PROSPER runs on the Tutorial 09 file (November 2026)
+QINETIQ_CRUSH = (0.33842, 0.5)  # QinetiQ Test Results: crush skin 1.51659 against 10.1298 entered (Run 5)
+SO_LP = (0.076972, 0.028489)    # Lp ~ exp(-a s - b s^2), s = standoff (in): runs 2 (0.5, 1.5 in), 1a (2.10), base
+                                # (2.205) and 10b (5.0): 1.30024, 1.13770, 1.02061, 1, 0.45442 within 0.06 %
+SO_EHD = (0.072928, -0.062427, 0.0077126)   # entry hole ~ 1 + c1 s + c2 s^2 + c3 s^3 (same runs, within 1e-4)
+SO_REF = (2.205, 0.5)           # Tutorial 09: downhole (centred 2 in gun in 6.41 in ID) and API test standoffs
+GRADE_EHD = {"J55": 1.0, "L80": 0.9055, "P105": 0.8558, "P110": 0.84907}  # entry hole vs J55 (P110 Run 1b;
+                                # L80 / P105 from Brinell hardness^0.376 - provisional); Lp unchanged by grade
+TWO_STRINGS = (0.5, 2.93363, 1.05997)   # a second casing string: Lp -> 0.5 Lp - 2.93363 x its wall (in),
+                                        # entry hole x 1.05997 (Run 1c: 7-5/8 in 29.7 lb/ft over the 6.7 in)
+SYNTHETIC = (0.40962, 31906.0)  # Synthetic Rock Lp: 0.40962 x the conventional with S0 31906 (Run 3, 0.45 x)
+AGG_D = 0.98693                 # total skin weight of the damaged rows' M Sp and damage skin (runs 7, 8)
+GP_C = 0.24834                  # internal gravel pack: S = k (Lp + rw - casing ID / 2) / (C k_gp n A_p)
+TWC_UCS = 1.9049                # PROSPER's generated TWC / UCS (15239.53 psi at 8000 psi)
 LOG_COLS = ["MD (ft)", "Porosity", "Permeability (md)", "UCS (psi)", "TWC (psi)", "FDC (g/cc)",
             "Compressional Sonic (us/ft)", "Shear Sonic (us/ft)", "Caliper (in)", "Gamma Ray (API)",
             "Resistivity (ohm.m)", "CBL (mV)", "Net", "Invasion Depth (in)", "Perforated"]
@@ -196,7 +208,7 @@ def generate_log(top, bottom, step=1.0, k=50.0, phi=0.18, ucs=8000.0, twc=None):
     md = np.arange(top, bottom + 1e-6, step)
     df = pd.DataFrame({c: np.nan for c in LOG_COLS}, index=range(len(md)))
     df["MD (ft)"], df["Porosity"], df["Permeability (md)"], df["UCS (psi)"] = md, float(phi), float(k), float(ucs)
-    df["TWC (psi)"] = 2.5 * float(ucs) if twc is None else float(twc)
+    df["TWC (psi)"] = TWC_UCS * float(ucs) if twc is None else float(twc)
     df["Net"], df["Perforated"] = 1.0, True
     return df
 
@@ -347,10 +359,12 @@ def sand_produced(v_ft_s, rho_f, mu_cp, d_in, rho_s_ppg, angle, rough_in, rp_in,
     return bool(v > u_trac) if horiz else bool(v > w)
 
 
-def _casing_lp_factor(f: SpotInputs):
-    """Provisional: 1 (see PROVISIONAL). Hook for the casing (wall x hardness against the test casing), number of
-    strings, downhole standoff, Synthetic Rock and carbonate corrections once calibrated."""
-    return 1.0
+def _so_lp(s):
+    return np.exp(-SO_LP[0] * s - SO_LP[1] * s * s)
+
+
+def _so_ehd(s):
+    return 1 + SO_EHD[0] * s + SO_EHD[1] * s * s + SO_EHD[2] * s ** 3
 
 
 def corey(sw, rp):
@@ -361,10 +375,30 @@ def corey(sw, rp):
     return ko_e * so_n ** no, kw_e * sw_n ** nw
 
 
-def penetration(gun: SpotGun, ucs, sigma_v, p_psig):
-    s = sigma_v - LP_ALPHA * p_psig
-    lp = LP_C * gun.lp_norm / LP_NORM_REF * np.log(LP_U0 / ucs) * np.log(LP_S0 / np.maximum(s, 1.0))
+def penetration(gun: SpotGun, ucs, sigma_v, p_psig, standoff=None, outer_walls=(), synthetic=False):
+    """Downhole Lp (in): the gun's normalised penetration corrected for rock strength and effective stress (Tutorial
+    09), for the downhole standoff against the gun's test standoff (relative to Tutorial 09's 2.21 / 0.5 in, which
+    the strength-stress fit carries), for extra casing strings, and the Synthetic Rock correlation (runs 1-3)."""
+    s = np.maximum(sigma_v - LP_ALPHA * p_psig, 1.0)
+    if synthetic:
+        lp = SYNTHETIC[0] * LP_C * gun.lp_norm / LP_NORM_REF * np.log(LP_U0 / ucs) * np.log(SYNTHETIC[1] / s)
+    else:
+        lp = LP_C * gun.lp_norm / LP_NORM_REF * np.log(LP_U0 / ucs) * np.log(LP_S0 / s)
+    so = SO_REF[0] if standoff is None else standoff
+    lp = lp * (_so_lp(so) / _so_lp(gun.test_standoff)) / (_so_lp(SO_REF[0]) / _so_lp(SO_REF[1]))
+    for w in outer_walls:
+        lp = TWO_STRINGS[0] * lp - TWO_STRINGS[1] * w
     return np.maximum(lp, 0.01)
+
+
+def entry_hole(gun: SpotGun, standoff=None, grade="J55", outer_walls=(), cased=True):
+    """Downhole entry-hole diameter (in): API section 1 x 0.97509 (Tutorial 09) corrected for standoff against the
+    test standoff, casing grade (P110 0.849 of J55) and extra casing strings."""
+    so = SO_REF[0] if standoff is None else standoff
+    e = gun.ehd * EHD_FACTOR * (_so_ehd(so) / _so_ehd(gun.test_standoff)) / (_so_ehd(SO_REF[0]) / _so_ehd(SO_REF[1]))
+    if cased:
+        e *= GRADE_EHD.get(str(grade).upper(), 1.0)
+    return e * TWO_STRINGS[2] ** len(outer_walls)
 
 
 class Spot:
@@ -415,14 +449,28 @@ class Spot:
         self.first = int(np.argmax(self.perf))
         self._geo = None
 
-    # shot sets: (gun, efficiency, multiplier)
+    # shot sets: (gun, efficiency, multiplier). PROSPER's Double Run and Re-perforating (old holes ticked as
+    # Existing Perforation) give the Single Run result (runs 6a-6c identical to the base; 6d does not calculate).
     def shot_sets(self):
         f = self.f
-        new = [(f.gun, f.perf_eff, 2.0 if f.perf_method == "Double Run" else 1.0)]
-        if f.perf_method != "Re-perforating" or f.old_gun is None:
-            return new
-        old = [(f.old_gun, f.old_perf_eff, 1.0)]
-        return {"New holes only": new, "Old holes only": old}.get(f.reperf, new + old)
+        return [(f.gun, f.perf_eff, 1.0)]
+
+    def standoff_rows(self):
+        """Downhole standoff (in) by row: entered, or the gun centred in the innermost casing ID (open hole
+        perforated: the hole; external gravel pack rows: the underreamed diameter)."""
+        f, gun = self.f, self.f.gun
+        if f.lower_completion == "Cased and Perforated" and f.casing:
+            inner = min(f.casing, key=lambda c: c[0])
+            so = np.full(len(self.md), max((inner[3] - gun.gun_od) / 2, 0.0))
+        else:
+            so = np.maximum(self.rw_row * 24 - gun.gun_od, 0.0) / 2
+        gp = f.gravel
+        if gp and gp.get("type") == "External":
+            in_gp = (self.md >= gp["top"] - 1e-6) & (self.md < gp["bottom"] - 1e-6)
+            so = np.where(in_gp, max((gp["od"] - gun.gun_od) / 2, 0.0), so)
+        if f.standoff is not None:
+            so = np.full(len(self.md), float(f.standoff))
+        return so
 
     def invasion_depths(self):
         f = self.f
@@ -440,9 +488,21 @@ class Spot:
         sv = f.ob_grad * self.tvd
         sets = self.shot_sets()
         n_tot = sum(g.spf * e * m for g, e, m in sets)
-        lp = sum(g.spf * e * m * penetration(g, self.ucs_row, sv, p_g) for g, e, m in sets) / n_tot
-        lp = lp * _casing_lp_factor(f)
-        ehd = np.full_like(lp, sum(g.spf * e * m * g.ehd for g, e, m in sets) / n_tot * EHD_FACTOR)
+        so = self.standoff_rows()
+        cased = f.lower_completion == "Cased and Perforated"
+        strings = sorted(f.casing, key=lambda c: c[0]) if cased and f.casing else []
+        walls = tuple((c[0] - c[3]) / 2 for c in strings[1:])
+        grade = strings[0][2] if strings else "J55"
+        gp = f.gravel
+        ext = np.zeros(len(self.md), bool)
+        if gp and gp.get("type") == "External":
+            ext = (self.md >= gp["top"] - 1e-6) & (self.md < gp["bottom"] - 1e-6)
+        lp = sum(g.spf * e * m * np.where(ext, penetration(g, self.ucs_row, sv, p_g, so, (), f.lp_corr != "Conventional"),
+                                          penetration(g, self.ucs_row, sv, p_g, so, walls, f.lp_corr != "Conventional"))
+                 for g, e, m in sets) / n_tot
+        ehd = sum(g.spf * e * m * np.where(ext, entry_hole(g, so, grade, (), False), entry_hole(g, so, grade, walls, cased))
+                  for g, e, m in sets) / n_tot
+        ehd = np.asarray(ehd, float) * np.ones(len(lp))
         if self.holdup <= f.bottom_md + 1e-9:
             ehd[np.abs(self.md - self.holdup) < 0.5] *= HOLDUP_EHD
         phasing = kt_phasing(sets[0][0].phasing)
@@ -452,12 +512,9 @@ class Spot:
         ld_in, ls_in = self.invasion_depths()
         kd_fac = np.where(ld_in > 0, f.kl, 1.0)
         rw = self.rw_row
-        rw_gp = rw.copy()
-        gp = f.gravel
-        if gp and gp.get("type") == "External":
-            in_gp = (self.md >= gp["top"] - 1e-6) & (self.md <= gp["bottom"] + 1e-6)
-            rw_gp = np.where(in_gp, np.maximum(gp["od"] / 24.0, rw), rw)
+        rw_gp = np.where(ext, np.maximum(gp["od"] / 24.0, rw), rw) if ext.any() else rw.copy()
         sp, sc, sd = (np.zeros(len(lp)) for _ in range(3))
+        mult = np.ones(len(lp))
         beyond = np.ones(len(lp), bool)
         for i in range(len(lp)):
             ld, kd = ld_in[i] / 12, kd_fac[i] * self.k_row[i]
@@ -468,14 +525,17 @@ class Spot:
             base = wcomp.kt_perforation_skin(rw_gp[i], lp[i] / 12, rp_in[i] / 12, n_eff, phasing, f.kv_kh)["perforation"]
             sp[i] = base
             beyond[i] = ld <= 0 or lp[i] / 12 > ld
-            if ld > 0:
+            if ld > 0 and not beyond[i]:
+                # PROSPER (runs 7, 8): two-zone Hawkins damage skin; the perforation skin x M, M = 1 + Sd / ln(rd/rw)
+                sd[i] = _two_zone_hawkins(self.k_row[i], rw_gp[i], ls_in[i] / 12, f.ks * self.k_row[i], ld, kd)
+                mult[i] = 1 + sd[i] / np.log((rw_gp[i] + ld) / rw_gp[i])
+            elif ld > 0:              # perforations past the invaded zone: Karakas & Tariq (not calibrated)
                 tot = wcomp.karakas_tariq(self.k_row[i], rw_gp[i], lp[i] / 12, rp_in[i] / 12, n_eff, phasing,
                                           f.kv_kh, ld, kd)["total"]
                 sd[i] = tot - base + (_two_zone_hawkins(self.k_row[i], rw_gp[i], ls_in[i] / 12, f.ks * self.k_row[i],
                                                         ls_in[i] / 12, f.ks * self.k_row[i]) if ls_in[i] > 0 else 0.0)
-            k_around = 1.0 if beyond[i] else kd_fac[i]
-            sc[i] = (1 / kcf - 1 / k_around) * np.log((rp_in[i] + kct) / rp_in[i]) / (n_eff * lp[i] / 12)
-        sgp = self.gravel_skin(rp_in, n_eff)
+            sc[i] = (1 / kcf - 1) * np.log((rp_in[i] + kct) / rp_in[i]) / (n_eff * lp[i] / 12)
+        sgp = self.gravel_skin(rp_in, n_eff, lp)
         sdev = self.deviation_skin()
         off = ~self.perf
         lp, ehd, sp, sc, sd, sgp = (np.where(off, 0.0, x) for x in (lp, ehd, sp, sc, sd, sgp))
@@ -491,29 +551,30 @@ class Spot:
             "Reservoir pressure (psig)": p_g, "Underbalance Behrmann (psig)": p_g - db,
             "Underbalance King (psig)": p_g - dk, "Underbalance user (psig)": p_g - f.underbalance - G,
             "Completion fluid density (lb/gal)": (p_g - f.underbalance) / (0.0519481 * self.tvd),
-            "Perforation skin": sp, "Damage skin": sd, "Damage, perf, crush skin": sp + sc + sd, "Crush skin": sc,
+            "Perforation skin": sp, "Damage skin": sd, "Damage, perf, crush skin": mult * sp + sc + sd,
+            "Crush skin": sc, "Perforation skin multiplier": mult, "Mean standoff (in)": so,
             "Gravel pack skin": sgp,
             "Deviation skin": np.where(off, 0.0, sdev), "Partial penetration skin": np.where(off, 0.0, self.partial_skin()),
             "Invasion depth (in)": ld_in, "Beyond Zone": beyond & self.perf,
             "Near-wellbore effective vertical stress (psig)": sv - (p_g - f.underbalance) - G})
 
-    def gravel_skin(self, rp_in, n_eff):
-        """Darcy skin of the gravel pack (provisional): internal - the packed tunnels through casing and cement,
-        S = k L / (0.15913 k_gp n A_p) with L = rw - casing ID / 2; external - radial flow through the pack from
-        the underreamed radius to the screen, (k / k_gp) ln(r_gp / r_screen)."""
+    def gravel_skin(self, rp_in, n_eff, lp_in):
+        """Gravel-pack skin by row. Internal (PROSPER Run 10a): Darcy flow along every packed tunnel of length
+        Lp + (rw - casing ID / 2), S = k L / (C k_gp n A_p), C 0.24834 (k_gp 1.25e5 md), top <= MD < bottom.
+        External (underreamed; not calibrated): radial flow through the pack, (k / k_gp) ln(r_gp / r_screen)."""
         f, gp = self.f, self.f.gravel
         out = np.zeros(len(self.md))
         if not gp:
             return out
-        in_gp = (self.md >= gp["top"] - 1e-6) & (self.md <= gp["bottom"] + 1e-6)
+        in_gp = (self.md >= gp["top"] - 1e-6) & (self.md < gp["bottom"] - 1e-6)
         if gp.get("type") == "External":
             r_o, r_i = gp["od"] / 24.0, max(gp.get("id", gp["od"] * 0.6), 0.1) / 24.0
             out[in_gp] = self.k_row[in_gp] / gp["k"] * np.log(max(r_o / r_i, 1.0))
             return out
-        cas_id = f.casing[0][3] if f.casing else gp["od"]
-        L = np.maximum(self.rw_row - cas_id / 24.0, 1.0 / 12)
+        cas_id = min(f.casing, key=lambda c: c[0])[3] if f.casing else gp["od"]
+        L = (np.asarray(lp_in) + np.maximum(self.rw_row * 12 - cas_id / 2, 0.0)) / 12
         ap = np.pi * (rp_in / 12) ** 2
-        out[in_gp] = (self.k_row * L / (0.15913 * gp["k"] * n_eff * ap))[in_gp]
+        out[in_gp] = (self.k_row * L / (GP_C * gp["k"] * n_eff * ap))[in_gp]
         return out
 
     def _geometry(self):
@@ -555,8 +616,13 @@ class Spot:
         return fac
 
     def _row_mech(self, lg):
-        return self._factor() * (AGG[0] * lg["Perforation skin"] + AGG[1] * lg["Crush skin"]
-                                 + lg["Damage skin"] + lg["Gravel pack skin"])
+        """Row skin entering the layer total: PROSPER's weights - Tutorial 09's for the perforation and crush skins,
+        0.98693 for the invaded rows' M x perforation and damage skins (runs 7, 8), cos(deviation) for the gravel-pack
+        skin (Run 10a)."""
+        m = lg["Perforation skin multiplier"]
+        dam = np.where(m > 1, AGG_D * (m * lg["Perforation skin"] + lg["Damage skin"]),
+                       AGG[0] * lg["Perforation skin"] + AGG_D * lg["Damage skin"])
+        return self._factor() * (dam + AGG[1] * lg["Crush skin"]) + self.cos * lg["Gravel pack skin"]
 
     def total_skin(self, lg=None):
         lg = self.log() if lg is None else lg

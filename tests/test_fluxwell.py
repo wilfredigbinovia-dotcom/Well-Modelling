@@ -5944,11 +5944,9 @@ def test_spot_rework_options_and_layers():
     lg = SP.Spot(dc.replace(f1, invasion="Enter discrete invasion depth", inv_depth=30.0, kl=0.5),
                  SP.blackoil_mobility(fl.m, 210.0)).log()
     assert not lg["Beyond Zone"].any() and (lg["Damage skin"] > 0).all()
-    assert aof(perf_method="Double Run") > c0.aof
-    old = dc.replace(base.gun, spf=4.0)
-    both = aof(perf_method="Re-perforating", old_gun=old, old_perf_eff=0.5, reperf="New and Old holes")
-    only_old = aof(perf_method="Re-perforating", old_gun=old, old_perf_eff=0.5, reperf="Old holes only")
-    assert only_old < c0.aof < both
+    old = dc.replace(base.gun, spf=4.0)          # PROSPER: Double Run and Re-perforating give the Single Run result
+    assert aof(perf_method="Double Run") == c0.aof
+    assert aof(perf_method="Re-perforating", old_gun=old, old_perf_eff=0.5) == c0.aof
     assert aof(non_darcy=True) < c0.aof
     gp = {"type": "Internal", "k": 1.2e5, "top": 9275, "bottom": 9385, "od": 6.41, "id": 4.0,
           "method": "Golan 1 phase"}
@@ -5973,6 +5971,54 @@ def test_spot_rework_options_and_layers():
                                 np.full(11, 0.2), 0.2, 0.354, 4000, 10.5, 10, 2, obm=True)
     assert (fil > 0).all() and fil[0] > fil[-1]          # upper rows drilled earlier: exposed longer
     assert SP.return_perm_factor(5.0, 11.4, 0.2, 5.0, 0.2, 0.8) < 0.8
+
+
+def test_spot_calibration_prosper_runs():
+    """The user's one-at-a-time PROSPER runs on the Tutorial 09 file (Layer / Log Results at 2750 psig): casing
+    7 in 29 lb/ft (1a), P110 (1b), a second 7-5/8 in string (1c), downhole standoff 0.5 / 1.5 in (2), Synthetic Rock
+    (3), carbonate (4), QinetiQ crushed zone (5), double run (6a), discrete invasion 6 / 30 in (7), calculated
+    invasion depths (8a-c, entered as the invasion log), internal gravel pack (10a). Total skin and oil AOF within
+    0.3 % (1c: 1.5 % - PROSPER treats the last row as single-string), entry hole, damage skin, gravel-pack skin."""
+    import dataclasses as dc
+    import json
+    from fluxwell import spot as SP
+    runs = json.load(open(Path(__file__).parent / "data" / "spot_calibration_runs.json"))
+    fl = _t05_oil()
+    G = 14.696
+    base = dc.replace(SP.SpotInputs(), log=SP.generate_log(9275, 9385, 1, 50, 0.18, 8000))
+
+    def inv_log(r):
+        lg = base.log.copy()
+        lg["Invasion Depth (in)"] = runs[r]["liquid_invasion"]
+        return lg
+    inv = dict(kl=0.005, ks=0.0005)
+    cases = {"Run 1a": dict(casing=((7.0, 29.0, "J55", 6.20),)), "Run 1b": dict(casing=((6.7, 10.0, "P110", 6.41),)),
+             "Run 1c": dict(casing=((6.7, 10.0, "J55", 6.41), (7.625, 29.7, "J55", 6.875))),
+             "Run 2 0.5": dict(standoff=0.5), "Run 2 1.5": dict(standoff=1.5), "Run 3": dict(lp_corr="Synthetic Rock"),
+             "Run 4": dict(rock="Carbonate"), "Run 5": dict(crush_model="QinetiQ Test Results"),
+             "Run 6a": dict(perf_method="Double Run"),
+             "Run 7a": dict(invasion="Enter discrete invasion depth", inv_depth=6.0, **inv),
+             "Run 7b": dict(invasion="Enter discrete invasion depth", inv_depth=30.0, **inv),
+             "Run 8a": dict(invasion="Enter mud invasion log", log=inv_log("Run 8a"), solids_depth=0.15165, **inv),
+             "Run 8b": dict(invasion="Enter mud invasion log", log=inv_log("Run 8b"), **inv),
+             "Run 8c": dict(invasion="Enter mud invasion log", log=inv_log("Run 8c"), **inv),
+             "Run 10a": dict(gravel={"type": "Internal", "k": 1.25e5, "top": 9275, "bottom": 9385, "od": 6.41,
+                                     "id": 4.5, "method": "Golan 1 phase"}),
+             "Run 6c": dict()}
+    for r, kw in cases.items():
+        c = SP.spot_ipr(4000 + G, 0.2, dc.replace(base, **kw), fl.m, 210.0, 2750 + G)
+        L, lg, e = c.spot_layer, c.spot_log, runs[r]
+        tol = 0.016 if r == "Run 1c" else 0.003
+        assert abs(L["Oil AOF (STB/d)"] / e["oil_aof"] - 1) < tol, (r, L["Oil AOF (STB/d)"], e["oil_aof"])
+        assert abs(L["Total skin"] / e["S"] - 1) < tol, (r, L["Total skin"], e["S"])
+        assert abs(lg["Entry hole diameter (in)"][0] - e["ehd0"]) < 2e-4, (r, lg["Entry hole diameter (in)"][0])
+        assert abs(lg["Penetration Lp (in)"][0] - e["lp0"]) < 0.006, (r, lg["Penetration Lp (in)"][0])
+        assert abs(lg["Damage skin"][0] - e["sd0"]) < 0.02 + 1e-4 * e["sd0"], (r, lg["Damage skin"][0])
+        assert abs(lg["Damage, perf, crush skin"][0] / e["dpc0"] - 1) < 0.002, (r, lg["Damage, perf, crush skin"][0])
+        assert abs(lg["Gravel pack skin"][0] - e["sgp0"]) < 5e-4, (r, lg["Gravel pack skin"][0])
+    # the calculated-invasion exposure time: downtime + drilling time x (bottom - MD) / (bottom - top)
+    t = runs["Run 8a"]["invasion_time_min"]
+    assert abs(t[0] - 17280) < 1e-6 and abs(t[-1] - 2880) < 1e-6 and abs(t[1] - (2880 + 14400 * 109 / 110)) < 0.1
 
 
 def test_spot_gun_database_pxwell():

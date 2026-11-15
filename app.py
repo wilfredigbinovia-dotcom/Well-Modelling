@@ -2864,8 +2864,8 @@ SPOT_LAYER_COLS = ["Top MD (ft)", "Bottom MD (ft)", "Layer Pressure (psig)", "Un
                    "Reperforating", "Gun (database row)", "Perforation Efficiency (fraction)"]
 SPOT_RP_COLS = ["Layer", "Residual oil saturation", "Oil end point kr", "Oil Corey exponent",
                 "Residual water saturation", "Water end point kr", "Water Corey exponent"]
-SPOT_INV_COLS = ["Layer", "Discrete invasion depth (in)", "Solids invasion depth (in)", "Kl (filtrate zone factor)",
-                 "Ks (solids zone factor)", "Irreducible water saturation"]
+SPOT_INV_COLS = ["Layer", "Discrete invasion depth (in)", "Solids invasion depth (in)", "Kl (% of k)",
+                 "Ks (% of k)", "Irreducible water saturation"]
 SPOT_CSG_COLS = ["Type", "Outer Diameter (in)", "Weight (lb/ft)", "Material", "Inner Diameter (in)", "Top MD (ft)",
                  "Bottom MD (ft)", "Drift (in)"]
 SPOT_OPT_HELP = "As PROSPER's SPOT Options tab (manual 2.7.10.2)."
@@ -2922,7 +2922,9 @@ def spot_ui(o, pr, t_f, wc):
                      help="None Available: a constant log is generated on the Log Data tab. Log data available: "
                           "enter / paste porosity, permeability, UCS, TWC (or FDC and sonic) by depth.")
         pm = sel(cl, "Perforating Method", ["Single Run", "Double Run"] + (["Re-perforating"] if act != "New Well"
-                                                                           else []), "spot_pm")
+                                                                           else []), "spot_pm",
+                 help="PROSPER gives the Single Run result for Double Run and for Re-perforating (old holes ticked "
+                      "as Existing Perforation) - the user's runs; FluxWell does the same.")
         inv = sel(cl, "Invasion Method", ["No invasion", "Calculate invasion", "Enter Mud Invasion Log",
                                           "Enter discrete Invasion depth"], "spot_inv")
         sand = sel(cl, "Sanding Model", ["None", "QinetiQ"], "spot_sand")
@@ -3001,8 +3003,9 @@ def spot_ui(o, pr, t_f, wc):
         inv_t = None
         if inv != "No invasion":
             st.markdown("**Invasion Data** (per layer; factors are the invaded-zone permeability / virgin "
-                        "permeability - Van Velzen: Kl 0.89 OBM / 0.91 WBM at P50, 0.52 / 0.62 at P90; Ks 0.05)")
-            inv_d = pd.DataFrame([[i + 1, 6.0, 0.0, 0.89, 0.05, 0.2] for i in range(n_l)], columns=SPOT_INV_COLS)
+                        "permeability, in percent as PROSPER's (an entry of 0.5 is 0.5 % of k) - Van Velzen: Kl 89 % "
+                        "OBM / 91 % WBM at P50, 52 / 62 % at P90; Ks 5 %)")
+            inv_d = pd.DataFrame([[i + 1, 6.0, 0.0, 89.0, 5.0, 0.2] for i in range(n_l)], columns=SPOT_INV_COLS)
             inv_t = pd.DataFrame(_spot_table("spot_invt", inv_d, num_rows="dynamic"))
             with st.expander("Kl from a return-permeability core test (optional)"):
                 c = st.columns(6)
@@ -3014,8 +3017,8 @@ def spot_ui(o, pr, t_f, wc):
                 r_kr = num(c[5], "Kreturn / Kinitial (fraction)", "spot_ret_kr", 0.8, 0.01, 1.0, 0.05)
                 if use_ret:
                     kl_ret = wspot.return_perm_factor(r_loss, r_area, r_phi, r_len, 0.2, r_kr)
-                    inv_t["Kl (filtrate zone factor)"] = kl_ret
-                    st.caption(f"Filtrate-zone factor from the core test: Kl = {kl_ret:.4f} (all layers).")
+                    inv_t["Kl (% of k)"] = 100 * kl_ret
+                    st.caption(f"Filtrate-zone factor from the core test: Kl = {100 * kl_ret:.2f} % (all layers).")
             calc_kw = None
             if calc_inv:
                 c = st.columns(3)
@@ -3083,18 +3086,17 @@ def spot_ui(o, pr, t_f, wc):
                                            "Material": st.column_config.SelectboxColumn(
                                            options=["J55", "L80", "P105", "P110"])}))
         csg = csg.dropna(subset=["Outer Diameter (in)"]).copy()
-        csg["Inner Diameter (in)"] = np.sqrt(np.maximum(csg["Outer Diameter (in)"].astype(float) ** 2
-                                                        - csg["Weight (lb/ft)"].astype(float).fillna(0) / 2.6729, 0.01))
+        csg["Inner Diameter (in)"] = np.round(np.sqrt(np.maximum(csg["Outer Diameter (in)"].astype(float) ** 2
+                                                        - csg["Weight (lb/ft)"].astype(float).fillna(0) / 2.6729,
+                                                                 0.01)), 2)
         c = st.columns(4)
         holdup = num(c[0], "Holdup Depth (ft)", "spot_holdup", d.bottom_md, 0.0, 4e4, 10.0,
                      help="The deepest point the gun can be run to: no perforations below it.")
         num(c[1], "Minimum tubing restriction (in)", "spot_minres", 0.0, 0.0, 30.0, 0.125, "%.3f",
             help="Limits the through-tubing gun size (the default restriction of the gun filter). 0 = none.")
-        if len(csg) and not (np.isclose(csg["Outer Diameter (in)"].iloc[0], 6.7) and
-                             np.isclose(csg["Weight (lb/ft)"].iloc[0], 10.0) and csg["Material"].iloc[0] == "J55") \
-                or len(csg[csg["Type"] == "Casing"]) > 1 or use_so or lp_corr != "Conventional":
-            st.info("Lp corrections for casing size / grade, several casing strings, downhole standoff and the "
-                    "Synthetic Rock correlation are not calibrated yet (factor 1 - the Tutorial 09 casing's Lp).")
+        st.caption("The gun's Lp and entry hole are corrected for the standoff (the gun centred in the innermost "
+                   "casing unless a downhole standoff is entered), the casing grade (entry hole) and a second casing "
+                   "string - calibrated on PROSPER runs.")
     with t5:
         gp_on = flag(st.checkbox, "Gravel pack", "spot_gp_on", default=False)
         gp = None
@@ -3249,8 +3251,8 @@ def spot_ui(o, pr, t_f, wc):
             old_perf_eff=old_eff if old_gun is not None else 0.5, invasion=inv_mode,
             inv_depth=_f(inv_r["Discrete invasion depth (in)"], 0.0) if inv_r is not None else 0.0,
             solids_depth=_f(inv_r["Solids invasion depth (in)"], 0.0) if inv_r is not None else 0.0,
-            kl=_f(inv_r["Kl (filtrate zone factor)"], 1.0) if inv_r is not None else 1.0,
-            ks=_f(inv_r["Ks (solids zone factor)"], 1.0) if inv_r is not None else 1.0,
+            kl=_f(inv_r["Kl (% of k)"], 100.0) / 100 if inv_r is not None else 1.0,
+            ks=_f(inv_r["Ks (% of k)"], 100.0) / 100 if inv_r is not None else 1.0,
             crush_model=crush, non_darcy=nd, standoff=so if use_so else None, casing=casing or d.casing,
             add_height=add_h, gravel=gp, well_type=wt, horizontal=hz,
             sanding={"d": s_d, "rho_s": s_rho, "angle": s_ang, "rough": s_rough} if sand == "QinetiQ" else None,
@@ -3264,14 +3266,16 @@ def spot_ui(o, pr, t_f, wc):
                            pwf_log, gor_l)
     ss["ipr_recipe"] = (wspot.spot_ipr, (layers[0].pr, layers[0].wc, layers if len(layers) > 1 else layers[0],
                                          model, t_f), {})
+    grades = [c_[2] for c_ in casing]
     provis = [v for k_, v in wspot.PROVISIONAL.items() if (
-        (k_ == "casing" and any(not (np.isclose(c_[0], 6.7) and np.isclose(c_[1], 10.0) and c_[2] == "J55")
-                                for c_ in casing[:1])) or (k_ == "multi_casing" and len(casing) > 1)
-        or (k_ == "standoff" and use_so) or (k_ == "synthetic" and lp_corr != "Conventional")
-        or (k_ == "carbonate" and any(L.rock == "Carbonate" for L in layers))
-        or (k_ == "qinetiq_crush" and crush != "Entered") or (k_ == "double_run" and pm != "Single Run")
+        (k_ == "casing" and any(g_ in ("L80", "P105") for g_ in grades)) or (k_ == "multi_casing" and len(casing) > 2)
+        or (k_ == "synthetic" and lp_corr != "Conventional" and any(np.any(np.abs(L.log["UCS (psi)"].astype(float)
+                                                                                    - 8000) > 1) for L in layers))
+        or (k_ == "gun" and any(L.gun.lp_norm != wspot.SpotGun().lp_norm for L in layers))
+        or (k_ == "gravel_ext" and gp is not None and gp["type"] == "External")
         or (k_ == "invasion_calc" and inv == "Calculate invasion") or (k_ == "sanding" and sand == "QinetiQ")
-        or (k_ == "non_darcy" and nd) or (k_ == "gravel" and gp is not None) or (k_ == "extensions" and ext == "No"))]
+        or (k_ == "non_darcy" and nd) or (k_ == "gravel" and gp is not None) or (k_ == "extensions" and ext == "No")
+        or (k_ == "ucs_twc" and log_in != "None Available"))]
     if provis:
         st.warning("Not yet calibrated against PROSPER (provisional): " + "; ".join(provis) + ".")
     with st.expander("SPOT Layer Results and Log Results", expanded=False):
