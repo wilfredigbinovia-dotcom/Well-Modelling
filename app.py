@@ -2848,9 +2848,9 @@ def spot_gun_panel(p="spot_gun", label="gun", allow_override=True):
                        "Lp (PROSPER's warning).")
         import dataclasses as _dc
         gun = _dc.replace(gun, spf=spf, phasing=ph)
-    if wspot.kt_phasing(gun.phasing) != gun.phasing % 360:
-        st.info(f"Karakas & Tariq tabulate 0, 45, 60, 90, 120 and 180 deg phasing: {gun.phasing:g} deg uses the "
-                f"{wspot.kt_phasing(gun.phasing)} deg constants.")
+    if gun.phasing % 360 not in (0, 45, 60, 90, 120, 180):
+        st.caption(f"Karakas & Tariq constants interpolated to {gun.phasing:g} deg between the tabulated phasings "
+                   "(as PROSPER).")
     if isinstance(row.get("Remarks"), str) and row["Remarks"]:
         st.caption(f"Remarks: {row['Remarks']}")
     if minr > 0 and need.loc[cur] + tol > minr + 1e-9:

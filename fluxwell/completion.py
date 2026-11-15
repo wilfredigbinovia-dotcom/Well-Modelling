@@ -51,9 +51,24 @@ KT_TABLE = {
 def kt_perforation_skin(rw, lp, rp, spf, phasing, kv_kh=1.0):
     """Karakas & Tariq perforation skin for an undamaged formation.
     rw, lp, rp in ft; spf shots/ft; phasing in degrees (0 = 360)."""
+    phasing = float(phasing) % 360
     if phasing not in KT_TABLE:
-        raise ValueError(f"Phasing must be one of {sorted(KT_TABLE)} degrees.")
-    at, a1, a2, b1, b2, c1, c2 = KT_TABLE[phasing]
+        if 0 < phasing < 45 or phasing > 180:      # outside the 45-180 constants: interpolate the skins
+            lo, hi = (0, 45) if phasing < 45 else (180, 360)
+            s_lo = kt_perforation_skin(rw, lp, rp, spf, lo % 360, kv_kh)
+            s_hi = kt_perforation_skin(rw, lp, rp, spf, hi % 360, kv_kh)
+            w = (phasing - lo) / (hi - lo)
+            return {k_: (1 - w) * s_lo[k_] + w * s_hi[k_] for k_ in s_lo}
+        # PROSPER's SPOT: constants interpolated linearly between the tabulated phasings (72 deg exact, Run 14)
+        keys = sorted(k_ for k_ in KT_TABLE if k_ != 0)
+        lo = max(k_ for k_ in keys if k_ <= phasing)
+        hi = min(k_ for k_ in keys if k_ >= phasing)
+        w = (phasing - lo) / (hi - lo)
+        consts = tuple(x + (y - x) * w for x, y in zip(KT_TABLE[lo], KT_TABLE[hi]))
+    else:
+        phasing = int(phasing)
+        consts = KT_TABLE[phasing]
+    at, a1, a2, b1, b2, c1, c2 = consts
     rw_eff = lp / 4 if phasing == 0 else at * (rw + lp)
     s_h = np.log(rw / rw_eff)
     hp = 1.0 / spf                                   # perforation spacing (ft)

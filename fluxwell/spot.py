@@ -99,6 +99,12 @@ def gun_database():
 
 
 def kt_phasing(phasing):
+    """The phasing used in Karakas & Tariq: the gun's own - PROSPER interpolates the constants between the tabulated
+    phasings (Run 14, 72 deg: exact). Kept for callers; returns the phasing modulo 360."""
+    return float(phasing) % 360
+
+
+def kt_phasing_nearest(phasing):
     """Nearest of Karakas & Tariq's tabulated phasings (0 for in-line guns; 360 counts as 0)."""
     p = float(phasing) % 360
     return min(KT_PHASINGS, key=lambda a: min(abs(p - a), 360 - abs(p - a)) if a == 0 else abs(p - a))
@@ -122,7 +128,7 @@ PROVISIONAL = {
     "casing": "casing grades L80 / P105 (entry hole from hardness; J55 and P110 calibrated)",
     "multi_casing": "a third casing string (the second-string correction applied again)",
     "synthetic": "Synthetic Rock Lp at other UCS (calibrated at 8000 psi)",
-    "gun": "guns other than Tutorial 09's (normalised-penetration scaling, test standoff)",
+    "gun": "guns other than Tutorial 09's and Run 14's UltraJet 4505 (Lp_API / ln(29665 / cement) scaling)",
     "gravel_ext": "external (underreamed) gravel pack (PROSPER's -24 perforation skin not reproduced)",
     "invasion_calc": "Calculated invasion depths (exposure time and radial sqrt(t) as PROSPER; magnitude from filtration theory)",
     "ucs_twc": "UCS / TWC equations 1-7: published correlations (McNally, Moos, Vernik, Rzhevsky, TWC = 2.5 / 3 UCS)",
@@ -143,8 +149,10 @@ TWO_STRINGS = (0.5, 2.93363, 1.05997)   # a second casing string: Lp -> 0.5 Lp -
                                         # entry hole x 1.05997 (Run 1c: 7-5/8 in 29.7 lb/ft over the 6.7 in)
 SYNTHETIC = (0.40962, 31906.0)  # Synthetic Rock Lp: 0.40962 x the conventional with S0 31906 (Run 3, 0.45 x)
 AGG_D = 0.98693                 # total skin weight of the damaged rows' M Sp and damage skin (runs 7, 8)
-GP_C = 0.24834                  # internal gravel pack: S = k (Lp + rw - casing ID / 2) / (C k_gp n A_p)
+GP_C = 0.24834                  # internal gravel pack (no gravel non-Darcy unless Calculate Non-Darcy Skin): S = k (Lp + rw - casing ID / 2) / (C k_gp n A_p)
 TWC_UCS = 1.9049                # PROSPER's generated TWC / UCS (15239.53 psi at 8000 psi)
+LP_UC = 29665.0                 # other guns: Lp scales with Lp_API / ln(LP_UC / test cement strength) - Run 14
+                                # (Schlumberger UltraJet 4505 HMX, 42.6 in at 7293.3 psi: 14.2513 in downhole)
 LOG_COLS = ["MD (ft)", "Porosity", "Permeability (md)", "UCS (psi)", "TWC (psi)", "FDC (g/cc)",
             "Compressional Sonic (us/ft)", "Shear Sonic (us/ft)", "Caliper (in)", "Gamma Ray (API)",
             "Resistivity (ohm.m)", "CBL (mV)", "Net", "Invasion Depth (in)", "Perforated"]
@@ -375,15 +383,22 @@ def corey(sw, rp):
     return ko_e * so_n ** no, kw_e * sw_n ** nw
 
 
+def gun_scale(gun: SpotGun):
+    """The gun's penetration relative to Tutorial 09's: API section 1 Lp over ln(LP_UC / its test cement strength)
+    (Run 14: the database's normalised penetration was 5.5 % low, this exact)."""
+    ref = SpotGun()
+    return (gun.lp_api / np.log(LP_UC / gun.cement_strength)) / (ref.lp_api / np.log(LP_UC / ref.cement_strength))
+
+
 def penetration(gun: SpotGun, ucs, sigma_v, p_psig, standoff=None, outer_walls=(), synthetic=False):
     """Downhole Lp (in): the gun's normalised penetration corrected for rock strength and effective stress (Tutorial
     09), for the downhole standoff against the gun's test standoff (relative to Tutorial 09's 2.21 / 0.5 in, which
     the strength-stress fit carries), for extra casing strings, and the Synthetic Rock correlation (runs 1-3)."""
     s = np.maximum(sigma_v - LP_ALPHA * p_psig, 1.0)
     if synthetic:
-        lp = SYNTHETIC[0] * LP_C * gun.lp_norm / LP_NORM_REF * np.log(LP_U0 / ucs) * np.log(SYNTHETIC[1] / s)
+        lp = SYNTHETIC[0] * LP_C * gun_scale(gun) * np.log(LP_U0 / ucs) * np.log(SYNTHETIC[1] / s)
     else:
-        lp = LP_C * gun.lp_norm / LP_NORM_REF * np.log(LP_U0 / ucs) * np.log(LP_S0 / s)
+        lp = LP_C * gun_scale(gun) * np.log(LP_U0 / ucs) * np.log(LP_S0 / s)
     so = SO_REF[0] if standoff is None else standoff
     lp = lp * (_so_lp(so) / _so_lp(gun.test_standoff)) / (_so_lp(SO_REF[0]) / _so_lp(SO_REF[1]))
     for w in outer_walls:
@@ -726,7 +741,7 @@ class Spot:
             a = 9.08e-13 * beta * bo ** 2 * rho * (1 / rp - 1 / rc) / (2 * np.pi * lp) ** 2 / N ** 2
             D += a * kh / (141.2 * mu_b)
         gp = f.gravel
-        if gp and gp.get("type") != "External":
+        if gp and gp.get("type") != "External" and f.non_darcy:    # PROSPER Run 10a: Darcy only otherwise
             kg = gp["k"]
             meth = gp.get("method", "Golan 1 phase")
             beta = 1.47e7 / kg ** 0.55 if meth.startswith("Golan") else 48511 / (0.35 ** 5.5 * kg ** 0.5)
