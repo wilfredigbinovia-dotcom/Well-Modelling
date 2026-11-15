@@ -2783,27 +2783,29 @@ def spot_gun_db():
     return wspot.gun_database()
 
 
-def spot_gun_panel():
+def spot_gun_panel(p="spot_gun", label="gun", allow_override=True):
     """PROSPER's perforating gun database with its filters (vendor, gun OD, gun type, minimum restriction and
-    tolerance); a row picked in the table is the gun used."""
+    tolerance); a row picked in the table is the gun used. Shot density and phasing can be changed from the test
+    values (as PROSPER allows, with its warning)."""
     db = spot_gun_db()
-    if ss.get("_v_spot_gun_row") is None:                  # older projects stored the Tutorial 09 gun's name
-        ss["_v_spot_gun_row"] = wspot.TUTORIAL_GUN
+    rk = f"_v_{p}_row"
+    if ss.get(rk) is None:                                 # older projects stored the Tutorial 09 gun's name
+        ss[rk] = wspot.TUTORIAL_GUN
     st.caption(f"PROSPER's perforating gun database ({len(db)} guns: section 1 data of the API RP 43 / 19B "
-               "concrete-target test). Filter it as in PROSPER, then click a row to use that gun. SPOT uses the "
-               "shot density, phasing, entry hole and normalised penetration.")
-    if st.button("Clear All Filtering", key="spot_gun_clear"):
-        for k_ in ("spot_gun_vendor", "spot_gun_od", "spot_gun_type", "spot_gun_minr", "spot_gun_tol"):
-            reset(k_)
+               f"concrete-target test). Filter it as in PROSPER, then click a row to use that {label}.")
+    if st.button("Clear All Filtering", key=f"{p}_clear"):
+        for k_ in ("vendor", "od", "type", "minr", "tol"):
+            reset(f"{p}_{k_}")
     c = st.columns(5)
     vendor = sel(c[0], "Vendor", ["All vendors"] + sorted(db["Vendor"].dropna().unique(), key=str.lower),
-                 "spot_gun_vendor")
+                 f"{p}_vendor")
     ods = sorted(db["Gun OD (in)"].unique())
-    od = sel(c[1], "Gun OD", ["All gun sizes"] + [f"{x:g}" for x in ods], "spot_gun_od")
-    gtype = sel(c[2], "Gun Type", ["All gun types", "Wireline", "TCP"], "spot_gun_type")
-    minr = num(c[3], "Minimum Restriction (in)", "spot_gun_minr", 0.0, 0.0, 30.0, 0.125, "%.4f",
-               help="The smallest ID in the well the gun must pass. 0 = no restriction filter.")
-    tol = num(c[4], "Tolerance (in)", "spot_gun_tol", 0.0, 0.0, 5.0, 0.0625, "%.4f",
+    od = sel(c[1], "Gun OD", ["All gun sizes"] + [f"{x:g}" for x in ods], f"{p}_od")
+    gtype = sel(c[2], "Gun Type", ["All gun types", "Wireline", "TCP"], f"{p}_type")
+    minr = num(c[3], "Minimum Restriction (in)", f"{p}_minr", float(val("spot_minres", 0.0) or 0.0), 0.0, 30.0,
+               0.125, "%.4f", help="The smallest ID in the well the gun must pass (default: the Completion tab's "
+                                   "minimum tubing restriction). 0 = no restriction filter.")
+    tol = num(c[4], "Tolerance (in)", f"{p}_tol", 0.0, 0.0, 5.0, 0.0625, "%.4f",
               help="Clearance to keep: guns are listed when their Min Restriction (the gun OD where the vendor "
                    "gave none) plus the tolerance is no more than the well's minimum restriction.")
     view = db
@@ -2816,106 +2818,466 @@ def spot_gun_panel():
     need = db["Min Restriction (in)"].where(db["Min Restriction (in)"] > 0, db["Gun OD (in)"])
     if minr > 0:
         view = view[need.loc[view.index] + tol <= minr + 1e-9]
-    cur = int(ss["_v_spot_gun_row"])
+    cur = int(ss[rk])
     if cur not in db.index:
         cur = wspot.TUTORIAL_GUN
     st.caption(f"{len(view)} of {len(db)} guns listed.")
     ev = st.dataframe(view[SPOT_GUN_COLS], on_select="rerun", selection_mode="single-row", width="stretch",
-                      height=360, key=f"spot_gun_tbl_{vendor}_{od}_{gtype}_{minr}_{tol}")
+                      height=320, key=f"{p}_tbl_{vendor}_{od}_{gtype}_{minr}_{tol}")
     rows = getattr(getattr(ev, "selection", None), "rows", None) or []
     if rows:
-        cur = int(view.index[rows[0]])
-        ss["_v_spot_gun_row"] = cur
+        new = int(view.index[rows[0]])
+        if new != cur:
+            reset(f"{p}_spf")
+            reset(f"{p}_phase")
+        cur = new
+        ss[rk] = cur
     row = db.loc[cur]
     gun = wspot.gun_from_row(row)
-    st.markdown(f"**Gun used:** {gun.name} - Lp {row['Lp sec 1 (in)']:g} in, EHD {row['EHD sec 1 (in)']:g} in, "
-                f"normalised penetration {row['Norm. Penetration (in)']:g} in (row {cur}).")
+    st.markdown(f"**{label.capitalize()} used:** {gun.name} - Lp {row['Lp sec 1 (in)']:g} in, EHD "
+                f"{row['EHD sec 1 (in)']:g} in, normalised penetration {row['Norm. Penetration (in)']:g} in "
+                f"(row {cur}).")
+    if allow_override:
+        c = st.columns(4)
+        spf = num(c[0], "Shot density (spf)", f"{p}_spf", gun.spf, 0.5, 60.0, 0.5,
+                  help="From the API test; PROSPER lets you change it for guns that can be loaded differently, "
+                       "warning that it strictly changes the Lp too.")
+        ph = num(c[1], "Gun phasing (deg)", f"{p}_phase", gun.phasing, 0.0, 360.0, 5.0)
+        if abs(spf - gun.spf) > 1e-9 or abs(ph - gun.phasing) > 1e-9:
+            st.warning("Shot density / phasing differ from the API test: strictly incorrect, as both affect the "
+                       "Lp (PROSPER's warning).")
+        import dataclasses as _dc
+        gun = _dc.replace(gun, spf=spf, phasing=ph)
     if wspot.kt_phasing(gun.phasing) != gun.phasing % 360:
-        st.info(f"Karakas & Tariq tabulate 0, 45, 60, 90, 120 and 180 deg phasing: this gun's "
-                f"{gun.phasing:g} deg uses the {wspot.kt_phasing(gun.phasing)} deg constants.")
+        st.info(f"Karakas & Tariq tabulate 0, 45, 60, 90, 120 and 180 deg phasing: {gun.phasing:g} deg uses the "
+                f"{wspot.kt_phasing(gun.phasing)} deg constants.")
     if isinstance(row.get("Remarks"), str) and row["Remarks"]:
         st.caption(f"Remarks: {row['Remarks']}")
     if minr > 0 and need.loc[cur] + tol > minr + 1e-9:
-        st.warning("The gun in use does not pass the minimum restriction - pick one from the filtered list.")
+        st.warning("This gun does not pass the minimum restriction - pick one from the filtered list.")
     return gun
 
 
+SPOT_LAYER_COLS = ["Top MD (ft)", "Bottom MD (ft)", "Layer Pressure (psig)", "Under Balance Pressure (psi)",
+                   "Overburden Pressure Gradient (psi/ft)", "Wc (percent)", "Water Saturation (fraction)",
+                   "Bottom Hole Temperature (deg F)", "Kv/Kh", "Downhole Rock Type", "m", "c",
+                   "Reperforating", "Gun (database row)", "Perforation Efficiency (fraction)"]
+SPOT_RP_COLS = ["Layer", "Residual oil saturation", "Oil end point kr", "Oil Corey exponent",
+                "Residual water saturation", "Water end point kr", "Water Corey exponent"]
+SPOT_INV_COLS = ["Layer", "Discrete invasion depth (in)", "Solids invasion depth (in)", "Kl (filtrate zone factor)",
+                 "Ks (solids zone factor)", "Irreducible water saturation"]
+SPOT_CSG_COLS = ["Type", "Outer Diameter (in)", "Weight (lb/ft)", "Material", "Inner Diameter (in)", "Top MD (ft)",
+                 "Bottom MD (ft)", "Drift (in)"]
+SPOT_OPT_HELP = "As PROSPER's SPOT Options tab (manual 2.7.10.2)."
+
+
+def _spot_table(key, default, **kw):
+    if key not in ss or not isinstance(ss[key], pd.DataFrame):
+        ss[key] = default
+    return track(key, st.data_editor(ss[key], key=key + "_ed", width="stretch", **kw))
+
+
+def _spot_set_table(key, df):
+    ss[key] = df
+    ss.pop(key + "_ed", None)
+    ss.setdefault("_tables", {})[key] = df
+
+
+def _f(x, d=np.nan):
+    try:
+        v = float(x)
+        return v if np.isfinite(v) else d
+    except (TypeError, ValueError):
+        return d
+
+
 def spot_ui(o, pr, t_f, wc):
-    """PROSPER's SPOT IPR (Shell Perforation Optimisation Tool, Tutorial 09): one layer split into 1 ft segments."""
+    """PROSPER's SPOT IPR (Shell Perforation Optimisation Tool): Options, Layers, Log Data, Completion and Gravel
+    Pack tabs as PROSPER's (manual 2.7.10); the layers are split into the log rows (1 ft by default)."""
     model = blackoil_model(o)
+    if o.fluid_type != "oil":
+        raise ValueError("SPOT for gas and condensate wells (pressure squared / pseudo pressure, non-Darcy) is the "
+                         "next stage of the SPOT rework - oil wells for now.")
     if model is None or o.method == "eos":
         raise ValueError("SPOT needs a black-oil PVT (PVT tab).")
     d = wspot.SpotInputs()
-    st.caption("PROSPER's SPOT: the perforation penetration from the gun's API RP 19B data corrected for rock "
-               "strength and stress, then Karakas & Tariq perforation, McLeod crushed-zone and Cinco-Ley deviation "
-               "skins segment by segment (1 ft), combined into the layer skin; the water cut sets the water "
-               "saturation (relative permeabilities). Reservoir pressure, water cut and temperature are the ones "
-               "above. See spot.py for what was reconstructed and how closely.")
-    t1, t2, t3, t4, t5 = st.tabs(["Options", "Layer", "Log data", "Completion", "Perforating gun"])
+    st.caption("PROSPER's SPOT: each layer is split into the log rows; the gun's API section 1 penetration is "
+               "corrected for rock strength and stress, then Karakas & Tariq perforation, McLeod crushed-zone, "
+               "invasion, gravel-pack and Cinco-Ley deviation / partial-penetration skins row by row, combined "
+               "into the layer skin. Layer rates add. Reservoir pressure and water cut are entered by layer.")
+    t1, t2, t3, t4, t5 = st.tabs(["Options", "Layers", "Log Data", "Completion", "Gravel Pack"])
+    cased = o.completion == "cased_hole"
     with t1:
-        c = st.columns(4)
-        wt = sel(c[0], "Well type", ["Deviated", "Vertical"], "spot_wt")
-        inflow = sel(c[1], "Inflow equation", ["Fetkovich", "Vogel"], "spot_inflow")
-        kcf = num(c[2], "Crushed zone permeability factor (fraction)", "spot_kcf", d.crush_factor, 0.001, 1.0, 0.05)
-        kct = num(c[3], "Crushed zone thickness (in)", "spot_kct", d.crush_thickness, 0.0, 10.0, 0.1)
-        st.caption("Lp correlation: Conventional. Non-Darcy skin: no. Activity: new well, single-run perforating, no "
-                   "invasion, no sanding model, cased and perforated - the options of PROSPER's Tutorial 09.")
+        cl, cr = st.columns([3, 2])
+        lp_corr = sel(cl, "Lp Correlation Type", ["Conventional", "Synthetic Rock"], "spot_lpcorr",
+                      help="API 19B Section 1 / Section II or IV correlations - Synthetic Rock assumes the test's "
+                           "effective stress does not reach the core centre.")
+        nd = sel(cl, "Calculate Non-Darcy Skin", ["No", "Yes"], "spot_nd") == "Yes"
+        act = sel(cl, "Activity", ["New Well", "Workover / Re-perforation"], "spot_act")
+        wt = sel(cl, "Well Type", ["Vertical", "Deviated", "Horizontal"], "spot_wt", default="Deviated")
+        horiz = wt == "Horizontal"
+        inflow = sel(cl, "Inflow Equation", ["Economides-Joshi", "Borisov", "Babu-Odeh", "Goode-Wilkinson"]
+                     if horiz else ["Fetkovich", "Vogel"], "spot_inflow_h" if horiz else "spot_inflow")
+        log_in = sel(cl, "Log Data Input", ["None Available", "Log data available"], "spot_login",
+                     help="None Available: a constant log is generated on the Log Data tab. Log data available: "
+                          "enter / paste porosity, permeability, UCS, TWC (or FDC and sonic) by depth.")
+        pm = sel(cl, "Perforating Method", ["Single Run", "Double Run"] + (["Re-perforating"] if act != "New Well"
+                                                                           else []), "spot_pm")
+        inv = sel(cl, "Invasion Method", ["No invasion", "Calculate invasion", "Enter Mud Invasion Log",
+                                          "Enter discrete Invasion depth"], "spot_inv")
+        sand = sel(cl, "Sanding Model", ["None", "QinetiQ"], "spot_sand")
+        crush = sel(cl, "Crushed Zone Model", ["Entered", "QinetiQ Test Results"], "spot_crush")
+        lower = sel(cl, "Lower Completion Type", ["Cased and Perforated"] if cased else
+                    ["Open Hole", "Open Hole Perforated"], "spot_lower",
+                    help="Cased hole in the Options Summary: Cased and Perforated only; open hole: Open Hole or "
+                         "Open Hole Perforated.")
+        sel(cl, "Pressure Transform", ["Pressure Squared", "Pseudo Pressure"], "spot_ptrans", disabled=True,
+            help="Gas and condensate wells only.")
+        use_so = sel(cl, "Use Downhole Standoff", ["No", "Yes"], "spot_useso") == "Yes"
+        gpl = sel(cl, "Enter Gun per Layer", ["No", "Yes"], "spot_gpl") == "Yes"
+        ext = sel(cl, "Use SPOT IPR Extensions", ["Yes", "No"], "spot_ext",
+                  help="Yes: the original Shell SPOT assumptions; No: those of PROSPER's other IPR models.")
+        phase_in = sel(cl, "Input Phase Ratios", ["Yes", "No"], "spot_phase",
+                       help="Yes: a water cut per layer; No: a water saturation per layer (the water cut follows "
+                            "from the relative permeabilities).") == "Yes"
+        with cr:
+            st.markdown("**Invasion Calculation Inputs**")
+            calc_inv = inv == "Calculate invasion"
+            mud_w = num(cr, "Drilling Fluid Weight (lb/US gal)", "spot_mudw", 10.0, 6.0, 25.0, 0.1, disabled=not calc_inv)
+            t_drill = num(cr, "Total Drilling Time (days)", "spot_tdrill", 10.0, 0.0, 1e4, 1.0, disabled=not calc_inv)
+            t_down = num(cr, "Downtime (days)", "spot_tdown", 2.0, 0.0, 1e4, 1.0, disabled=not calc_inv)
+            st.markdown("**QinetiQ Sanding Model Inputs**")
+            q_on = sand == "QinetiQ"
+            s_d = num(cr, "Sand Particle Diameter (in)", "spot_sd", 0.008, 1e-5, 1.0, 0.001, "%.4f", disabled=not q_on)
+            s_rho = num(cr, "Sand Density (lb/US gal)", "spot_srho", 22.1, 10.0, 40.0, 0.1, disabled=not q_on)
+            s_ang = num(cr, "Perforation Angle (degrees)", "spot_sang", 0.0, -90.0, 90.0, 5.0, disabled=not q_on)
+            s_rough = num(cr, "Perforation Wall Roughness (in)", "spot_srough", 0.01, 0.0, 1.0, 0.001, "%.4f",
+                          disabled=not q_on)
+            st.markdown("**Crushed Zone Inputs**")
+            kcf = num(cr, "Permeability Factor (fraction)", "spot_kcf", d.crush_factor, 0.001, 1.0, 0.05,
+                      disabled=crush != "Entered")
+            kct = num(cr, "Thickness (in)", "spot_kct", d.crush_thickness, 0.0, 10.0, 0.1, disabled=crush != "Entered")
+            st.markdown("**Downhole StandOff**")
+            so = num(cr, "Downhole StandOff (in)", "spot_so", 0.5, 0.0, 10.0, 0.05, disabled=not use_so)
+        with st.expander("Deviation Survey", expanded=False):
+            sv = _spot_table("spot_survey", pd.DataFrame({
+                "Measured Depth (ft)": [float(val("spot_top", 9275.0)), float(val("spot_bot", 9385.0))],
+                "True Vertical Depth (ft)": [float(val("spot_ttop", 9000.0)), float(val("spot_tbot", 9100.0))]}),
+                             num_rows="dynamic")
     with t2:
         c = st.columns(4)
-        rw = num(c[0], "Well radius (ft)", "spot_rw", d.rw, 0.05, 5.0, 0.001, "%.3f")
-        re_ = num(c[1], "Drainage radius (ft)", "spot_re", d.re, 10.0, 1e6, 100.0)
-        eff = num(c[2], "Perforation efficiency (fraction)", "spot_eff", d.perf_eff, 0.01, 1.0, 0.05)
-        kvkh = num(c[3], "Kv/Kh", "spot_kvkh", d.kv_kh, 0.001, 10.0, 0.05)
+        rw = num(c[0], "Well Radius (ft)", "spot_rw", d.rw, 0.05, 5.0, 0.001, "%.3f")
+        re_ = num(c[1], "Drainage Radius (ft)", "spot_re", d.re, 10.0, 1e6, 100.0, disabled=inflow in
+                  ("Babu-Odeh", "Goode-Wilkinson"))
+        eff = num(c[2], "Perforation Efficiency (fraction)", "spot_eff", d.perf_eff, 0.01, 1.0, 0.05, disabled=gpl)
+        add_h = num(c[3], "Additional Reservoir Height (ft)", "spot_addh", 0.0, 0.0, 1e4, 10.0, disabled=cased)
         c = st.columns(4)
-        top = num(c[0], "Top MD (ft)", "spot_top", d.top_md, 0.0, 4e4, 10.0)
-        bot = num(c[1], "Bottom MD (ft)", "spot_bot", d.bottom_md, 0.0, 4e4, 10.0)
-        ttop = num(c[2], "Top TVD (ft)", "spot_ttop", 9000.0, 0.0, 4e4, 10.0)
-        tbot = num(c[3], "Bottom TVD (ft)", "spot_tbot", 9100.0, 0.0, 4e4, 10.0)
-        c = st.columns(4)
-        ub = num(c[0], "Underbalance pressure (psi)", "spot_ub", d.underbalance, 0.0, 1e4, 50.0)
-        obg = num(c[1], "Overburden pressure gradient (psi/ft)", "spot_obg", d.ob_grad, 0.3, 2.0, 0.01)
-        key = "spot_relperm"
-        if key not in ss:
-            ss[key] = pd.DataFrame([["Oil", 0.15, 0.8, 1.5], ["Water", 0.2, 0.6, 1.5]], columns=SPOT_RELPERM_COLS)
-        st.caption("Relative permeability (Corey)")
-        rp = track(key, st.data_editor(ss[key], key=key + "_ed", num_rows="fixed", width="stretch",
-                                       disabled=["Phase"]))
-    with t3:
-        c = st.columns(4)
-        kh = num(c[0], "Horizontal permeability (md)", "spot_k", d.k, 1e-3, 1e5, 1.0)
-        phi = num(c[1], "Porosity (fraction)", "spot_phi", d.porosity, 0.01, 0.5, 0.01)
-        ucs = num(c[2], "Uniaxial compressive strength (psi)", "spot_ucs", d.ucs, 100.0, 30000.0, 500.0)
-        st.caption("A pseudo-log is generated at 1 ft (constant permeability, porosity and strength), as PROSPER's "
-                   "Generate with no log data available.")
+        num(c[0], "Mean Sea Level wrt Origin (ft)", "spot_msl", 0.0, -1e4, 1e4, 10.0)
+        num(c[1], "Sea Bed Depth wrt Origin (ft)", "spot_seabed", 600.0, -1e4, 2e4, 10.0)
+        dflt = pd.DataFrame([[float(val("spot_top", d.top_md)), float(val("spot_bot", d.bottom_md)),
+                              round(pr - wspot.G, 1), float(val("spot_ub", d.underbalance)),
+                              float(val("spot_obg", d.ob_grad)), 100 * wc, 0.25, t_f,
+                              float(val("spot_kvkh", d.kv_kh)), "Sandstone", np.nan, np.nan, "New and Old holes",
+                              wspot.TUTORIAL_GUN, d.perf_eff]], columns=SPOT_LAYER_COLS)
+        hide = [] if gpl else ["Gun (database row)", "Perforation Efficiency (fraction)"]
+        hide += [] if pm == "Re-perforating" else ["Reperforating"]
+        hide += ["Water Saturation (fraction)"] if phase_in else ["Wc (percent)"]
+        st.markdown("**Layer Data**" + (" (one layer for horizontal wells)" if horiz else ""))
+        lay = _spot_table("spot_layers", dflt, num_rows="dynamic", column_order=[c_ for c_ in SPOT_LAYER_COLS
+                                                                                if c_ not in hide],
+                          column_config={"Downhole Rock Type": st.column_config.SelectboxColumn(
+                              options=["Sandstone", "Carbonate"]),
+                              "Reperforating": st.column_config.SelectboxColumn(
+                              options=["New and Old holes", "New holes only", "Old holes only"])})
+        lay = pd.DataFrame(lay).dropna(subset=["Top MD (ft)", "Bottom MD (ft)"]).reset_index(drop=True)
+        if horiz:
+            lay = lay.iloc[:1]
+        if len(lay) == 0:
+            raise ValueError("SPOT: enter at least one layer (Top and Bottom MD).")
+        n_l = len(lay)
+        st.markdown("**Relative Permeability (Corey)**")
+        rp_d = pd.DataFrame([[i + 1, 0.15, 0.8, 1.5, 0.2, 0.6, 1.5] for i in range(n_l)], columns=SPOT_RP_COLS)
+        rp_t = pd.DataFrame(_spot_table("spot_rp", rp_d, num_rows="dynamic"))
+        inv_t = None
+        if inv != "No invasion":
+            st.markdown("**Invasion Data** (per layer; factors are the invaded-zone permeability / virgin "
+                        "permeability - Van Velzen: Kl 0.89 OBM / 0.91 WBM at P50, 0.52 / 0.62 at P90; Ks 0.05)")
+            inv_d = pd.DataFrame([[i + 1, 6.0, 0.0, 0.89, 0.05, 0.2] for i in range(n_l)], columns=SPOT_INV_COLS)
+            inv_t = pd.DataFrame(_spot_table("spot_invt", inv_d, num_rows="dynamic"))
+            with st.expander("Kl from a return-permeability core test (optional)"):
+                c = st.columns(6)
+                use_ret = flag(c[0].checkbox, "Use core test", "spot_ret_on", default=False)
+                r_loss = num(c[1], "Fluid loss at end of test (cm3)", "spot_ret_loss", 5.0, 0.0, 1e4, 0.5)
+                r_area = num(c[2], "Cross sectional area (cm2)", "spot_ret_area", 11.4, 0.1, 1e4, 0.5)
+                r_phi = num(c[3], "Core porosity (fraction)", "spot_ret_phi", 0.2, 0.01, 0.5, 0.01)
+                r_len = num(c[4], "Core plug length (cm)", "spot_ret_len", 5.0, 0.1, 100.0, 0.5)
+                r_kr = num(c[5], "Kreturn / Kinitial (fraction)", "spot_ret_kr", 0.8, 0.01, 1.0, 0.05)
+                if use_ret:
+                    kl_ret = wspot.return_perm_factor(r_loss, r_area, r_phi, r_len, 0.2, r_kr)
+                    inv_t["Kl (filtrate zone factor)"] = kl_ret
+                    st.caption(f"Filtrate-zone factor from the core test: Kl = {kl_ret:.4f} (all layers).")
+            calc_kw = None
+            if calc_inv:
+                c = st.columns(3)
+                meth = sel(c[0], "Invasion calculation", ["Fluid loss vs time", "Total fluid loss time and volume",
+                                                          "No fluid loss data - option 1",
+                                                          "No fluid loss data - option 2"], "spot_invm")
+                obm = sel(c[1], "Drilling mud", ["Water based mud", "Oil based mud"], "spot_obm") == "Oil based mud"
+                calc_kw = {"obm": obm}
+                if meth in ("Fluid loss vs time", "Total fluid loss time and volume"):
+                    c = st.columns(4)
+                    calc_kw["area"] = num(c[0], "Area of lab sample (cm2)", "spot_lab_a", 22.6, 0.1, 1e4, 0.5)
+                    calc_kw["dp_lab"] = num(c[1], "Differential pressure across the lab sample (psi)",
+                                            "spot_lab_dp", 500.0, 1.0, 1e4, 50.0)
+                    if meth == "Fluid loss vs time":
+                        fl_t = pd.DataFrame(_spot_table("spot_lab_fl", pd.DataFrame(
+                            {"Time (s)": [300.0, 1800.0], "Fluid Loss (cm3)": [2.0, 4.5]}), num_rows="dynamic")).dropna()
+                        calc_kw["times"], calc_kw["losses"] = fl_t["Time (s)"].to_numpy(), fl_t["Fluid Loss (cm3)"].to_numpy()
+                    else:
+                        calc_kw["time"] = num(c[2], "Total lab sample exposure time (s)", "spot_lab_t", 1800.0, 1.0,
+                                              1e6, 100.0)
+                        calc_kw["loss"] = num(c[3], "Total fluid loss through the lab sample (cm3)", "spot_lab_v",
+                                              5.0, 0.0, 1e4, 0.5)
+                elif meth == "No fluid loss data - option 1":
+                    c = st.columns(3)
+                    calc_kw["mu"] = num(c[0], "Viscosity of filtrate (cp)", "spot_fmu", 0.5, 0.01, 100.0, 0.1)
+                    calc_kw["solids_frac"] = num(c[1], "Mass fraction of solids", "spot_fsol", 0.3, 0.0, 0.9, 0.05)
+                    calc_kw["rho_solids"] = num(c[2], "Density of solids (sg)", "spot_frho", 4.2, 1.0, 6.0, 0.1)
+                else:
+                    c = st.columns(3)
+                    calc_kw["brine_sg"] = num(c[0], "Brine density (sg)", "spot_brine", 1.1, 1.0, 1.3, 0.01)
+                    calc_kw["owr"] = sel(c[1], "Oil / water ratio", ["80/20", "75/25"], "spot_owr", disabled=not obm)
+                    calc_kw["weight"] = sel(c[2], "Weighting material", ["Barite", "Calcium carbonate"], "spot_wmat")
+                calc_kw["method"] = meth
+        hz = None
+        if horiz:
+            st.markdown("**Horizontal well**")
+            c = st.columns(6)
+            hz = {"h": num(c[0], "Reservoir Height (ft)", "spot_hz_h", 100.0, 1.0, 1e4, 10.0),
+                  "zw": num(c[1], "Zwell (ft)", "spot_hz_zw", 50.0, 0.0, 1e4, 5.0),
+                  "xw": num(c[2], "Xwell (ft)", "spot_hz_xw", 2000.0, 0.0, 1e6, 100.0),
+                  "yw": num(c[3], "Ywell (ft)", "spot_hz_yw", 1000.0, 0.0, 1e6, 100.0),
+                  "length": num(c[4], "Reservoir Length (ft)", "spot_hz_lx", 4000.0, 1.0, 1e6, 100.0),
+                  "width": num(c[5], "Reservoir Width (ft)", "spot_hz_ly", 2000.0, 1.0, 1e6, 100.0)}
+            hz["reh"] = re_
+        with st.expander("Select Gun" + (" (the gun of every layer: the layer table's database row)" if gpl else ""),
+                         expanded=False):
+            gun = spot_gun_panel()
+            if gpl:
+                st.caption("Gun per layer: put the database row of each layer's gun in the layer table (the row "
+                           "number of a gun picked here is shown above).")
+        old_gun = None
+        if pm == "Re-perforating":
+            with st.expander("Select Old Gun", expanded=False):
+                old_gun = spot_gun_panel("spot_oldgun", "old gun")
+                old_eff = num(st.columns(4)[0], "Old holes perforation efficiency (fraction)", "spot_oldeff", 0.5,
+                              0.01, 1.0, 0.05, help="Rule of thumb: 0.5 for guns 20 years old or more.")
     with t4:
+        st.caption("Completion over the producing zone (it corrects the Lp against the API test casing - see "
+                   "the note below). ID from OD and weight (steel).")
+        csg = pd.DataFrame(_spot_table("spot_csg", pd.DataFrame([["Casing", 6.7, 10.0, "J55", 6.41, d.top_md,
+                                                                  d.bottom_md, 6.35]], columns=SPOT_CSG_COLS),
+                                       num_rows="dynamic", disabled=["Inner Diameter (in)"],
+                                       column_config={"Type": st.column_config.SelectboxColumn(
+                                           options=["Casing", "Tubing"]),
+                                           "Material": st.column_config.SelectboxColumn(
+                                           options=["J55", "L80", "P105", "P110"])}))
+        csg = csg.dropna(subset=["Outer Diameter (in)"]).copy()
+        csg["Inner Diameter (in)"] = np.sqrt(np.maximum(csg["Outer Diameter (in)"].astype(float) ** 2
+                                                        - csg["Weight (lb/ft)"].astype(float).fillna(0) / 2.6729, 0.01))
         c = st.columns(4)
-        c[0].text_input("Completion", "Casing 6.7 in, 10 lb/ft, J55 (ID 6.41 in)", disabled=True)
-        holdup = num(c[1], "Holdup depth (ft MD)", "spot_holdup", d.bottom_md, 0.0, 4e4, 10.0,
-                     help="The deepest point the gun can be run to. Above the layer bottom the rest of the layer is not "
-                          "perforated (partial penetration); the segment at the holdup depth has a smaller entry hole.")
-        st.caption("The completion and gun enter through the entry-hole size (PROSPER's 0.22427 in for the Tutorial 09 "
-                   "gun in this casing: 0.975 x the gun's entry hole, applied to every gun); other casings are not "
-                   "distinguished.")
+        holdup = num(c[0], "Holdup Depth (ft)", "spot_holdup", d.bottom_md, 0.0, 4e4, 10.0,
+                     help="The deepest point the gun can be run to: no perforations below it.")
+        num(c[1], "Minimum tubing restriction (in)", "spot_minres", 0.0, 0.0, 30.0, 0.125, "%.3f",
+            help="Limits the through-tubing gun size (the default restriction of the gun filter). 0 = none.")
+        if len(csg) and not (np.isclose(csg["Outer Diameter (in)"].iloc[0], 6.7) and
+                             np.isclose(csg["Weight (lb/ft)"].iloc[0], 10.0) and csg["Material"].iloc[0] == "J55") \
+                or len(csg[csg["Type"] == "Casing"]) > 1 or use_so or lp_corr != "Conventional":
+            st.info("Lp corrections for casing size / grade, several casing strings, downhole standoff and the "
+                    "Synthetic Rock correlation are not calibrated yet (factor 1 - the Tutorial 09 casing's Lp).")
     with t5:
-        gun = spot_gun_panel()
+        gp_on = flag(st.checkbox, "Gravel pack", "spot_gp_on", default=False)
+        gp = None
+        if gp_on:
+            c = st.columns(4)
+            gp = {"type": sel(c[0], "Gravel pack", ["Internal", "External"], "spot_gp_type",
+                              help="Internal: packed perforations through the casing; External: underreamed "
+                                   "(casing removed) and filled with gravel."),
+                  "k": num(c[1], "Gravel pack permeability (md)", "spot_gp_k", 1.2e5, 1.0, 1e7, 1e4, "%.0f",
+                           help="Golan & Whitson: 40/60 mesh 1.2-1.7e5 md, 20/40 1.2e5, 10/20 5-6.5e5, 8/12 1.7e6."),
+                  "top": num(c[2], "Top of gravel pack (ft)", "spot_gp_top", d.top_md, 0.0, 4e4, 10.0),
+                  "bottom": num(c[3], "Bottom of gravel pack (ft)", "spot_gp_bot", d.bottom_md, 0.0, 4e4, 10.0)}
+            c = st.columns(4)
+            gp["od"] = num(c[0], "Gravel pack outer diameter (in)", "spot_gp_od", 6.41, 0.5, 40.0, 0.25)
+            gp["id"] = num(c[1], "Gravel pack inner diameter (in)", "spot_gp_id", 4.0, 0.5, 40.0, 0.25)
+            gp["method"] = sel(c[2], "Calculation method", ["Golan 1 phase", "Geertsma 1 phase", "Geertsma 2 phase"],
+                               "spot_gp_meth")
+        else:
+            st.caption("No gravel pack. Tick to model an internal or external (underreamed) gravel pack.")
+    # ---- log data (needs the layers)
+    with t3:
+        top_all, bot_all = float(lay["Top MD (ft)"].min()), float(lay["Bottom MD (ft)"].max())
+        if "spot_log" not in ss or not isinstance(ss.get("spot_log"), pd.DataFrame):
+            _spot_set_table("spot_log", wspot.generate_log(top_all, bot_all, 1.0, d.k, d.porosity, d.ucs))
+        with st.expander("Generate" + (" (no log data available)" if log_in == "None Available" else ""),
+                         expanded=log_in == "None Available"):
+            c = st.columns(6)
+            g_top = num(c[0], "Top Reservoir MD (ft)", "spot_g_top", top_all, 0.0, 4e4, 10.0)
+            g_bot = num(c[1], "Bottom Reservoir MD (ft)", "spot_g_bot", bot_all, 0.0, 4e4, 10.0)
+            g_inc = num(c[2], "Log Depth Increment (ft)", "spot_g_inc", 1.0, 0.1, 100.0, 0.5)
+            g_k = num(c[3], "Horizontal Permeability (md)", "spot_k", d.k, 1e-3, 1e5, 1.0)
+            g_phi = num(c[4], "Porosity (fraction)", "spot_phi", d.porosity, 0.01, 0.5, 0.01)
+            g_ucs = num(c[5], "Uniaxial Compressive Strength (psi)", "spot_ucs", d.ucs, 100.0, 30000.0, 500.0)
+            if st.button("Generate", key="spot_gen"):
+                _spot_set_table("spot_log", wspot.generate_log(g_top, g_bot, g_inc, g_k, g_phi, g_ucs))
+            if log_in == "None Available":
+                cur = ss["spot_log"]
+                same = (len(cur) and np.isclose(cur["MD (ft)"].min(), g_top) and np.isclose(cur["MD (ft)"].max(),
+                        g_bot - (g_bot - g_top) % g_inc) and np.allclose(cur["Permeability (md)"].astype(float), g_k)
+                        and np.allclose(cur["Porosity"].astype(float), g_phi)
+                        and np.allclose(cur["UCS (psi)"].astype(float), g_ucs))
+                if not same:                                 # keep the generated log in step with these inputs
+                    keep = cur.set_index("MD (ft)")["Perforated"] if len(cur) else None
+                    new = wspot.generate_log(g_top, g_bot, g_inc, g_k, g_phi, g_ucs)
+                    if keep is not None:
+                        new["Perforated"] = new["MD (ft)"].map(keep).fillna(True).astype(bool)
+                    _spot_set_table("spot_log", new)
+        with st.expander("Fill-in / Perf by Cut-off / Perf by Depth", expanded=False):
+            rock0 = str(lay["Downhole Rock Type"].iloc[0] or "Sandstone")
+            c = st.columns(4)
+            ucs_eq = sel(c[0], "UCS Relation", wspot.UCS_EQS.get(rock0, wspot.UCS_EQS["Sandstone"]), "spot_ucseq")
+            twc_eq = sel(c[1], "TWC Relation", wspot.TWC_EQS.get(rock0, wspot.TWC_EQS["Sandstone"]), "spot_twceq")
+            rho_m = num(c[2], "Rock (matrix) bulk density (g/cc)", "spot_rhom", 2.65, 1.5, 3.2, 0.01)
+            if c[3].button("Fill-in", key="spot_fill"):
+                m_ = _f(lay["m"].iloc[0], None)
+                c_ = _f(lay["c"].iloc[0], None)
+                filled, done = wspot.fill_log(ss["spot_log"], rock0, ucs_eq, twc_eq, rho_m, 1.0,
+                                              None if m_ is None or np.isnan(m_) else m_,
+                                              None if c_ is None or np.isnan(c_) else c_)
+                _spot_set_table("spot_log", filled)
+                st.caption("Filled: " + (", ".join(done) or "nothing (no empty cells with the data they need)") +
+                           ". UCS / TWC relations are published correlations standing in for PROSPER's (to be "
+                           "calibrated).")
+            c = st.columns(5)
+            k_lo = num(c[0], "Lower Permeability (md)", "spot_cut_k", 0.0, 0.0, 1e5, 1.0)
+            u_hi = num(c[1], "Upper UCS (psi)", "spot_cut_ucs", 0.0, 0.0, 1e5, 100.0)
+            p_lo = num(c[2], "Lower Porosity (fraction)", "spot_cut_phi", 0.0, 0.0, 0.5, 0.01)
+            if c[3].button("Apply Cut-off", key="spot_cut"):
+                lg_ = ss["spot_log"].copy()
+                ok_ = np.ones(len(lg_), bool)
+                if k_lo > 0:
+                    ok_ &= lg_["Permeability (md)"].astype(float).to_numpy() > k_lo
+                if u_hi > 0:
+                    ok_ &= lg_["UCS (psi)"].astype(float).to_numpy() < u_hi
+                if p_lo > 0:
+                    ok_ &= lg_["Porosity"].astype(float).to_numpy() > p_lo
+                lg_["Perforated"] = ok_
+                _spot_set_table("spot_log", lg_)
+            c = st.columns(5)
+            d_up = num(c[0], "Upper Depth (ft)", "spot_pd_up", top_all, 0.0, 4e4, 10.0)
+            d_lo = num(c[1], "Lower Depth (ft)", "spot_pd_lo", bot_all, 0.0, 4e4, 10.0)
+            on_ = sel(c[2], "Set", ["Perforated", "Not perforated"], "spot_pd_on")
+            if c[3].button("Set Perforated", key="spot_pd"):
+                lg_ = ss["spot_log"].copy()
+                mdv = lg_["MD (ft)"].astype(float)
+                lg_.loc[(mdv >= d_up) & (mdv <= d_lo), "Perforated"] = on_ == "Perforated"
+                _spot_set_table("spot_log", lg_)
+        st.caption("Log rows (paste from Excel). Tick Perforated to perforate a row; rows outside every layer do not "
+                   "produce. Caliper sets the row's wellbore radius; Invasion Depth is used with Enter Mud "
+                   "Invasion Log. Gamma ray, resistivity, CBL and Net are for reference (not used by SPOT).")
+        log = pd.DataFrame(_spot_table("spot_log", ss["spot_log"], num_rows="dynamic", height=300,
+                                       column_config={"Perforated": st.column_config.CheckboxColumn()}))
+        log = log.dropna(subset=["MD (ft)"]).copy()
+        for c_ in wspot.LOG_COLS:
+            if c_ not in log:
+                log[c_] = np.nan if c_ != "Perforated" else True
+        log["Perforated"] = log["Perforated"].fillna(True).astype(bool)
+        if log[["Porosity", "Permeability (md)", "UCS (psi)"]].isna().any().any():
+            raise ValueError("SPOT: the log has empty porosity, permeability or UCS cells - enter them or use "
+                             "Fill-in.")
+    # ---- build the layers
     try:
-        rpv = pd.DataFrame(rp)[SPOT_RELPERM_COLS[1:]].apply(pd.to_numeric, errors="coerce").to_numpy()
-        relperm = (float(rpv[0, 0]), float(rpv[1, 0]), float(rpv[0, 1]), float(rpv[1, 1]), float(rpv[0, 2]),
-                   float(rpv[1, 2]))
-    except (KeyError, IndexError, ValueError):
-        relperm = d.relperm
-    if bot <= top + 1:
-        raise ValueError("SPOT: the bottom MD must be below the top MD.")
-    fi = wspot.SpotInputs(top, bot, ((top, ttop), (bot, tbot)), wt == "Deviated", inflow, rw, re_, eff, pr, ub, obg,
-                          wc, kvkh, kh, phi, ucs, kcf, kct, gun, relperm, holdup)
-    pwf_log = num(st.columns(4)[0], "Log results at FBHP (psia)", "spot_pwf_log", round(min(2764.7, pr * 0.7), 1),
-                  14.7, 3e4, 50.0)
-    curve = wspot.spot_ipr(pr, wc, fi, model, t_f, pwf_log)
-    ss["ipr_recipe"] = (wspot.spot_ipr, (pr, wc, fi, model, t_f), {})
-    with st.expander("SPOT layer and log results", expanded=False):
-        lay = curve.spot_layer
-        st.dataframe(pd.DataFrame({"Result": list(lay), "Value": list(lay.values())}), hide_index=True,
-                     width="stretch")
+        mdv, tvdv = (pd.DataFrame(sv).dropna().astype(float).to_numpy().T)
+        survey = tuple(zip(mdv, tvdv)) if len(mdv) >= 2 else d.survey
+    except (KeyError, ValueError):
+        survey = d.survey
+    casing = tuple((float(r["Outer Diameter (in)"]), _f(r["Weight (lb/ft)"], 0.0), str(r["Material"] or "J55"),
+                    float(r["Inner Diameter (in)"])) for _, r in csg.iterrows() if r["Type"] == "Casing")
+    db = spot_gun_db()
+    layers = []
+    for i, r in lay.iterrows():
+        rp_r = rp_t[rp_t["Layer"].astype(float) == i + 1]
+        rp_r = rp_r.iloc[0] if len(rp_r) else rp_t.iloc[0]
+        relperm = (_f(rp_r["Residual oil saturation"], 0.15), _f(rp_r["Residual water saturation"], 0.2),
+                   _f(rp_r["Oil end point kr"], 0.8), _f(rp_r["Water end point kr"], 0.6),
+                   _f(rp_r["Oil Corey exponent"], 1.5), _f(rp_r["Water Corey exponent"], 1.5))
+        g_i, eff_i = gun, eff
+        if gpl:
+            row_ = int(_f(r["Gun (database row)"], wspot.TUTORIAL_GUN))
+            g_i = wspot.gun_from_row(db.loc[row_ if row_ in db.index else wspot.TUTORIAL_GUN])
+            eff_i = _f(r["Perforation Efficiency (fraction)"], eff)
+        top_i, bot_i = float(r["Top MD (ft)"]), float(r["Bottom MD (ft)"])
+        if bot_i <= top_i:
+            raise ValueError(f"SPOT layer {i + 1}: the bottom MD must be below the top MD.")
+        lg_i = log.copy()
+        inv_r = None
+        if inv_t is not None and len(inv_t):
+            inv_r = inv_t[inv_t["Layer"].astype(float) == i + 1]
+            inv_r = inv_r.iloc[0] if len(inv_r) else inv_t.iloc[0]
+        pr_i = _f(r["Layer Pressure (psig)"], pr - wspot.G) + wspot.G
+        if inv == "Calculate invasion" and calc_kw:
+            msk = (lg_i["MD (ft)"] >= top_i - 1e-6) & (lg_i["MD (ft)"] <= bot_i + 1e-6)
+            md_ = lg_i.loc[msk, "MD (ft)"].to_numpy(float)
+            tv_ = np.interp(md_, *np.array(survey, float).T)
+            kw_ = {k_: v_ for k_, v_ in calc_kw.items() if k_ != "method"}
+            fil, sol = wspot.invasion_calc(calc_kw["method"], md_, tv_, lg_i.loc[msk, "Porosity"].to_numpy(float),
+                                           _f(inv_r["Irreducible water saturation"], 0.2) if inv_r is not None else 0.2,
+                                           rw, pr_i - wspot.G, mud_w, t_drill, t_down, **kw_)
+            lg_i.loc[msk, "Invasion Depth (in)"] = fil
+        inv_mode = {"Enter discrete Invasion depth": "Enter discrete invasion depth",
+                    "Enter Mud Invasion Log": "Enter mud invasion log"}.get(inv, inv)
+        wc_i = _f(r["Wc (percent)"], 100 * wc) / 100 if phase_in else wc
+        layers.append(wspot.SpotInputs(
+            top_md=top_i, bottom_md=bot_i, survey=survey, deviated=wt == "Deviated", inflow=inflow, rw=rw, re=re_,
+            perf_eff=eff_i, pr=pr_i, underbalance=_f(r["Under Balance Pressure (psi)"], 0.0),
+            ob_grad=_f(r["Overburden Pressure Gradient (psi/ft)"], 1.0), wc=wc_i, kv_kh=_f(r["Kv/Kh"], 1.0),
+            crush_factor=kcf, crush_thickness=kct, gun=g_i, relperm=relperm,
+            holdup_md=holdup if holdup < bot_i else None, log=lg_i,
+            t_f=_f(r["Bottom Hole Temperature (deg F)"], t_f), lp_corr=lp_corr,
+            rock=str(r["Downhole Rock Type"] or "Sandstone"), lower_completion=lower, perf_method=pm,
+            reperf=str(r.get("Reperforating") or "New and Old holes"), old_gun=old_gun,
+            old_perf_eff=old_eff if old_gun is not None else 0.5, invasion=inv_mode,
+            inv_depth=_f(inv_r["Discrete invasion depth (in)"], 0.0) if inv_r is not None else 0.0,
+            solids_depth=_f(inv_r["Solids invasion depth (in)"], 0.0) if inv_r is not None else 0.0,
+            kl=_f(inv_r["Kl (filtrate zone factor)"], 1.0) if inv_r is not None else 1.0,
+            ks=_f(inv_r["Ks (solids zone factor)"], 1.0) if inv_r is not None else 1.0,
+            crush_model=crush, non_darcy=nd, standoff=so if use_so else None, casing=casing or d.casing,
+            add_height=add_h, gravel=gp, well_type=wt, horizontal=hz,
+            sanding={"d": s_d, "rho_s": s_rho, "angle": s_ang, "rough": s_rough} if sand == "QinetiQ" else None,
+            sw=None if phase_in else _f(r["Water Saturation (fraction)"], 0.25)))
+    st.divider()
+    c = st.columns(4)
+    pwf_log = num(c[0], "Log results at FBHP (psia)", "spot_pwf_log",
+                  round(min(2764.7, layers[0].pr * 0.7), 1), 14.7, 3e4, 50.0)
+    gor_l = num(c[1], "GOR for the log gas rates (scf/STB)", "spot_gor", 800.0, 0.0, 1e6, 50.0)
+    curve = wspot.spot_ipr(layers[0].pr, layers[0].wc, layers if len(layers) > 1 else layers[0], model, t_f,
+                           pwf_log, gor_l)
+    ss["ipr_recipe"] = (wspot.spot_ipr, (layers[0].pr, layers[0].wc, layers if len(layers) > 1 else layers[0],
+                                         model, t_f), {})
+    provis = [v for k_, v in wspot.PROVISIONAL.items() if (
+        (k_ == "casing" and any(not (np.isclose(c_[0], 6.7) and np.isclose(c_[1], 10.0) and c_[2] == "J55")
+                                for c_ in casing[:1])) or (k_ == "multi_casing" and len(casing) > 1)
+        or (k_ == "standoff" and use_so) or (k_ == "synthetic" and lp_corr != "Conventional")
+        or (k_ == "carbonate" and any(L.rock == "Carbonate" for L in layers))
+        or (k_ == "qinetiq_crush" and crush != "Entered") or (k_ == "double_run" and pm != "Single Run")
+        or (k_ == "invasion_calc" and inv == "Calculate invasion") or (k_ == "sanding" and sand == "QinetiQ")
+        or (k_ == "non_darcy" and nd) or (k_ == "gravel" and gp is not None) or (k_ == "extensions" and ext == "No"))]
+    if provis:
+        st.warning("Not yet calibrated against PROSPER (provisional): " + "; ".join(provis) + ".")
+    with st.expander("SPOT Layer Results and Log Results", expanded=False):
+        st.dataframe(curve.spot_layers.T, width="stretch")
+        st.caption(f"Log Results at {pwf_log:g} psia FBHP (rates at that FBHP; AOF rates at atmospheric pressure; "
+                   "Cum = this row plus all rows below it).")
         st.dataframe(curve.spot_log.style.format(precision=5), hide_index=True, width="stretch", height=320)
         st.download_button("Download log results (CSV)", curve.spot_log.to_csv(index=False).encode(),
                            "spot_log_results.csv")

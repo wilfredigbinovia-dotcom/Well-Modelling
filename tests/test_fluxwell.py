@@ -5922,6 +5922,59 @@ def test_mud_acidization_t50():
     assert proj["inputs"]["sys_whp"] == 514.696 and proj["widgets"]["sys_vals_j"] == "5, 5.38858"
 
 
+def test_spot_rework_options_and_layers():
+    """SPOT rework (PROSPER manual 2.7.10): a generated 1 ft log reproduces the calibrated Tutorial 09 layer exactly;
+    two half layers add up to it; invasion past / short of the perforations, double-run and re-perforating shots,
+    entered water saturation, horizontal well models, gravel packs, non-Darcy and the log tools behave."""
+    import dataclasses as dc
+    from fluxwell import spot as SP
+    fl = _t05_oil()
+    G = 14.696
+    base = SP.SpotInputs()
+    c0 = SP.spot_ipr(4000 + G, 0.2, base, fl.m, 210.0, 2764.7)
+    f1 = dc.replace(base, log=SP.generate_log(9275, 9385, 1, 50, 0.18, 8000))
+    c1 = SP.spot_ipr(4000 + G, 0.2, f1, fl.m, 210.0, 2764.7)
+    assert abs(c1.aof - c0.aof) < 1e-6 and abs(c1.aof - 5224.4) < 0.1
+    halves = [dc.replace(f1, top_md=9275, bottom_md=9330), dc.replace(f1, top_md=9330, bottom_md=9385)]
+    assert abs(SP.spot_ipr(4000 + G, 0.2, halves, fl.m, 210.0).aof / c0.aof - 1) < 0.002
+    aof = lambda **kw: SP.spot_ipr(4000 + G, 0.2, dc.replace(f1, **kw), fl.m, 210.0).aof
+    shallow, deep = aof(invasion="Enter discrete invasion depth", inv_depth=4.0, kl=0.5), \
+        aof(invasion="Enter discrete invasion depth", inv_depth=30.0, kl=0.5)
+    assert deep < shallow < c0.aof
+    lg = SP.Spot(dc.replace(f1, invasion="Enter discrete invasion depth", inv_depth=30.0, kl=0.5),
+                 SP.blackoil_mobility(fl.m, 210.0)).log()
+    assert not lg["Beyond Zone"].any() and (lg["Damage skin"] > 0).all()
+    assert aof(perf_method="Double Run") > c0.aof
+    old = dc.replace(base.gun, spf=4.0)
+    both = aof(perf_method="Re-perforating", old_gun=old, old_perf_eff=0.5, reperf="New and Old holes")
+    only_old = aof(perf_method="Re-perforating", old_gun=old, old_perf_eff=0.5, reperf="Old holes only")
+    assert only_old < c0.aof < both
+    assert aof(non_darcy=True) < c0.aof
+    gp = {"type": "Internal", "k": 1.2e5, "top": 9275, "bottom": 9385, "od": 6.41, "id": 4.0,
+          "method": "Golan 1 phase"}
+    assert aof(gravel=gp) < c0.aof
+    # water saturation in place of the water cut: the water cut it implies gives the same IPR
+    sw = SP.Spot(f1, SP.blackoil_mobility(fl.m, 210.0)).saturation()[0]
+    c_sw = SP.spot_ipr(4000 + G, 0.2, dc.replace(f1, sw=sw), fl.m, 210.0)
+    assert abs(c_sw.aof / c0.aof - 1) < 1e-4
+    hz = {"h": 100.0, "zw": 50.0, "xw": 2000.0, "yw": 1000.0, "length": 4000.0, "width": 2000.0, "reh": 4200.0}
+    for eq in ("Economides-Joshi", "Borisov", "Babu-Odeh", "Goode-Wilkinson"):
+        a = aof(well_type="Horizontal", deviated=False, inflow=eq, horizontal=hz)
+        assert 100 < a < 1e5, eq
+    # log tools: generate, fill-in, invasion calculation, return permeability
+    g = SP.generate_log(9000, 9010, 0.5, 20, 0.2, 3000)
+    assert len(g) == 21 and g["Perforated"].all()
+    g.loc[:, ["UCS (psi)", "TWC (psi)"]] = np.nan
+    g["Compressional Sonic (us/ft)"], g["FDC (g/cc)"] = 80.0, 2.3
+    filled, done = SP.fill_log(g, "Sandstone", "Equation 1 (density, compressional sonic)", "Equation 5 (UCS)")
+    assert done == ["UCS (psi)", "TWC (psi)"] and np.allclose(filled["TWC (psi)"], 2.5 * filled["UCS (psi)"])
+    assert 1000 < filled["UCS (psi)"].iloc[0] < 40000
+    fil, sol = SP.invasion_calc("No fluid loss data - option 2", np.arange(9000, 9011.0), np.arange(9000, 9011.0),
+                                np.full(11, 0.2), 0.2, 0.354, 4000, 10.5, 10, 2, obm=True)
+    assert (fil > 0).all() and fil[0] > fil[-1]          # upper rows drilled earlier: exposed longer
+    assert SP.return_perm_factor(5.0, 11.4, 0.2, 5.0, 0.2, 0.8) < 0.8
+
+
 def test_spot_gun_database_pxwell():
     """PROSPER's perforating gun database (PXWell.pxdb, decoded): 824 guns in PROSPER's order - 388 wireline then
     436 TCP - first rows as PROSPER's gun table (Halliburton HMX SUPER DP 1.5625 in, 4 spf, 0 deg, Lp 11.34 in;

@@ -112,13 +112,40 @@ def gun_from_row(row) -> SpotGun:
                    cement_strength=float(row["Cement sec 1 (psi)"]))
 
 
+# ---------------------------------------------------------------- PROSPER's SPOT screens beyond Tutorial 09
+# Everything below the calibrated core follows the PROSPER manual (SPOT, pp. 445-493). Where the manual names a
+# Shell correlation without giving it, a placeholder is used and listed in PROVISIONAL - each is to be calibrated
+# against PROSPER runs; until then the factor is neutral (the Tutorial 09 result is unchanged).
+PROVISIONAL = {
+    "casing": "Lp correction for a casing other than the test casing (OD, weight, grade): factor 1",
+    "standoff": "Lp correction for the downhole standoff: factor 1",
+    "synthetic": "Synthetic Rock Lp correlation: as Conventional",
+    "carbonate": "Carbonate Lp correlation: as Sandstone",
+    "multi_casing": "Lp through 2 or 3 casing strings: factor 1",
+    "qinetiq_crush": "QinetiQ Test Results crushed zone: factor 0.2, thickness 0.5 in",
+    "double_run": "Double run / re-perforation: shots add (no overlap), shot-weighted Lp and entry hole",
+    "invasion_calc": "Calculated invasion: static filter-cake filtration (Darcy cake, piston-like filtrate)",
+    "ucs_twc": "UCS / TWC equations 1-7: published correlations (McNally, Moos, Vernik, Rzhevsky, TWC = 2.5 / 3 UCS)",
+    "sanding": "QinetiQ sanding: Shields traction (horizontal perforations) / settling velocity (vertical)",
+    "non_darcy": "Perforation non-Darcy skin: Forchheimer flow through the crushed zone (McLeod)",
+    "gravel": "Gravel pack: linear Darcy + Forchheimer through the packed tunnels / radial through the pack",
+    "extensions": "SPOT IPR Extensions = No: as Yes",
+}
+QINETIQ_CRUSH = (0.2, 0.5)                       # permeability factor, thickness (in) - provisional
+HARDNESS = {"J55": 180, "L80": 230, "P105": 275, "P110": 320}
+LOG_COLS = ["MD (ft)", "Porosity", "Permeability (md)", "UCS (psi)", "TWC (psi)", "FDC (g/cc)",
+            "Compressional Sonic (us/ft)", "Shear Sonic (us/ft)", "Caliper (in)", "Gamma Ray (API)",
+            "Resistivity (ohm.m)", "CBL (mV)", "Net", "Invasion Depth (in)", "Perforated"]
+
+
 @dataclass
 class SpotInputs:
+    """One SPOT layer and the options it is calculated with (PROSPER's Options / Layers / Completion tabs)."""
     top_md: float = 9275.0
     bottom_md: float = 9385.0
     survey: tuple = ((9275.0, 9000.0), (9385.0, 9100.0))     # (MD, TVD) ft
     deviated: bool = True
-    inflow: str = "Fetkovich"        # "Fetkovich" | "Vogel"
+    inflow: str = "Fetkovich"        # "Fetkovich" | "Vogel" | horizontal: "Economides-Joshi" | "Borisov" | ...
     rw: float = 0.354                # ft
     re: float = 4200.0               # drainage radius, ft
     perf_eff: float = 0.9
@@ -127,7 +154,7 @@ class SpotInputs:
     ob_grad: float = 1.0             # psi/ft
     wc: float = 0.2                  # fraction
     kv_kh: float = 0.1
-    k: float = 50.0                  # md
+    k: float = 50.0                  # md (the log's when there is no log)
     porosity: float = 0.18
     ucs: float = 8000.0              # psi
     crush_factor: float = 0.1
@@ -135,6 +162,195 @@ class SpotInputs:
     gun: SpotGun = field(default_factory=SpotGun)
     relperm: tuple = (0.15, 0.2, 0.8, 0.6, 1.5, 1.5)   # Sor, Swr, kro end, krw end, n oil, n water
     holdup_md: float | None = None   # deepest point the gun reaches (None: the layer bottom)
+    # --- options beyond Tutorial 09 (defaults reproduce it) ---
+    log: object = None               # DataFrame with LOG_COLS (None: a constant 1 ft log of k, porosity, ucs)
+    t_f: float | None = None         # layer temperature (F) for the PVT (None: the IPR's)
+    lp_corr: str = "Conventional"    # | "Synthetic Rock"
+    rock: str = "Sandstone"          # | "Carbonate"
+    lower_completion: str = "Cased and Perforated"   # | "Open Hole" | "Open Hole Perforated"
+    perf_method: str = "Single Run"  # | "Double Run" | "Re-perforating"
+    reperf: str = "New and Old holes"    # | "New holes only" | "Old holes only"
+    old_gun: SpotGun | None = None
+    old_perf_eff: float = 0.5
+    invasion: str = "No invasion"    # | "Enter discrete invasion depth" | "Enter mud invasion log" | "Calculate invasion"
+    inv_depth: float = 0.0           # in (discrete), filtrate zone
+    solids_depth: float = 0.0        # in, solids-invaded zone (calculated with spurt, or entered)
+    kl: float = 0.89                 # filtrate-zone permeability factor
+    ks: float = 0.05                 # solids-zone permeability factor
+    crush_model: str = "Entered"     # | "QinetiQ Test Results"
+    non_darcy: bool = False
+    standoff: float | None = None    # in (None: centralised)
+    casing: tuple = ((6.7, 10.0, "J55", 6.41),)      # (OD in, lb/ft, grade, ID in) strings over the layer
+    add_height: float = 0.0          # ft below the open hole (open-hole completions)
+    gravel: dict | None = None       # {"type": "Internal"|"External", "k": md, "top", "bottom", "od", "id",
+                                     #  "method": "Golan 1 phase"|"Geertsma 1 phase"|"Geertsma 2 phase"}
+    sanding: dict | None = None      # {"d": in, "rho_s": lb/gal, "angle": deg, "rough": in}
+    horizontal: dict | None = None   # {"h", "xw", "yw", "zw", "length", "width", "reh"} (horizontal wells)
+    well_type: str = "Deviated"      # | "Vertical" | "Horizontal"
+    sw: float | None = None          # water saturation entered instead of the water cut (Input Phase Ratios = No)
+
+
+def generate_log(top, bottom, step=1.0, k=50.0, phi=0.18, ucs=8000.0, twc=None):
+    """PROSPER's Generate (no log data available): constant rows every step ft from top to bottom inclusive."""
+    import pandas as pd
+    md = np.arange(top, bottom + 1e-6, step)
+    df = pd.DataFrame({c: np.nan for c in LOG_COLS}, index=range(len(md)))
+    df["MD (ft)"], df["Porosity"], df["Permeability (md)"], df["UCS (psi)"] = md, float(phi), float(k), float(ucs)
+    df["TWC (psi)"] = 2.5 * float(ucs) if twc is None else float(twc)
+    df["Net"], df["Perforated"] = 1.0, True
+    return df
+
+
+# ---- log Fill-in correlations (provisional: PROSPER's equations 1-7 are Shell's; published forms are used)
+UCS_EQS = {"Sandstone": ["Equation 1 (density, compressional sonic)", "Equation 2 (density, shear sonic)",
+                         "Equation 3 (porosity)", "Equation 4 (TWC)"],
+           "Carbonate": ["Equation 5 (porosity)", "Equation 6 (TWC)"]}
+TWC_EQS = {"Sandstone": ["Equation 1 (density, compressional sonic)", "Equation 2 (density, compressional sonic)",
+                         "Equation 3 (density, shear sonic)", "Equation 4 (porosity)", "Equation 5 (UCS)"],
+           "Carbonate": ["Equation 6 (porosity)", "Equation 7 (UCS)"]}
+MPA = 145.0377
+
+
+def ucs_relation(eq, phi=None, rho=None, dtc=None, dts=None, twc=None):
+    """UCS (psi). Eq 1: Moos et al. (2003) from density and compressional sonic; Eq 2: Bradford et al. (1998)
+    from the dynamic Young's modulus (density, shear sonic, Poisson 0.25); Eq 3: Vernik et al. (1993) clean
+    sandstone; Eq 4: TWC / 2.5; Eq 5: Rzhevsky & Novick (1971) carbonate; Eq 6: TWC / 3."""
+    n = eq.split()[1]
+    if n == "1":
+        vp = 304800.0 / dtc                               # m/s
+        return MPA * 3.87 * np.exp(1.14e-10 * rho * 1000 * vp ** 2)
+    if n == "2":
+        vs = 304800.0 / dts
+        e_gpa = 2 * rho * 1000 * vs ** 2 * 1.25 / 1e9     # E = 2 G (1 + nu), nu 0.25
+        return MPA * np.maximum(2.28 + 4.1089 * e_gpa, 0.0)
+    if n == "3":
+        return MPA * 254 * np.maximum(1 - 2.7 * phi, 0.0) ** 2
+    if n == "4":
+        return twc / 2.5
+    if n == "5":
+        return MPA * 276 * np.maximum(1 - 3 * phi, 0.0) ** 2
+    return twc / 3.0
+
+
+def twc_relation(eq, phi=None, rho=None, dtc=None, dts=None, ucs=None):
+    """TWC (psi): 2.5 x the sandstone UCS relations (Eqs 1-4 from the same data, 5 from UCS), 3 x for carbonate."""
+    n = eq.split()[1]
+    if n in ("1", "2"):
+        return 2.5 * ucs_relation("Equation 1", rho=rho, dtc=dtc)
+    if n == "3":
+        return 2.5 * ucs_relation("Equation 2", rho=rho, dts=dts)
+    if n == "4":
+        return 2.5 * ucs_relation("Equation 3", phi=phi)
+    if n == "5":
+        return 2.5 * ucs
+    if n == "6":
+        return 3.0 * ucs_relation("Equation 5", phi=phi)
+    return 3.0 * ucs
+
+
+def fill_log(log, rock="Sandstone", ucs_eq=None, twc_eq=None, rho_matrix=2.65, rho_fluid=1.0, m=None, c=None):
+    """PROSPER's Fill-in: compute the empty columns - porosity from FDC (oil / water wells), permeability from
+    log10 k = m phi + c, UCS and TWC from the chosen relations. Returns (filled log, list of columns filled)."""
+    df = log.copy()
+    done = []
+    num = lambda col: df[col].astype(float) if col in df else None
+    if df["Porosity"].isna().any() and "FDC (g/cc)" in df and df["FDC (g/cc)"].notna().any():
+        phi = (rho_matrix - df["FDC (g/cc)"].astype(float)) / (rho_matrix - rho_fluid)
+        df["Porosity"] = df["Porosity"].fillna(phi.clip(0.0, 0.5))
+        done.append("Porosity")
+    if df["Permeability (md)"].isna().any() and m is not None and c is not None:
+        df["Permeability (md)"] = df["Permeability (md)"].fillna(10 ** (m * df["Porosity"].astype(float) + c))
+        done.append("Permeability (md)")
+    kw = dict(phi=num("Porosity"), rho=num("FDC (g/cc)"), dtc=num("Compressional Sonic (us/ft)"),
+              dts=num("Shear Sonic (us/ft)"))
+    if df["UCS (psi)"].isna().any() and ucs_eq:
+        df["UCS (psi)"] = df["UCS (psi)"].fillna(ucs_relation(ucs_eq, twc=num("TWC (psi)"), **kw))
+        done.append("UCS (psi)")
+    if df["TWC (psi)"].isna().any() and twc_eq:
+        df["TWC (psi)"] = df["TWC (psi)"].fillna(twc_relation(twc_eq, ucs=num("UCS (psi)"), **kw))
+        done.append("TWC (psi)")
+    return df, done
+
+
+# ---- mud invasion (PROSPER's "Calculate invasion" - provisional: static filtration through a Darcy filter cake)
+def invasion_calc(method, md, tvd, phi, swi, rw_ft, pr_psig, mud_ppg, drill_days, down_days, **d):
+    """(filtrate depth, solids depth) in inches for every log row. Overbalance = mud hydrostatic - layer pressure;
+    each depth is exposed for the downtime plus the drilling time below it (equivalent constant rate of
+    penetration). Filtrate volume per area V = spurt + m sqrt(dP t): m from the lab (Fluid loss vs time, Total
+    fluid loss) scaled with sqrt(dP / dP_lab), or from the cake (k_cake 80e-21 m2 OBM / 160e-21 WBM, porosity
+    0.05) for the no-data options. Radial piston-like invasion: pi ((rw+L)^2 - rw^2) phi (1 - Swi) = 2 pi rw V."""
+    md, tvd, phi = (np.asarray(x, float) for x in (md, tvd, phi))
+    dp = np.maximum(0.052 * mud_ppg * tvd - pr_psig, 0.0)                       # psi
+    span = max(md.max() - md.min(), 1e-9)
+    t = (down_days + drill_days * (md.max() - md) / span) * 86400.0            # s
+    spurt = 0.0
+    if method == "Fluid loss vs time":
+        tt, vv = np.asarray(d["times"], float), np.asarray(d["losses"], float)     # s, cm3
+        A = np.vstack([np.ones_like(tt), np.sqrt(tt)]).T
+        (sp_, mm), *_ = np.linalg.lstsq(A, vv / d["area"], rcond=None)            # cm, cm/s^0.5
+        spurt, m = max(sp_, 0.0), mm / np.sqrt(d["dp_lab"])
+    elif method == "Total fluid loss time and volume":
+        m = d["loss"] / d["area"] / np.sqrt(d["time"]) / np.sqrt(d["dp_lab"])
+    else:
+        obm = d.get("obm", False)
+        kc = (80e-21 if obm else 160e-21)                                           # m2
+        if method == "No fluid loss data - option 2":
+            rho_s = 4.2 if d.get("weight", "Barite") == "Barite" else 2.7
+            brine = d.get("brine_sg", 1.1)
+            liq = (0.8 * 0.8 + 0.2 * brine) if (obm and d.get("owr", "80/20") == "80/20") else \
+                  ((0.75 * 0.8 + 0.25 * brine) if obm else brine)
+            fsm = np.clip((mud_ppg / 8.345 - liq) / (rho_s - liq), 0.01, 0.6)
+            mu = d.get("mu", 2.0 if obm else 0.5)
+        else:
+            rho_s, w = d["rho_solids"], d["solids_frac"]                          # sg, mass fraction
+            fsm = np.clip(w * (mud_ppg / 8.345) / rho_s, 0.01, 0.6)
+            mu = d["mu"]
+        fsc = 0.95
+        # V/A = sqrt(2 kc dP t fsm / (mu (fsc - fsm)))   (SI) -> cm, per sqrt(psi s)
+        m = np.sqrt(2 * kc * 6894.76 * fsm / (mu * 1e-3 * (fsc - fsm))) * 100.0
+    v = spurt + m * np.sqrt(dp * t)                                              # cm3 / cm2 = cm
+    rw = rw_ft * 30.48
+    fil = np.sqrt(rw ** 2 + 2 * rw * v / np.maximum(phi * (1 - swi), 1e-6)) - rw
+    sol = np.sqrt(rw ** 2 + 2 * rw * spurt / np.maximum(phi, 1e-6)) - rw if spurt > 0 else np.zeros_like(fil)
+    return fil / 2.54, np.minimum(sol, fil) / 2.54
+
+
+def return_perm_factor(loss_cm3, area_cm2, phi, length_cm, swi, k_return):
+    """Filtrate-zone permeability factor from a return-permeability core test: the filtrate fills a length
+    x = V / (A phi (1 - Swi)) of the plug; the measured return permeability is the series average."""
+    x = min(loss_cm3 / (area_cm2 * phi * (1 - swi)), length_cm)
+    kr = k_return
+    if x <= 1e-9:
+        return 1.0
+    return float(np.clip(x / (length_cm / kr - (length_cm - x)), 1e-4, 1.0))
+
+
+# ---- QinetiQ sanding (provisional) -----------------------------------------------------------------------
+def sand_produced(v_ft_s, rho_f, mu_cp, d_in, rho_s_ppg, angle, rough_in, rp_in, vertical_well):
+    """True when the tunnel-mouth velocity moves failed sand: horizontal perforations (angle < 45) by traction
+    (Shields 0.047, log-law velocity over the roughness), vertical ones by suspension (settling velocity, Schiller-
+    Naumann drag). Vertical wells use the horizontal model; deviated / horizontal wells the model of the angle."""
+    g, d = 9.81, d_in * 0.0254
+    rf, rs = rho_f * 16.0185, rho_s_ppg * 119.826
+    mu = mu_cp * 1e-3
+    u_star = np.sqrt(0.047 * (rs - rf) * g * d / rf)
+    rh = max(rp_in * 0.0254 / 2, 1e-4)
+    ks = max(rough_in * 0.0254, d)
+    u_trac = u_star * 5.75 * np.log10(max(12 * rh / ks, 1.01))
+    w = (rs - rf) * g * d ** 2 / (18 * mu)
+    for _ in range(30):
+        re = rf * w * d / mu
+        cd = 24 / max(re, 1e-9) * (1 + 0.15 * re ** 0.687)
+        w = np.sqrt(4 * (rs - rf) * g * d / (3 * cd * rf))
+    v = v_ft_s * 0.3048
+    horiz = vertical_well or angle < 45
+    return bool(v > u_trac) if horiz else bool(v > w)
+
+
+def _casing_lp_factor(f: SpotInputs):
+    """Provisional: 1 (see PROVISIONAL). Hook for the casing (wall x hardness against the test casing), number of
+    strings, downhole standoff, Synthetic Rock and carbonate corrections once calibrated."""
+    return 1.0
 
 
 def corey(sw, rp):
@@ -157,8 +373,29 @@ class Spot:
         self.f = f
         self.mob_fn = mob_fn
         md_s, tvd_s = np.array(f.survey, float).T
-        n = int(round(f.bottom_md - f.top_md)) + 1
-        self.md = f.top_md + np.arange(n)
+        if f.log is not None and len(f.log):
+            lg = f.log[(f.log["MD (ft)"] >= f.top_md - 1e-6) & (f.log["MD (ft)"] <= f.bottom_md + 1e-6)]
+            if len(lg) == 0:
+                raise ValueError(f"SPOT: no log rows between {f.top_md:g} and {f.bottom_md:g} ft MD.")
+            lg = lg.sort_values("MD (ft)")
+            self.md = lg["MD (ft)"].to_numpy(float)
+            col = lambda c, dflt: lg[c].astype(float).fillna(dflt).to_numpy() if c in lg else np.full(len(lg), dflt)
+            self.k_row = col("Permeability (md)", f.k)
+            self.phi_row = col("Porosity", f.porosity)
+            self.ucs_row = col("UCS (psi)", f.ucs)
+            self.twc_row = col("TWC (psi)", 2.5 * f.ucs)
+            cal = col("Caliper (in)", np.nan)
+            self.rw_row = np.where(np.isfinite(cal) & (cal > 0), cal / 24.0, f.rw)
+            self.inv_row = col("Invasion Depth (in)", 0.0)
+            self.tick = lg["Perforated"].fillna(True).astype(bool).to_numpy() if "Perforated" in lg else \
+                np.ones(len(lg), bool)
+        else:
+            n = int(round(f.bottom_md - f.top_md)) + 1
+            self.md = f.top_md + np.arange(n)
+            self.k_row, self.phi_row, self.ucs_row = (np.full(n, v) for v in (f.k, f.porosity, f.ucs))
+            self.twc_row, self.rw_row = np.full(n, 2.5 * f.ucs), np.full(n, f.rw)
+            self.inv_row, self.tick = np.zeros(n), np.ones(n, bool)
+        self.k_mean = float(np.mean(self.k_row))
         self.tvd = np.interp(self.md, md_s, tvd_s, left=None, right=None)
         if len(md_s) >= 2:
             dt = np.interp(f.bottom_md, md_s, tvd_s) - np.interp(f.top_md, md_s, tvd_s)
@@ -168,55 +405,139 @@ class Spot:
         self.h_tvd = (f.bottom_md - f.top_md) * self.cos
         self.A = np.log(f.re / f.rw) - 0.75
         self.holdup = f.bottom_md if f.holdup_md is None else float(f.holdup_md)
-        self.perf = self.md <= self.holdup + 1e-9
+        self.open_hole = f.lower_completion == "Open Hole"
+        self.perf = (self.md <= self.holdup + 1e-9) & (self.tick | self.open_hole)
+        if self.open_hole:
+            self.perf = np.ones(len(self.md), bool)
         self.n_perf = int(self.perf.sum())
+        if self.n_perf == 0:
+            raise ValueError(f"SPOT: no perforated rows in the layer {f.top_md:g}-{f.bottom_md:g} ft MD.")
+        self.first = int(np.argmax(self.perf))
         self._geo = None
 
+    # shot sets: (gun, efficiency, multiplier)
+    def shot_sets(self):
+        f = self.f
+        new = [(f.gun, f.perf_eff, 2.0 if f.perf_method == "Double Run" else 1.0)]
+        if f.perf_method != "Re-perforating" or f.old_gun is None:
+            return new
+        old = [(f.old_gun, f.old_perf_eff, 1.0)]
+        return {"New holes only": new, "Old holes only": old}.get(f.reperf, new + old)
+
+    def invasion_depths(self):
+        f = self.f
+        if f.invasion == "No invasion":
+            z = np.zeros(len(self.md))
+            return z, z
+        if f.invasion == "Enter discrete invasion depth":
+            return np.full(len(self.md), f.inv_depth), np.full(len(self.md), min(f.solids_depth, f.inv_depth))
+        # mud invasion log, or calculated (written to the log's invasion column by the caller)
+        return self.inv_row, np.minimum(np.full(len(self.md), f.solids_depth), self.inv_row)
+
     def log(self):
-        f, gun = self.f, self.f.gun
+        f = self.f
         p_g = f.pr - G
         sv = f.ob_grad * self.tvd
-        lp = penetration(gun, f.ucs, sv, p_g)
-        ehd = np.full_like(lp, gun.ehd * EHD_FACTOR)
-        if self.holdup <= self.f.bottom_md + 1e-9:
+        sets = self.shot_sets()
+        n_tot = sum(g.spf * e * m for g, e, m in sets)
+        lp = sum(g.spf * e * m * penetration(g, self.ucs_row, sv, p_g) for g, e, m in sets) / n_tot
+        lp = lp * _casing_lp_factor(f)
+        ehd = np.full_like(lp, sum(g.spf * e * m * g.ehd for g, e, m in sets) / n_tot * EHD_FACTOR)
+        if self.holdup <= f.bottom_md + 1e-9:
             ehd[np.abs(self.md - self.holdup) < 0.5] *= HOLDUP_EHD
+        phasing = kt_phasing(sets[0][0].phasing)
         rp_in = ehd / 2
-        n_eff = gun.spf * f.perf_eff / self.cos
-        sp = np.array([wcomp.kt_perforation_skin(f.rw, L / 12, r / 12, n_eff, kt_phasing(gun.phasing), f.kv_kh)["perforation"]
-                       for L, r in zip(lp, rp_in)])
-        sc = (1 / f.crush_factor - 1) * np.log((rp_in + f.crush_thickness) / rp_in) / (n_eff * lp / 12)
+        n_eff = n_tot / self.cos
+        kcf, kct = (f.crush_factor, f.crush_thickness) if f.crush_model == "Entered" else QINETIQ_CRUSH
+        ld_in, ls_in = self.invasion_depths()
+        kd_fac = np.where(ld_in > 0, f.kl, 1.0)
+        rw = self.rw_row
+        rw_gp = rw.copy()
+        gp = f.gravel
+        if gp and gp.get("type") == "External":
+            in_gp = (self.md >= gp["top"] - 1e-6) & (self.md <= gp["bottom"] + 1e-6)
+            rw_gp = np.where(in_gp, np.maximum(gp["od"] / 24.0, rw), rw)
+        sp, sc, sd = (np.zeros(len(lp)) for _ in range(3))
+        beyond = np.ones(len(lp), bool)
+        for i in range(len(lp)):
+            ld, kd = ld_in[i] / 12, kd_fac[i] * self.k_row[i]
+            if self.open_hole:
+                sd[i] = _two_zone_hawkins(self.k_row[i], rw_gp[i], ls_in[i] / 12, f.ks * self.k_row[i], ld, kd)
+                lp[i], ehd[i], beyond[i] = 0.0, 0.0, ld <= 0
+                continue
+            base = wcomp.kt_perforation_skin(rw_gp[i], lp[i] / 12, rp_in[i] / 12, n_eff, phasing, f.kv_kh)["perforation"]
+            sp[i] = base
+            beyond[i] = ld <= 0 or lp[i] / 12 > ld
+            if ld > 0:
+                tot = wcomp.karakas_tariq(self.k_row[i], rw_gp[i], lp[i] / 12, rp_in[i] / 12, n_eff, phasing,
+                                          f.kv_kh, ld, kd)["total"]
+                sd[i] = tot - base + (_two_zone_hawkins(self.k_row[i], rw_gp[i], ls_in[i] / 12, f.ks * self.k_row[i],
+                                                        ls_in[i] / 12, f.ks * self.k_row[i]) if ls_in[i] > 0 else 0.0)
+            k_around = 1.0 if beyond[i] else kd_fac[i]
+            sc[i] = (1 / kcf - 1 / k_around) * np.log((rp_in[i] + kct) / rp_in[i]) / (n_eff * lp[i] / 12)
+        sgp = self.gravel_skin(rp_in, n_eff)
         sdev = self.deviation_skin()
         off = ~self.perf
-        lp, ehd, sp, sc = (np.where(off, 0.0, x) for x in (lp, ehd, sp, sc))
-        dk = KING[0] * f.k ** -KING[1]
-        db = BEHRMANN[0] * f.porosity * f.k ** -BEHRMANN[1]
+        lp, ehd, sp, sc, sd, sgp = (np.where(off, 0.0, x) for x in (lp, ehd, sp, sc, sd, sgp))
+        dk = KING[0] * self.k_row ** -KING[1]
+        db = BEHRMANN[0] * self.phi_row * self.k_row ** -BEHRMANN[1]
         import pandas as pd
         return pd.DataFrame({
             "Measured depth (ft)": self.md, "True vertical depth (ft)": self.tvd,
+            "Porosity": self.phi_row, "Permeability (md)": self.k_row, "UCS (psi)": self.ucs_row,
+            "TWC (psi)": self.twc_row, "Perforated": self.perf,
             "Penetration Lp (in)": lp, "Min Lp (in)": np.maximum(MINLP[0] * lp + MINLP[1], 0.0),
             "Entry hole diameter (in)": ehd,
             "Reservoir pressure (psig)": p_g, "Underbalance Behrmann (psig)": p_g - db,
             "Underbalance King (psig)": p_g - dk, "Underbalance user (psig)": p_g - f.underbalance - G,
             "Completion fluid density (lb/gal)": (p_g - f.underbalance) / (0.0519481 * self.tvd),
-            "Perforation skin": sp, "Damage skin": 0.0, "Damage, perf, crush skin": sp + sc, "Crush skin": sc,
+            "Perforation skin": sp, "Damage skin": sd, "Damage, perf, crush skin": sp + sc + sd, "Crush skin": sc,
+            "Gravel pack skin": sgp,
             "Deviation skin": np.where(off, 0.0, sdev), "Partial penetration skin": np.where(off, 0.0, self.partial_skin()),
+            "Invasion depth (in)": ld_in, "Beyond Zone": beyond & self.perf,
             "Near-wellbore effective vertical stress (psig)": sv - (p_g - f.underbalance) - G})
+
+    def gravel_skin(self, rp_in, n_eff):
+        """Darcy skin of the gravel pack (provisional): internal - the packed tunnels through casing and cement,
+        S = k L / (0.15913 k_gp n A_p) with L = rw - casing ID / 2; external - radial flow through the pack from
+        the underreamed radius to the screen, (k / k_gp) ln(r_gp / r_screen)."""
+        f, gp = self.f, self.f.gravel
+        out = np.zeros(len(self.md))
+        if not gp:
+            return out
+        in_gp = (self.md >= gp["top"] - 1e-6) & (self.md <= gp["bottom"] + 1e-6)
+        if gp.get("type") == "External":
+            r_o, r_i = gp["od"] / 24.0, max(gp.get("id", gp["od"] * 0.6), 0.1) / 24.0
+            out[in_gp] = self.k_row[in_gp] / gp["k"] * np.log(max(r_o / r_i, 1.0))
+            return out
+        cas_id = f.casing[0][3] if f.casing else gp["od"]
+        L = np.maximum(self.rw_row - cas_id / 24.0, 1.0 / 12)
+        ap = np.pi * (rp_in / 12) ** 2
+        out[in_gp] = (self.k_row * L / (0.15913 * gp["k"] * n_eff * ap))[in_gp]
+        return out
 
     def _geometry(self):
         """(deviation skin, partial-penetration skin). Fully perforated: Cinco-Ley's deviation correlation on the
-        segment-count thickness. Gun held up above the bottom: the slanted, partially-penetrating well of Cinco-Ley,
-        Ramey & Miller on the perforated segments (penetration = the same interval vertical, deviation = the rest)."""
+        segment-count thickness. Gun held up / rows not perforated: the slanted, partially-penetrating well of
+        Cinco-Ley, Ramey & Miller on the perforated span (penetration = the same interval vertical, deviation =
+        the rest). Open hole: the additional reservoir height below the well is added to the thickness."""
         if self._geo is not None:
             return self._geo
         f = self.f
+        if f.well_type == "Horizontal":             # along-hole flow: the horizontal well model carries the geometry
+            self._geo = (0.0, 0.0)
+            return self._geo
         dev = f.deviated and self.cos < 1 - 1e-9
         th = np.degrees(np.arccos(self.cos)) if dev else 0.0
         h = len(self.md) * self.cos
-        if self.n_perf >= len(self.md):
+        extra = f.add_height if f.lower_completion != "Cased and Perforated" else 0.0
+        if self.n_perf >= len(self.md) and extra <= 0:
             sd = wcomp.deviation_skin(min(th, 75.0), h, f.rw, f.kv_kh, True) if dev else 0.0
             self._geo = (sd, 0.0)
         else:
-            r = wcomp.cinco_slant_pp(min(th, 75.0), h, max(self.n_perf, 1) * self.cos, 0.0, f.rw, f.kv_kh)
+            span = int(np.nonzero(self.perf)[0][-1]) - self.first + 1
+            r = wcomp.cinco_slant_pp(min(th, 75.0), h + extra, max(span, 1) * self.cos, self.first * self.cos,
+                                     f.rw, f.kv_kh)
             self._geo = (r["slant"], r["penetration"])
         return self._geo
 
@@ -229,15 +550,19 @@ class Spot:
     def _factor(self):
         c, kv = self.cos, self.f.kv_kh
         fac = c ** AGG[3] * (c * c + (1 - c * c) * kv) ** AGG[4]
-        if self.n_perf < len(self.md):            # gun held up: mechanical skin on the perforated fraction
+        if self.n_perf < len(self.md):            # part of the layer not perforated: mechanical skin on that part
             fac *= len(self.md) / max(self.n_perf, 1) * (PP_MECH[0] - PP_MECH[1] * (1 - c))
         return fac
+
+    def _row_mech(self, lg):
+        return self._factor() * (AGG[0] * lg["Perforation skin"] + AGG[1] * lg["Crush skin"]
+                                 + lg["Damage skin"] + lg["Gravel pack skin"])
 
     def total_skin(self, lg=None):
         lg = self.log() if lg is None else lg
         m = self.perf
-        return float(self._factor() * (AGG[0] * lg["Perforation skin"][m].mean() + AGG[1] * lg["Crush skin"][m].mean())
-                     + AGG[2] * self.deviation_skin() + self.partial_skin())
+        w = self.k_row[m] / self.k_row[m].sum()                  # permeability-weighted over the perforated rows
+        return float((self._row_mech(lg)[m] * w).sum() + AGG[2] * self.deviation_skin() + self.partial_skin())
 
     def saturation(self):
         f = self.f
@@ -252,69 +577,177 @@ class Spot:
         kro, krw = corey(sw, f.relperm)
         return float(sw), float(kro), float(krw)
 
-    def oil_rate_fn(self, s_tot, h=None):
+    def denominator(self, s_tot):
+        """A + S of the radial inflow, or the horizontal well's equivalent (Economides-Joshi, Borisov, Babu-Odeh,
+        Goode-Wilkinson) expressed on k h of the layer."""
+        f = self.f
+        if f.well_type != "Horizontal" or not f.horizontal:
+            return self.A + s_tot
+        hz = f.horizontal
+        step = float(np.median(np.diff(self.md))) if len(self.md) > 1 else 1.0
+        L = max((self.n_perf if f.lower_completion != "Open Hole" else len(self.md)) * step, 1.0)
+        h, k = hz["h"], self.k_mean
+        if f.inflow == "Borisov":
+            reh = hz.get("reh", f.re)
+            beta = 1 / np.sqrt(f.kv_kh)
+            D = np.log(4 * reh / L) + beta * h / L * np.log(h / (2 * np.pi * f.rw)) + beta * h / L * s_tot
+            return D * (k * self.h_tvd) / (k * h)
+        from . import inflow_adv as ia
+        meth = {"Economides-Joshi": "Joshi", "Babu-Odeh": "Babu & Odeh", "Goode-Wilkinson": "Kuchuk & Goode"}[f.inflow]
+        lx, ly = hz.get("length", 2 * f.re), hz.get("width", 2 * f.re)
+        kh_eq, D = ia.horizontal_resistance(meth, k, h, f.rw, 1.0, f.kv_kh, L, lx, ly, hz.get("xw", lx / 2),
+                                            hz.get("yw", ly / 2), hz.get("zw", h / 2), s_tot)
+        return D * (k * self.h_tvd) / kh_eq
+
+    def oil_rate_fn(self, s_tot, h=None, D_nd=0.0):
         f = self.f
         _, kro, _ = self.saturation()
         h = self.h_tvd if h is None else h
-        C = 0.00708 * f.k * kro * h / (self.A + s_tot)
+        den = self.denominator(s_tot)
+        C = 0.00708 * self.k_mean * kro * h / den
         pr = f.pr
         grid = np.linspace(14.7, pr, 400)
         mo, _, pb = self.mob_fn(grid)
         pb = float(pb)
-        # cumulative integral of the oil mobility from each pressure up to Pr
         cum = np.concatenate([[0.0], np.cumsum(0.5 * (mo[1:] + mo[:-1]) * np.diff(grid))])
         I_to_pr = lambda p: cum[-1] - np.interp(p, grid, cum)
         if pr <= pb:
             m_r = float(np.interp(pr, grid, mo))
             if f.inflow == "Vogel":
-                return lambda p: C * m_r * pr / 1.8 * (1 - 0.2 * np.clip(p, 0, pr) / pr - 0.8 * (np.clip(p, 0, pr) / pr) ** 2)
-            return lambda p: C * m_r * (pr ** 2 - np.clip(p, 0, pr) ** 2) / (2 * pr)
-        qb = C * float(I_to_pr(pb))
-        m_b = float(np.interp(pb, grid, mo))
-        j_avg = qb / (pr - pb)
-
-        def q(p):
-            p = np.clip(np.asarray(p, float), 0, pr)
-            above = C * I_to_pr(np.maximum(p, pb))
-            if f.inflow == "Vogel":
-                below = qb + j_avg * pb / 1.8 * (1 - 0.2 * p / pb - 0.8 * (p / pb) ** 2)
+                q0 = lambda p: C * m_r * pr / 1.8 * (1 - 0.2 * np.clip(p, 0, pr) / pr - 0.8 * (np.clip(p, 0, pr) / pr) ** 2)
             else:
-                below = qb + C * m_b * (pb ** 2 - p ** 2) / (2 * pb)
-            return np.where(p >= pb, above, below)
-        return q
+                q0 = lambda p: C * m_r * (pr ** 2 - np.clip(p, 0, pr) ** 2) / (2 * pr)
+        else:
+            qb = C * float(I_to_pr(pb))
+            m_b = float(np.interp(pb, grid, mo))
+            j_avg = qb / (pr - pb)
 
-    def results(self, pwf_log=None):
+            def q0(p):
+                p = np.clip(np.asarray(p, float), 0, pr)
+                above = C * I_to_pr(np.maximum(p, pb))
+                if f.inflow == "Vogel":
+                    below = qb + j_avg * pb / 1.8 * (1 - 0.2 * p / pb - 0.8 * (p / pb) ** 2)
+                else:
+                    below = qb + C * m_b * (pb ** 2 - p ** 2) / (2 * pb)
+                return np.where(p >= pb, above, below)
+        if D_nd <= 0:
+            return q0
+        # rate-dependent skin D q:  q (den + D q) = den q0  ->  q = (-den + sqrt(den^2 + 4 D den q0)) / (2 D)
+        Dn = D_nd / (self.k_mean * kro * h) * (self.k_mean * self.h_tvd)          # on the same k h basis
+        return lambda p: (-den + np.sqrt(den ** 2 + 4 * Dn * den * np.maximum(q0(p), 0.0))) / (2 * Dn)
+
+    def non_darcy_D(self, lg):
+        """Rate-dependent skin coefficient (1 / (STB/d)) - provisional: Forchheimer flow through the crushed zone of
+        every tunnel (McLeod) when Calculate Non-Darcy Skin is Yes, and through the packed tunnels of an internal
+        gravel pack (Golan: beta = 1.47e7 k^-0.55; Geertsma: 48511 / (phi^5.5 k^0.5), / (1 - Sw)^5.5 two-phase)."""
+        f = self.f
+        m = self.perf & (lg["Penetration Lp (in)"] > 0)
+        if not m.any():
+            return 0.0
+        mo, _, _ = self.mob_fn(np.array([f.pr]))
+        mu_b = 1 / float(mo[0])                                    # mu B (cp rb/STB) at Pr
+        bo, rho = 1.2, 50.0                                        # rb/STB, lb/ft3 (screening values)
+        kh = self.k_mean * self.h_tvd
+        n_eff = sum(g.spf * e * mm for g, e, mm in self.shot_sets()) / self.cos
+        N = n_eff * self.h_tvd * self.n_perf / len(self.md)
+        lp = float(lg["Penetration Lp (in)"][m].mean()) / 12
+        rp = float(lg["Entry hole diameter (in)"][m].mean()) / 24
+        D = 0.0
+        if f.non_darcy and lp > 0:
+            kcf, kct = (f.crush_factor, f.crush_thickness) if f.crush_model == "Entered" else QINETIQ_CRUSH
+            beta = 2.33e10 / max(kcf * self.k_mean, 1e-6) ** 1.201
+            rc = rp + kct / 12
+            a = 9.08e-13 * beta * bo ** 2 * rho * (1 / rp - 1 / rc) / (2 * np.pi * lp) ** 2 / N ** 2
+            D += a * kh / (141.2 * mu_b)
+        gp = f.gravel
+        if gp and gp.get("type") != "External":
+            kg = gp["k"]
+            meth = gp.get("method", "Golan 1 phase")
+            beta = 1.47e7 / kg ** 0.55 if meth.startswith("Golan") else 48511 / (0.35 ** 5.5 * kg ** 0.5)
+            if meth == "Geertsma 2 phase":
+                beta /= max(1 - self.saturation()[0], 0.05) ** 5.5
+            cas_id = f.casing[0][3] if f.casing else gp["od"]
+            L = max(f.rw - cas_id / 24.0, 1.0 / 12)
+            ap = np.pi * rp ** 2
+            a = 9.08e-13 * beta * bo ** 2 * rho * L / (N * ap) ** 2
+            D += a * kh / (141.2 * mu_b)
+        return float(D)
+
+    def results(self, pwf_log=None, gor=None):
         f = self.f
         lg = self.log()
         s = self.total_skin(lg)
         sw, kro, krw = self.saturation()
-        qo = self.oil_rate_fn(s)
+        D = self.non_darcy_D(lg)
+        qo = self.oil_rate_fn(s, D_nd=D)
         n = len(self.md)
         fac = n / max(n - 1, 1) if self.n_perf >= n else 1.0     # PROSPER's layer table (see the docstring)
         aof_layer = float(qo(0.0)) * fac
         p_half = (f.pr - G) / 2                     # PROSPER's layer PI: oil rate at half the layer pressure (gauge)
         pi_half = float(qo(p_half + G)) / p_half
+        A_w = self.A + WIQI_DA
         layer = {"Top MD (ft)": f.top_md, "Bottom MD (ft)": f.bottom_md,
+                 "Layer pressure (psig)": f.pr - G, "Water cut (%)": 100 * f.wc,
                  "Completion fluid density (lb/gal)": (f.pr - G - f.underbalance) /
                  (0.0519481 * float(np.mean([self.tvd[0], self.tvd[self.perf][-1]]))),
                  "PI (STB/d/psi)": pi_half, "Net PI (STB/d/psi)": pi_half,
                  "Total skin": s, "Deviation skin": self.deviation_skin(),
                  "Partial penetration skin": self.partial_skin(),
-                 "WIQI": (self.A + WIQI_DA + self.deviation_skin() + self.partial_skin()) / (self.A + WIQI_DA + s),
+                 "Non-Darcy coefficient (1/(STB/d))": D,
+                 "WIQI": (A_w + self.deviation_skin() + self.partial_skin()) / (A_w + s),
                  "Oil AOF (STB/d)": aof_layer,
-                 "Water saturation": sw, "kro": kro, "krw": krw, "ko (md)": f.k * kro, "kw (md)": f.k * krw,
+                 "Water saturation": sw, "kro": kro, "krw": krw, "ko (md)": self.k_mean * kro,
+                 "kw (md)": self.k_mean * krw,
                  "Mean penetration Lp (in)": float(lg["Penetration Lp (in)"][self.perf].mean()),
+                 "Perforated rows": self.n_perf, "Log rows": n,
+                 "Rows beyond invasion zone": int(lg["Beyond Zone"].sum()),
                  "TVD thickness (ft)": self.h_tvd}
+        # each row's share of the layer rate: k / (A + its skin)
+        w = np.where(self.perf, self.k_row / (self.A + self._row_mech(lg) + AGG[2] * self.deviation_skin()
+                                              + self.partial_skin()), 0.0)
+        w = w / w.sum()
+        wor = f.wc / max(1 - f.wc, 1e-12)
+        lg["Qo AOF (STB/d)"] = aof_layer * w
+        lg["Qw AOF (STB/d)"] = lg["Qo AOF (STB/d)"] * wor
         if pwf_log is not None:
-            # each segment's share of the layer rate at this FBHP
-            w = np.where(self.perf, 1 / (self.A + self._factor() * (AGG[0] * lg["Perforation skin"]
-                                                                     + AGG[1] * lg["Crush skin"])
-                                         + AGG[2] * self.deviation_skin() + self.partial_skin()), 0.0)
             q_tot = float(qo(pwf_log)) * fac
-            lg["Qo at FBHP (STB/d)"] = q_tot * w / w.sum()
-            lg["Qw at FBHP (STB/d)"] = lg["Qo at FBHP (STB/d)"] * f.wc / max(1 - f.wc, 1e-12)
-            lg["Qo AOF (STB/d)"] = aof_layer * w / w.sum()
+            lg["Qo (STB/d)"] = q_tot * w
+            lg["Qw (STB/d)"] = lg["Qo (STB/d)"] * wor
+            if gor:
+                lg["Qg (MMscf/d)"] = lg["Qo (STB/d)"] * gor / 1e6
+            lg["Qo Cum (STB/d)"] = lg["Qo (STB/d)"][::-1].cumsum()[::-1]
+            lg["Qw Cum (STB/d)"] = lg["Qw (STB/d)"][::-1].cumsum()[::-1]
+            if f.sanding:
+                lg["Sand Production"] = self.sanding_flags(lg, pwf_log)
+        lg["Qo Cum AOF (STB/d)"] = lg["Qo AOF (STB/d)"][::-1].cumsum()[::-1]
         return {"layer": layer, "log": lg, "oil_rate": qo, "skin": s}
+
+    def sanding_flags(self, lg, pwf):
+        f, sd = self.f, self.f.sanding
+        mo, mw, _ = self.mob_fn(np.array([f.pr]))
+        mu = 1 / float(mo[0]) / 1.2
+        rho = 50.0 * (1 - f.wc) + 62.4 * f.wc
+        n_eff = sum(g.spf * e * mm for g, e, mm in self.shot_sets()) / self.cos
+        out = []
+        for _, r in lg.iterrows():
+            if not r["Perforated"] or r["Entry hole diameter (in)"] <= 0:
+                out.append(False)
+                continue
+            q_rb = (r["Qo (STB/d)"] * 1.2 + r["Qw (STB/d)"]) * 5.615 / 86400        # ft3/s
+            a = n_eff * np.pi * (r["Entry hole diameter (in)"] / 24) ** 2
+            out.append(sand_produced(q_rb / max(a, 1e-9), rho, mu, sd["d"], sd["rho_s"], sd["angle"], sd["rough"],
+                                     r["Entry hole diameter (in)"] / 2, f.well_type == "Vertical"))
+        return out
+
+
+def _two_zone_hawkins(k, rw, ls, ks, ld, kd):
+    """Hawkins skin of a solids zone (rw..rw+ls, ks) inside a filtrate zone (..rw+ld, kd)."""
+    s = 0.0
+    if ls > 0 and ks > 0:
+        s += (k / ks - 1) * np.log((rw + ls) / rw)
+    if ld > ls and kd > 0:
+        s += (k / kd - 1) * np.log((rw + ld) / (rw + max(ls, 0.0)))
+    return float(s)
 
 
 def blackoil_mobility(model, t_f):
@@ -330,22 +763,52 @@ def blackoil_mobility(model, t_f):
     return fn
 
 
-def spot_ipr(pr, wc, f: SpotInputs, model, t_f, pwf_log=None):
-    """IPRCurve (liquid, STB/d against psia) of the SPOT layer; pr psia and wc fraction override f's."""
+def spot_ipr(pr, wc, f, model, t_f, pwf_log=None, gor=None):
+    """IPRCurve (liquid, STB/d against psia) of the SPOT well: f is one layer (SpotInputs) or a list of layers.
+    pr (psia) and wc (fraction) are the first layer's; a change of either (sensitivities) shifts every layer's
+    pressure by the same amount and sets every layer's water cut. Layer rates add (no crossflow)."""
     import dataclasses
+    import pandas as pd
     from .inflow import IPRCurve
-    f = dataclasses.replace(f, pr=float(pr), wc=float(wc))
-    sp = Spot(f, blackoil_mobility(model, t_f))
-    res = sp.results(pwf_log)
-    qo = res["oil_rate"]
-    fl = lambda p: qo(p) / max(1 - f.wc, 1e-9)
-    pw = np.linspace(f.pr, 0.0, 41)
-    lay = res["layer"]
-    c = IPRCurve("SPOT", "oil", f.pr, pw, np.asarray(fl(pw), float),
-                 params={"Total skin": lay["Total skin"], "WIQI": lay["WIQI"], "kro": lay["kro"],
-                         "Water saturation": lay["Water saturation"]},
-                 notes=[f"SPOT: total skin {lay['Total skin']:.4f} (deviation {lay['Deviation skin']:.5f}), "
-                        f"water saturation {lay['Water saturation']:.4f} for the water cut, ko {lay['ko (md)']:.2f} md."],
+    layers = list(f) if isinstance(f, (list, tuple)) else [f]
+    dp = float(pr) - layers[0].pr
+    wc_new = None if abs(float(wc) - layers[0].wc) < 1e-12 else float(wc)
+    lays = [dataclasses.replace(L, pr=L.pr + dp, wc=L.wc if wc_new is None else wc_new) for L in layers]
+    for i, L in enumerate(lays):                 # water saturation entered: the water cut it gives at Pr
+        if L.sw is not None and wc_new is None:
+            mo, mw, _ = blackoil_mobility(model, t_f if L.t_f is None else L.t_f)(np.array([L.pr]))
+            kro, krw = corey(L.sw, L.relperm)
+            qw, qo_ = krw * mw[0], kro * mo[0]
+            lays[i] = dataclasses.replace(L, wc=float(qw / max(qw + qo_, 1e-30)), sw=None)
+    res, rates = [], []
+    for L in lays:
+        sp = Spot(L, blackoil_mobility(model, t_f if L.t_f is None else L.t_f))
+        r = sp.results(pwf_log, gor)
+        res.append(r)
+        wcL = L.wc
+        rates.append((r["oil_rate"], wcL, L.pr))
+    pmax = max(L.pr for L in lays)
+
+    def fl(p):
+        p = np.asarray(p, float)
+        return sum(np.where(p < prL, np.maximum(qo(np.minimum(p, prL)), 0.0), 0.0) / max(1 - w, 1e-9)
+                   for qo, w, prL in rates)
+    pw = np.linspace(pmax, 0.0, 41)
+    q = np.asarray(fl(pw), float)
+    lay0 = res[0]["layer"]
+    s_txt = ", ".join(f"{r['layer']['Total skin']:.4f}" for r in res)
+    qo_aof = sum(float(qo(0.0)) for qo, _, _ in rates)
+    ql_aof = float(fl(0.0))
+    wc_tot = 1 - qo_aof / ql_aof if ql_aof > 0 else lays[0].wc
+    c = IPRCurve("SPOT", "oil", pmax, pw, q,
+                 params={"Total skin": lay0["Total skin"], "WIQI": lay0["WIQI"], "kro": lay0["kro"],
+                         "Water saturation": lay0["Water saturation"], "Layers": len(lays),
+                         "Water cut at AOF (%)": 100 * wc_tot},
+                 notes=[f"SPOT: {len(lays)} layer(s), total skin {s_txt}; water saturation "
+                        f"{lay0['Water saturation']:.4f} for the water cut, ko {lay0['ko (md)']:.2f} md (layer 1)."],
                  rate_fn=fl)
-    c.spot_layer, c.spot_log = lay, res["log"]
+    c.spot_layer = lay0
+    c.spot_layers = pd.DataFrame([r["layer"] for r in res], index=pd.RangeIndex(1, len(res) + 1, name="Layer"))
+    c.spot_log = pd.concat([r["log"].assign(Layer=i + 1) for i, r in enumerate(res)], ignore_index=True) \
+        if len(res) > 1 else res[0]["log"]
     return c
