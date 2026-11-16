@@ -129,7 +129,7 @@ PROVISIONAL = {
     "multi_casing": "a third casing string (the second-string correction applied again)",
     "synthetic": "Synthetic Rock Lp at other UCS (calibrated at 8000 psi)",
     "gun": "guns other than Tutorial 09's and Run 14's UltraJet 4505 (Lp_API / ln(29665 / cement) scaling)",
-    "gravel_ext": "external (underreamed) gravel pack: perforation skin, and Lp / entry hole without casing (deviation and gravel-pack skins calibrated)",
+    "gravel_ext": "underreamed gravel pack with invasion or outside 2.75-5 in standoff (runs 10b-f: total skin within 0.002, oil AOF 0.5 % high)",
     "invasion_calc": "Calculated invasion depths (exposure time and radial sqrt(t) as PROSPER; magnitude from filtration theory)",
     "ucs_twc": "UCS / TWC equations 1-7: published correlations (McNally, Moos, Vernik, Rzhevsky, TWC = 2.5 / 3 UCS)",
     "sanding": "QinetiQ sanding: Shields traction (horizontal perforations) / settling velocity (vertical)",
@@ -138,8 +138,13 @@ PROVISIONAL = {
 }
 # --- calibrated against the user's PROSPER runs on the Tutorial 09 file (November 2026)
 QINETIQ_CRUSH = (0.33842, 0.5)  # QinetiQ Test Results: crush skin 1.51659 against 10.1298 entered (Run 5)
-SO_LP = (0.076972, 0.028489)    # Lp ~ exp(-a s - b s^2), s = standoff (in): runs 2 (0.5, 1.5 in), 1a (2.10), base
-                                # (2.205) and 10b (5.0): 1.30024, 1.13770, 1.02061, 1, 0.45442 within 0.06 %
+SO_LP_LO = (-0.02390719, -0.11495696, 1.36369528)
+SO_LP = (0.194991, 1.30024)     # Lp x (1 + 0.19499 (2.205 - s)) for s >= 1.5 in, to 1.30024 at 0.5 in: runs 2 (0.5,
+                                # 1.5), 1a (2.10), base (2.205), 10b-d (2.75-5.0 uncased) within 0.05 %
+EXT_S0 = -0.0651                # external pack: added to the layer total skin x the fraction of rows it covers
+EXT_DPC = (1.97428, 10.91219)   # external (underreamed) pack: damage + perforation + crush skin = -1.974 ln(1 + Lp /
+                                # 10.91 in), whatever the gravel k, screen or underreamed OD (runs 10b-f, within 0.001)
+EHD_OPEN = (-0.00124889, -0.03215444, 0.37510694)   # uncased entry hole (in) against standoff s (in)
 SO_EHD = (0.072928, -0.062427, 0.0077126)   # entry hole ~ 1 + c1 s + c2 s^2 + c3 s^3 (same runs, within 1e-4)
 SO_REF = (2.205, 0.5)           # Tutorial 09: downhole (centred 2 in gun in 6.41 in ID) and API test standoffs
 GRADE_EHD = {"J55": 1.0, "L80": 0.9055, "P105": 0.8558, "P110": 0.84907}  # entry hole vs J55 (P110 Run 1b;
@@ -373,7 +378,19 @@ def sand_produced(v_ft_s, rho_f, mu_cp, d_in, rho_s_ppg, angle, rough_in, rp_in,
 
 
 def _so_lp(s):
-    return np.exp(-SO_LP[0] * s - SO_LP[1] * s * s)
+    """Lp relative to Tutorial 09's (2.205 in): linear in the standoff from 1.5 in (runs 1a, 2, 10b-d, cased and
+    uncased alike, within 0.05 %), the 0.5 in run below that."""
+    s = np.asarray(s, float)
+    g15 = 1 + SO_LP[0] * (SO_REF[0] - 1.5)
+    lo = np.polyval(SO_LP_LO, s)    # below 1.5 in: through runs 2 (0.5 in), 14 (0.955 in) and the line at 1.5 in
+    return np.maximum(np.where(s >= 1.5, 1 + SO_LP[0] * (SO_REF[0] - s), lo), 0.02)
+
+
+def _so_ehd_open(s):
+    """Entry hole without casing (external gravel pack, runs 10b-d: 2.75-5 in standoff, within 5e-4 in), relative
+    to Tutorial 09's cased 0.22427 in."""
+    s = np.maximum(np.asarray(s, float), 1.0)
+    return np.polyval(EHD_OPEN, s) / 0.22427
 
 
 def _so_ehd(s):
@@ -418,6 +435,8 @@ def entry_hole(gun: SpotGun, standoff=None, grade="J55", outer_walls=(), cased=T
     e = gun.ehd * EHD_FACTOR * (_so_ehd(so) / _so_ehd(gun.test_standoff)) / (_so_ehd(SO_REF[0]) / _so_ehd(SO_REF[1]))
     if cased:
         e *= GRADE_EHD.get(str(grade).upper(), 1.0)
+    else:
+        e = e / _so_ehd(so) * _so_ehd(SO_REF[0]) * _so_ehd_open(so)
     return e * TWO_STRINGS[2] ** len(outer_walls)
 
 
@@ -457,7 +476,7 @@ class Spot:
         else:
             self.cos = 1.0
         self.h_tvd = (f.bottom_md - f.top_md) * self.cos
-        self.A = np.log(f.re / f.rw) - 0.75
+        self.A = np.log(f.re / self.rw_geometry()) - 0.75      # underreamed radius with an external pack (Run 10b-d)
         self.holdup = f.bottom_md if f.holdup_md is None else float(f.holdup_md)
         self.open_hole = f.lower_completion == "Open Hole"
         self.perf = (self.md <= self.holdup + 1e-9) & (self.tick | self.open_hole)
@@ -570,6 +589,9 @@ class Spot:
                     dw[i] = 1 - w2
                     mult[i] = 1 + (1 - w2) * (m_in - 1) * base / sp[i]
             sc[i] = (1 / kcf - 1) * np.log((rp_in[i] + kct) / rp_in[i]) / (n_eff * lp[i] / 12)
+            if ext[i]:                # PROSPER reports the perforation skin as that total less the crush skin
+                sp[i] = -EXT_DPC[0] * np.log(1 + lp[i] / EXT_DPC[1]) - sc[i]
+                mult[i], dw[i], beyond[i] = 1.0, 0.0, True          # invasion with the pack: not calibrated
         sgp = self.gravel_skin(rp_in, n_eff, lp)
         sdev = self.deviation_skin()
         off = ~self.perf
@@ -645,7 +667,7 @@ class Spot:
         if gp and gp.get("type") == "External":
             ext = (self.md >= gp["top"] - 1e-6) & (self.md < gp["bottom"] - 1e-6)
             if ext.mean() >= 0.5:
-                return max(gp["od"] / 24.0, self.f.rw)
+                return gp["od"] / 24.0
         return self.f.rw
 
     def deviation_skin(self):
@@ -668,13 +690,25 @@ class Spot:
         m = lg["Perforation skin multiplier"]
         sdw = lg["Damage skin"] * lg["Damage skin weight"]
         dam = np.where(m > 1, AGG_D * (m * lg["Perforation skin"] + sdw), AGG[0] * lg["Perforation skin"] + AGG_D * sdw)
-        return self._factor() * (dam + AGG[1] * lg["Crush skin"]) + self.cos * lg["Gravel pack skin"]
+        out = self._factor() * (dam + AGG[1] * lg["Crush skin"]) + self.cos * lg["Gravel pack skin"]
+        ext = self._ext_rows()
+        if ext.any():     # external pack (runs 10b-d): perforation and crush skins on one weight (PROSPER's sum)
+            alt = self._factor() * AGG[0] * (lg["Perforation skin"] + lg["Crush skin"]) + self.cos * lg["Gravel pack skin"]
+            out = np.where(ext, alt, out)
+        return out
+
+    def _ext_rows(self):
+        gp = self.f.gravel
+        if gp and gp.get("type") == "External":
+            return (self.md >= gp["top"] - 1e-6) & (self.md < gp["bottom"] - 1e-6)
+        return np.zeros(len(self.md), bool)
 
     def total_skin(self, lg=None):
         lg = self.log() if lg is None else lg
         m = self.perf
         w = self.k_row[m] / self.k_row[m].sum()                  # permeability-weighted over the perforated rows
-        return float((self._row_mech(lg)[m] * w).sum() + AGG[2] * self.deviation_skin() + self.partial_skin())
+        s = (self._row_mech(lg)[m] * w).sum() + AGG[2] * self.deviation_skin() + self.partial_skin()
+        return float(s + EXT_S0 * self._ext_rows()[m].mean())       # external pack: PROSPER's -0.065 (runs 10b-d)
 
     def saturation(self):
         f = self.f

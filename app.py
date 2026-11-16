@@ -3102,9 +3102,11 @@ def spot_ui(o, pr, t_f, wc):
         gp = None
         if gp_on:
             c = st.columns(4)
-            gp = {"type": sel(c[0], "Gravel pack", ["Internal", "External"], "spot_gp_type",
-                              help="Internal: packed perforations through the casing; External: underreamed "
-                                   "(casing removed) and filled with gravel."),
+            gp = {"type": {"No": "Internal", "Yes": "External"}[sel(
+                      c[0], "Underreamed", ["No", "Yes"], "spot_gp_ur",
+                      help="As PROSPER's Underreamed column. No: packed perforations through the casing (the outer "
+                           "diameter is not used); Yes: an underreamed hole filled with gravel - the gun centred in "
+                           "it sets the standoff and its radius is the wellbore radius.")],
                   "k": num(c[1], "Gravel pack permeability (md)", "spot_gp_k", 1.2e5, 1.0, 1e7, 1e4, "%.0f",
                            help="Golan & Whitson: 40/60 mesh 1.2-1.7e5 md, 20/40 1.2e5, 10/20 5-6.5e5, 8/12 1.7e6."),
                   "top": num(c[2], "Top of gravel pack (ft)", "spot_gp_top", d.top_md, 0.0, 4e4, 10.0),
@@ -3272,7 +3274,8 @@ def spot_ui(o, pr, t_f, wc):
         or (k_ == "synthetic" and lp_corr != "Conventional" and any(np.any(np.abs(L.log["UCS (psi)"].astype(float)
                                                                                     - 8000) > 1) for L in layers))
         or (k_ == "gun" and any(L.gun.lp_norm != wspot.SpotGun().lp_norm for L in layers))
-        or (k_ == "gravel_ext" and gp is not None and gp["type"] == "External")
+        or (k_ == "gravel_ext" and gp is not None and gp["type"] == "External"
+            and (inv != "No invasion" or not 2.5 <= (gp["od"] - min(L.gun.gun_od for L in layers)) / 2 <= 5.25))
         or (k_ == "invasion_calc" and inv == "Calculate invasion") or (k_ == "sanding" and sand == "QinetiQ")
         or (k_ == "non_darcy" and nd) or (k_ == "gravel" and gp is not None and nd)
         or (k_ == "ucs_twc" and log_in != "None Available"))]
