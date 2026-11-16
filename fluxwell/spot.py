@@ -133,9 +133,8 @@ PROVISIONAL = {
     "invasion_calc": "Calculated invasion depths (exposure time and radial sqrt(t) as PROSPER; magnitude from filtration theory)",
     "ucs_twc": "UCS / TWC equations 1-7: published correlations (McNally, Moos, Vernik, Rzhevsky, TWC = 2.5 / 3 UCS)",
     "sanding": "QinetiQ sanding: Shields traction (horizontal perforations) / settling velocity (vertical)",
-    "non_darcy": "Perforation non-Darcy skin: Forchheimer flow through the crushed zone (McLeod)",
+    "non_darcy": "perforation non-Darcy away from Tutorial 09 (McLeod crushed-zone D x 0.922, x mu(Pr)/mu(Pwf))",
     "gravel": "gravel-pack non-Darcy (Golan / Geertsma)",
-    "extensions": "SPOT IPR Extensions = No: as Yes",
 }
 # --- calibrated against the user's PROSPER runs on the Tutorial 09 file (November 2026)
 QINETIQ_CRUSH = (0.33842, 0.5)  # QinetiQ Test Results: crush skin 1.51659 against 10.1298 entered (Run 5)
@@ -151,6 +150,10 @@ SYNTHETIC = (0.40962, 31906.0)  # Synthetic Rock Lp: 0.40962 x the conventional 
 AGG_D = 0.98693                 # total skin weight of the damaged rows' M Sp and damage skin (runs 7, 8)
 GP_C = 0.24834                  # internal gravel pack (no gravel non-Darcy unless Calculate Non-Darcy Skin): S = k (Lp + rw - casing ID / 2) / (C k_gp n A_p)
 TWC_UCS = 1.9049                # PROSPER's generated TWC / UCS (15239.53 psi at 8000 psi)
+INV_BLEND = (0.1, 1.1168, 1.0600)   # Lp past the invaded zone by < 10 % of its depth: blend weights (x / 0.1)^p for
+                                    # the perforation skin and the damage terms (Run 8e, within 0.02)
+ND_K = 0.92184                  # perforation non-Darcy: 0.922 x McLeod's crushed-zone D at Pr, x mu(Pr) / mu(Pwf)
+                                # (Run 9 IPR: D mu constant within 2 % from 3500 psig to AOF)
 LP_UC = 29665.0                 # other guns: Lp scales with Lp_API / ln(LP_UC / test cement strength) - Run 14
                                 # (Schlumberger UltraJet 4505 HMX, 42.6 in at 7293.3 psi: 14.2513 in downhole)
 LOG_COLS = ["MD (ft)", "Porosity", "Permeability (md)", "UCS (psi)", "TWC (psi)", "FDC (g/cc)",
@@ -208,6 +211,7 @@ class SpotInputs:
     horizontal: dict | None = None   # {"h", "xw", "yw", "zw", "length", "width", "reh"} (horizontal wells)
     well_type: str = "Deviated"      # | "Vertical" | "Horizontal"
     sw: float | None = None          # water saturation entered instead of the water cut (Input Phase Ratios = No)
+    extensions: bool = True          # Use SPOT IPR Extensions (No: constant PI from the mobility at Pr - Run 13)
 
 
 def generate_log(top, bottom, step=1.0, k=50.0, phi=0.18, ucs=8000.0, twc=None):
@@ -530,6 +534,7 @@ class Spot:
         rw_gp = np.where(ext, np.maximum(gp["od"] / 24.0, rw), rw) if ext.any() else rw.copy()
         sp, sc, sd = (np.zeros(len(lp)) for _ in range(3))
         mult = np.ones(len(lp))
+        dw = np.ones(len(lp))                                  # weight of the damage skin in the row total
         beyond = np.ones(len(lp), bool)
         for i in range(len(lp)):
             ld, kd = ld_in[i] / 12, kd_fac[i] * self.k_row[i]
@@ -544,11 +549,25 @@ class Spot:
                 # PROSPER (runs 7, 8): two-zone Hawkins damage skin; the perforation skin x M, M = 1 + Sd / ln(rd/rw)
                 sd[i] = _two_zone_hawkins(self.k_row[i], rw_gp[i], ls_in[i] / 12, f.ks * self.k_row[i], ld, kd)
                 mult[i] = 1 + sd[i] / np.log((rw_gp[i] + ld) / rw_gp[i])
-            elif ld > 0:              # perforations past the invaded zone: Karakas & Tariq (not calibrated)
-                tot = wcomp.karakas_tariq(self.k_row[i], rw_gp[i], lp[i] / 12, rp_in[i] / 12, n_eff, phasing,
-                                          f.kv_kh, ld, kd)["total"]
-                sd[i] = tot - base + (_two_zone_hawkins(self.k_row[i], rw_gp[i], ls_in[i] / 12, f.ks * self.k_row[i],
-                                                        ls_in[i] / 12, f.ks * self.k_row[i]) if ls_in[i] > 0 else 0.0)
+            elif ld > 0:
+                # perforations past the invaded zone (PROSPER runs 8b, 8e): Karakas & Tariq's perforation skin on
+                # Lp - (1 - kd/k) ld and rw + (1 - kd/k) ld; the damage skin (two-zone Hawkins) is reported only
+                # all three K & T terms on Lp - (1 - kd/k) ld and rw + (1 - kd/k) ld, kd the invaded zone's
+                # equivalent permeability (two-zone Hawkins: filtrate and solids, Run 8a)
+                sd[i] = _two_zone_hawkins(self.k_row[i], rw_gp[i], ls_in[i] / 12, f.ks * self.k_row[i], ld, kd)
+                a_d = (1 - 1 / (1 + sd[i] / np.log((rw_gp[i] + ld) / rw_gp[i]))) * ld
+                sp_b = wcomp.kt_perforation_skin(rw_gp[i] + a_d, lp[i] / 12 - a_d, rp_in[i] / 12, n_eff, phasing,
+                                                 f.kv_kh)["perforation"]
+                x = min((lp[i] / 12 - ld) / ld / INV_BLEND[0], 1.0)
+                if x >= 1:
+                    sp[i], dw[i] = sp_b, 0.0
+                else:
+                    # Lp within 10 % past the invaded zone (Run 8e): PROSPER blends from the invaded-row skins
+                    m_in = 1 + sd[i] / np.log((rw_gp[i] + ld) / rw_gp[i])
+                    w1, w2 = x ** INV_BLEND[1], x ** INV_BLEND[2]
+                    sp[i] = base + w1 * (sp_b - base)
+                    dw[i] = 1 - w2
+                    mult[i] = 1 + (1 - w2) * (m_in - 1) * base / sp[i]
             sc[i] = (1 / kcf - 1) * np.log((rp_in[i] + kct) / rp_in[i]) / (n_eff * lp[i] / 12)
         sgp = self.gravel_skin(rp_in, n_eff, lp)
         sdev = self.deviation_skin()
@@ -566,11 +585,11 @@ class Spot:
             "Reservoir pressure (psig)": p_g, "Underbalance Behrmann (psig)": p_g - db,
             "Underbalance King (psig)": p_g - dk, "Underbalance user (psig)": p_g - f.underbalance - G,
             "Completion fluid density (lb/gal)": (p_g - f.underbalance) / (0.0519481 * self.tvd),
-            "Perforation skin": sp, "Damage skin": sd, "Damage, perf, crush skin": mult * sp + sc + sd,
+            "Perforation skin": sp, "Damage skin": sd, "Damage, perf, crush skin": mult * sp + sc + np.where(beyond, dw, 1.0) * sd,
             "Crush skin": sc, "Perforation skin multiplier": mult, "Mean standoff (in)": so,
             "Gravel pack skin": sgp,
             "Deviation skin": np.where(off, 0.0, sdev), "Partial penetration skin": np.where(off, 0.0, self.partial_skin()),
-            "Invasion depth (in)": ld_in, "Beyond Zone": beyond & self.perf,
+            "Invasion depth (in)": ld_in, "Beyond Zone": beyond & self.perf, "Damage skin weight": np.where(beyond, dw, 1.0),
             "Near-wellbore effective vertical stress (psig)": sv - (p_g - f.underbalance) - G})
 
     def gravel_skin(self, rp_in, n_eff, lp_in):
@@ -635,8 +654,8 @@ class Spot:
         0.98693 for the invaded rows' M x perforation and damage skins (runs 7, 8), cos(deviation) for the gravel-pack
         skin (Run 10a)."""
         m = lg["Perforation skin multiplier"]
-        dam = np.where(m > 1, AGG_D * (m * lg["Perforation skin"] + lg["Damage skin"]),
-                       AGG[0] * lg["Perforation skin"] + AGG_D * lg["Damage skin"])
+        sdw = lg["Damage skin"] * lg["Damage skin weight"]
+        dam = np.where(m > 1, AGG_D * (m * lg["Perforation skin"] + sdw), AGG[0] * lg["Perforation skin"] + AGG_D * sdw)
         return self._factor() * (dam + AGG[1] * lg["Crush skin"]) + self.cos * lg["Gravel pack skin"]
 
     def total_skin(self, lg=None):
@@ -692,7 +711,22 @@ class Spot:
         pb = float(pb)
         cum = np.concatenate([[0.0], np.cumsum(0.5 * (mo[1:] + mo[:-1]) * np.diff(grid))])
         I_to_pr = lambda p: cum[-1] - np.interp(p, grid, cum)
-        if pr <= pb:
+        if not f.extensions:
+            # SPOT IPR Extensions = No (Run 13, every IPR point): a constant PI from the oil mobility at Pr - a
+            # straight line above Pb, Fetkovich (or Vogel) below it on the same PI
+            m_r = float(np.interp(pr, grid, mo))
+            pbx = min(pb, pr)
+            j = C * m_r
+            qbx = j * (pr - pbx)
+
+            def q0(p):
+                p = np.clip(np.asarray(p, float), 0, pr)
+                if f.inflow == "Vogel":
+                    below = qbx + j * pbx / 1.8 * (1 - 0.2 * p / pbx - 0.8 * (p / pbx) ** 2)
+                else:
+                    below = qbx + j * (pbx ** 2 - p ** 2) / (2 * pbx)
+                return np.where(p >= pbx, j * (pr - p), below)
+        elif pr <= pb:
             m_r = float(np.interp(pr, grid, mo))
             if f.inflow == "Vogel":
                 q0 = lambda p: C * m_r * pr / 1.8 * (1 - 0.2 * np.clip(p, 0, pr) / pr - 0.8 * (np.clip(p, 0, pr) / pr) ** 2)
@@ -713,9 +747,21 @@ class Spot:
                 return np.where(p >= pb, above, below)
         if D_nd <= 0:
             return q0
-        # rate-dependent skin D q:  q (den + D q) = den q0  ->  q = (-den + sqrt(den^2 + 4 D den q0)) / (2 D)
-        Dn = D_nd / (self.k_mean * kro * h) * (self.k_mean * self.h_tvd)          # on the same k h basis
-        return lambda p: (-den + np.sqrt(den ** 2 + 4 * Dn * den * np.maximum(q0(p), 0.0))) / (2 * Dn)
+        # rate-dependent skin D q:  q (den + D q) = den q0  ->  q = (-den + sqrt(den^2 + 4 D den q0)) / (2 D).
+        # PROSPER (Run 9, every IPR point): D varies as 1 / oil viscosity at the flowing pressure.
+        Dn = D_nd * self.h_tvd / h                       # D is per STB/d of oil (Run 9) on the layer's h
+        mu_fn = getattr(self.mob_fn, "mu", None)
+        if mu_fn is None:
+            visc = lambda p: np.ones_like(np.asarray(p, float))
+        else:
+            mu_pr = float(np.atleast_1d(mu_fn(np.array([pr])))[0])
+            visc = lambda p: np.atleast_1d(mu_fn(np.maximum(np.atleast_1d(np.asarray(p, float)), 14.7))) / mu_pr
+
+        def q_nd(p):
+            p_ = np.asarray(p, float)
+            d = Dn / visc(p_).reshape(np.shape(p_)) if np.ndim(p_) else Dn / float(visc(p_)[0])
+            return (-den + np.sqrt(den ** 2 + 4 * d * den * np.maximum(q0(p_), 0.0))) / (2 * d)
+        return q_nd
 
     def non_darcy_D(self, lg):
         """Rate-dependent skin coefficient (1 / (STB/d)) - provisional: Forchheimer flow through the crushed zone of
@@ -739,7 +785,7 @@ class Spot:
             beta = 2.33e10 / max(kcf * self.k_mean, 1e-6) ** 1.201
             rc = rp + kct / 12
             a = 9.08e-13 * beta * bo ** 2 * rho * (1 / rp - 1 / rc) / (2 * np.pi * lp) ** 2 / N ** 2
-            D += a * kh / (141.2 * mu_b)
+            D += ND_K * a * kh / (141.2 * mu_b)          # x 0.922: PROSPER's size at Pr (Run 9)
         gp = f.gravel
         if gp and gp.get("type") != "External" and f.non_darcy:    # PROSPER Run 10a: Darcy only otherwise
             kg = gp["k"]
@@ -841,6 +887,11 @@ def blackoil_mobility(model, t_f):
         mo = 1 / (tab["Oil viscosity (cp)"].to_numpy() * tab["Oil FVF (RB/STB)"].to_numpy())
         mw = 1 / (tab["Water viscosity (cp)"].to_numpy() * tab["Water FVF (RB/STB)"].to_numpy())
         return mo, mw, pb
+
+    def mu(p):
+        p = np.atleast_1d(np.asarray(p, float))
+        return model.table(t_f, list(np.maximum(p, 14.7)))["Oil viscosity (cp)"].to_numpy()
+    fn.mu = mu
     return fn
 
 

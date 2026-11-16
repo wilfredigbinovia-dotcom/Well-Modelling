@@ -5977,7 +5977,7 @@ def test_spot_calibration_prosper_runs():
     """The user's one-at-a-time PROSPER runs on the Tutorial 09 file (Layer / Log Results at 2750 psig): casing
     7 in 29 lb/ft (1a), P110 (1b), a second 7-5/8 in string (1c), downhole standoff 0.5 / 1.5 in (2), Synthetic Rock
     (3), carbonate (4), QinetiQ crushed zone (5), double run (6a), discrete invasion 6 / 30 in (7), calculated
-    invasion depths (8a-c, entered as the invasion log), internal gravel pack (10a), Schlumberger UltraJet 4505 HMX
+    invasion depths (8a-c, 8e, entered as the invasion log - perforations past the invaded zone, solids invasion), internal gravel pack (10a), Schlumberger UltraJet 4505 HMX
     (14: 5 spf / 72 deg - Karakas & Tariq constants interpolated - 0.956 in standoff). Total skin and oil AOF within
     0.3 % (1c: 1.5 % - PROSPER treats the last row as single-string), entry hole, damage skin, gravel-pack skin."""
     import dataclasses as dc
@@ -5992,7 +5992,7 @@ def test_spot_calibration_prosper_runs():
         lg = base.log.copy()
         lg["Invasion Depth (in)"] = runs[r]["liquid_invasion"]
         return lg
-    inv = dict(kl=0.005, ks=0.0005)
+    inv = dict(kl=0.5, ks=0.05)                        # Kl 50 %, Ks 5 % (the re-done runs 7, 8)
     cases = {"Run 1a": dict(casing=((7.0, 29.0, "J55", 6.20),)), "Run 1b": dict(casing=((6.7, 10.0, "P110", 6.41),)),
              "Run 1c": dict(casing=((6.7, 10.0, "J55", 6.41), (7.625, 29.7, "J55", 6.875))),
              "Run 2 0.5": dict(standoff=0.5), "Run 2 1.5": dict(standoff=1.5), "Run 3": dict(lp_corr="Synthetic Rock"),
@@ -6000,9 +6000,10 @@ def test_spot_calibration_prosper_runs():
              "Run 6a": dict(perf_method="Double Run"),
              "Run 7a": dict(invasion="Enter discrete invasion depth", inv_depth=6.0, **inv),
              "Run 7b": dict(invasion="Enter discrete invasion depth", inv_depth=30.0, **inv),
-             "Run 8a": dict(invasion="Enter mud invasion log", log=inv_log("Run 8a"), solids_depth=0.15165, **inv),
+             "Run 8a": dict(invasion="Enter mud invasion log", log=inv_log("Run 8a"), solids_depth=0.060359, **inv),
              "Run 8b": dict(invasion="Enter mud invasion log", log=inv_log("Run 8b"), **inv),
              "Run 8c": dict(invasion="Enter mud invasion log", log=inv_log("Run 8c"), **inv),
+             "Run 8e": dict(invasion="Enter mud invasion log", log=inv_log("Run 8e"), **inv),
              "Run 10a": dict(gravel={"type": "Internal", "k": 1.25e5, "top": 9275, "bottom": 9385, "od": 6.41,
                                      "id": 4.5, "method": "Golan 1 phase"}),
              "Run 6c": dict(),
@@ -6020,6 +6021,9 @@ def test_spot_calibration_prosper_runs():
         assert abs(lg["Damage skin"][0] - e["sd0"]) < 0.02 + 1e-4 * e["sd0"], (r, lg["Damage skin"][0])
         assert abs(lg["Damage, perf, crush skin"][0] / e["dpc0"] - 1) < 0.002, (r, lg["Damage, perf, crush skin"][0])
         assert abs(lg["Gravel pack skin"][0] - e["sgp0"]) < 5e-4, (r, lg["Gravel pack skin"][0])
+        if "perf_skin" in e:          # every row: invaded, past the invaded zone (8b, 8e, 8a with solids), the blend
+            assert np.allclose(lg["Perforation skin"], e["perf_skin"], rtol=0, atol=0.08), r
+            assert np.allclose(lg["Damage, perf, crush skin"], e["dpc"], rtol=0, atol=0.06), r
     # the calculated-invasion exposure time: downtime + drilling time x (bottom - MD) / (bottom - top)
     t = runs["Run 8a"]["invasion_time_min"]
     assert abs(t[0] - 17280) < 1e-6 and abs(t[-1] - 2880) < 1e-6 and abs(t[1] - (2880 + 14400 * 109 / 110)) < 0.1
@@ -6106,6 +6110,16 @@ def test_spot_ipr_t09():
     ref = data["base_ipr"]
     for q, p in zip(ref["liquid"][1:], ref["pwf_psig"][1:]):
         assert abs(float(qo(p + G)) / 0.8 / q - 1) < 0.004, (p, q)
+    # Run 9 (Calculate Non-Darcy Skin = Yes) and Run 13 (SPOT IPR Extensions = No) against the same session's base
+    # IPR table: each point within 0.4 % once scaled by the base table's mean offset (that session's table is n / (n - 1)
+    # above the Tutorial's - see spot.py)
+    import dataclasses as dcl
+    runs = data["ipr_runs_2026_11"]
+    off = np.mean([float(qo(p + G)) / 0.8 / q for q, p in list(zip(runs["base"]["liquid"], runs["base"]["pwf_psig"]))[1:]])
+    for key, kw in (("run9_non_darcy", {"non_darcy": True}), ("run13_no_extensions", {"extensions": False})):
+        qx = SP.Spot(dcl.replace(SP.SpotInputs(), **kw), mob).results()["oil_rate"]
+        for q, p in list(zip(runs[key]["liquid"], runs[key]["pwf_psig"]))[1:]:
+            assert abs(float(qx(p + G)) / 0.8 / q / off - 1) < 0.004, (key, p, q)
     # system calculation at 500 psig (Tutorial 05 equipment, PE2, U 8)
     rows = [{"Type": "Xmas Tree", "Measured Depth (ft)": 600},
             {"Type": "Tubing", "Measured Depth (ft)": 1000, "Tubing Inside Diameter (in)": 4.052,

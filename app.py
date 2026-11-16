@@ -3256,7 +3256,7 @@ def spot_ui(o, pr, t_f, wc):
             crush_model=crush, non_darcy=nd, standoff=so if use_so else None, casing=casing or d.casing,
             add_height=add_h, gravel=gp, well_type=wt, horizontal=hz,
             sanding={"d": s_d, "rho_s": s_rho, "angle": s_ang, "rough": s_rough} if sand == "QinetiQ" else None,
-            sw=None if phase_in else _f(r["Water Saturation (fraction)"], 0.25)))
+            sw=None if phase_in else _f(r["Water Saturation (fraction)"], 0.25), extensions=ext == "Yes"))
     st.divider()
     c = st.columns(4)
     pwf_log = num(c[0], "Log results at FBHP (psia)", "spot_pwf_log",
@@ -3274,7 +3274,7 @@ def spot_ui(o, pr, t_f, wc):
         or (k_ == "gun" and any(L.gun.lp_norm != wspot.SpotGun().lp_norm for L in layers))
         or (k_ == "gravel_ext" and gp is not None and gp["type"] == "External")
         or (k_ == "invasion_calc" and inv == "Calculate invasion") or (k_ == "sanding" and sand == "QinetiQ")
-        or (k_ == "non_darcy" and nd) or (k_ == "gravel" and gp is not None) or (k_ == "extensions" and ext == "No")
+        or (k_ == "non_darcy" and nd) or (k_ == "gravel" and gp is not None and nd)
         or (k_ == "ucs_twc" and log_in != "None Available"))]
     if provis:
         st.warning("Not yet calibrated against PROSPER (provisional): " + "; ".join(provis) + ".")
