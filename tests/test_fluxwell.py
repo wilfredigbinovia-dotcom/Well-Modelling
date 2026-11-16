@@ -6024,6 +6024,14 @@ def test_spot_calibration_prosper_runs():
         if "perf_skin" in e:          # every row: invaded, past the invaded zone (8b, 8e, 8a with solids), the blend
             assert np.allclose(lg["Perforation skin"], e["perf_skin"], rtol=0, atol=0.08), r
             assert np.allclose(lg["Damage, perf, crush skin"], e["dpc"], rtol=0, atol=0.06), r
+    # Run 10b, external (underreamed) gravel pack, 120 Darcy, screen ID 4.5 in, Golan: the deviation skin on the
+    # underreamed radius (OD 9 / 12 in) and the gravel-filled tunnel skin (12 in: standoff 5 in, entry hole exact)
+    for od, sdev, sgp in ((9.0, -0.062851, None), (12.0, -0.059369, 0.24792)):
+        gp = {"type": "External", "k": 120000.0, "top": 9275, "bottom": 9385, "od": od, "id": 4.5, "method": "Golan 1 phase"}
+        c = SP.spot_ipr(4000 + G, 0.2, dc.replace(base, gravel=gp), fl.m, 210.0, 2750 + G)
+        assert abs(c.spot_layer["Deviation skin"] - sdev) < 1e-4 and c.spot_log["Mean standoff (in)"][0] == (od - 2) / 2
+        if sgp:
+            assert abs(c.spot_log["Gravel pack skin"][0] - sgp) < 0.001
     # the calculated-invasion exposure time: downtime + drilling time x (bottom - MD) / (bottom - top)
     t = runs["Run 8a"]["invasion_time_min"]
     assert abs(t[0] - 17280) < 1e-6 and abs(t[-1] - 2880) < 1e-6 and abs(t[1] - (2880 + 14400 * 109 / 110)) < 0.1

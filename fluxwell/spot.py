@@ -129,7 +129,7 @@ PROVISIONAL = {
     "multi_casing": "a third casing string (the second-string correction applied again)",
     "synthetic": "Synthetic Rock Lp at other UCS (calibrated at 8000 psi)",
     "gun": "guns other than Tutorial 09's and Run 14's UltraJet 4505 (Lp_API / ln(29665 / cement) scaling)",
-    "gravel_ext": "external (underreamed) gravel pack (PROSPER's -24 perforation skin not reproduced)",
+    "gravel_ext": "external (underreamed) gravel pack: perforation skin, and Lp / entry hole without casing (deviation and gravel-pack skins calibrated)",
     "invasion_calc": "Calculated invasion depths (exposure time and radial sqrt(t) as PROSPER; magnitude from filtration theory)",
     "ucs_twc": "UCS / TWC equations 1-7: published correlations (McNally, Moos, Vernik, Rzhevsky, TWC = 2.5 / 3 UCS)",
     "sanding": "QinetiQ sanding: Shields traction (horizontal perforations) / settling velocity (vertical)",
@@ -148,6 +148,7 @@ TWO_STRINGS = (0.5, 2.93363, 1.05997)   # a second casing string: Lp -> 0.5 Lp -
                                         # entry hole x 1.05997 (Run 1c: 7-5/8 in 29.7 lb/ft over the 6.7 in)
 SYNTHETIC = (0.40962, 31906.0)  # Synthetic Rock Lp: 0.40962 x the conventional with S0 31906 (Run 3, 0.45 x)
 AGG_D = 0.98693                 # total skin weight of the damaged rows' M Sp and damage skin (runs 7, 8)
+GP_EXT = 0.9604                 # external (underreamed) pack: tunnel skin x this (Run 10b)
 GP_C = 0.24834                  # internal gravel pack (no gravel non-Darcy unless Calculate Non-Darcy Skin): S = k (Lp + rw - casing ID / 2) / (C k_gp n A_p)
 TWC_UCS = 1.9049                # PROSPER's generated TWC / UCS (15239.53 psi at 8000 psi)
 INV_BLEND = (0.1, 1.1168, 1.0600)   # Lp past the invaded zone by < 10 % of its depth: blend weights (x / 0.1)^p for
@@ -601,13 +602,13 @@ class Spot:
         if not gp:
             return out
         in_gp = (self.md >= gp["top"] - 1e-6) & (self.md < gp["bottom"] - 1e-6)
+        ap = np.pi * (rp_in / 12) ** 2
         if gp.get("type") == "External":
-            r_o, r_i = gp["od"] / 24.0, max(gp.get("id", gp["od"] * 0.6), 0.1) / 24.0
-            out[in_gp] = self.k_row[in_gp] / gp["k"] * np.log(max(r_o / r_i, 1.0))
+            # PROSPER (Run 10b, OD 9 and 12 in): the gravel-filled tunnel, Darcy along Lp, x 0.9604
+            out[in_gp] = (GP_EXT * self.k_row * (np.asarray(lp_in) / 12) / (GP_C * gp["k"] * n_eff * ap))[in_gp]
             return out
         cas_id = min(f.casing, key=lambda c: c[0])[3] if f.casing else gp["od"]
         L = (np.asarray(lp_in) + np.maximum(self.rw_row * 12 - cas_id / 2, 0.0)) / 12
-        ap = np.pi * (rp_in / 12) ** 2
         out[in_gp] = (self.k_row * L / (GP_C * gp["k"] * n_eff * ap))[in_gp]
         return out
 
@@ -626,15 +627,26 @@ class Spot:
         th = np.degrees(np.arccos(self.cos)) if dev else 0.0
         h = len(self.md) * self.cos
         extra = f.add_height if f.lower_completion != "Cased and Perforated" else 0.0
+        rw = self.rw_geometry()
         if self.n_perf >= len(self.md) and extra <= 0:
-            sd = wcomp.deviation_skin(min(th, 75.0), h, f.rw, f.kv_kh, True) if dev else 0.0
+            sd = wcomp.deviation_skin(min(th, 75.0), h, rw, f.kv_kh, True) if dev else 0.0
             self._geo = (sd, 0.0)
         else:
             span = int(np.nonzero(self.perf)[0][-1]) - self.first + 1
             r = wcomp.cinco_slant_pp(min(th, 75.0), h + extra, max(span, 1) * self.cos, self.first * self.cos,
-                                     f.rw, f.kv_kh)
+                                     rw, f.kv_kh)
             self._geo = (r["slant"], r["penetration"])
         return self._geo
+
+    def rw_geometry(self):
+        """Wellbore radius of the deviation / partial-penetration skins: the underreamed radius with an external
+        gravel pack (Run 10b, OD 9 and 12 in: Sdev to 1e-4), weighted by the rows it covers."""
+        gp = self.f.gravel
+        if gp and gp.get("type") == "External":
+            ext = (self.md >= gp["top"] - 1e-6) & (self.md < gp["bottom"] - 1e-6)
+            if ext.mean() >= 0.5:
+                return max(gp["od"] / 24.0, self.f.rw)
+        return self.f.rw
 
     def deviation_skin(self):
         return self._geometry()[0]
