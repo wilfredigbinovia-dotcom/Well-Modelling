@@ -11,6 +11,7 @@ The app is being rebuilt tab by tab. Current tabs:
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -101,6 +102,7 @@ from fluxwell import coning as wcone
 from fluxwell import woe as wwoe
 from fluxwell import units as wu
 from fluxwell import ui_units as wuu
+from fluxwell import ui_case as wcase
 try:                                    # PROSPER-style grids with per-cell locking; optional dependency
     from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
     HAVE_AGGRID = True
@@ -478,6 +480,7 @@ schematic_svg = None
 ss["_units"] = {q_: (val("unit_" + q_, wu.default_unit(q_)) if val("unit_" + q_, wu.default_unit(q_)) in wu.QUANTITIES[q_]
                      else wu.default_unit(q_)) for q_ in wu.QUANTITIES}
 wuu.install()
+wcase.install()                 # Title Case on every label (after the units wrappers, so it runs first)
 
 TAB_NAMES = ["1 · Options Summary", "2 · PVT Input Data", "3 · IPR Data", "4 · Equipment Data", "5 · VLP",
              "6 · Calculation", "7 · Design", "8 · Stimulation", "9 · Well Operating Envelope",
@@ -4516,12 +4519,12 @@ def type_grid(name, types, active, numeric_cols, select_cols=None, height=None):
         kw = dict(editable=JsCode(f"function(p){{{is_open(c_)}}}"),
                   cellStyle=JsCode(f"function(p){{const ok=(function(){{{is_open(c_)}}})(); "
                                    f"return ok ? {{'backgroundColor': ''}} : {{'backgroundColor': '{LOCKED_CELL}'}};}}"))
+        kw.setdefault("headerName", wcase.title_case(heads_.get(c_, c_)))
         if c_ in select_cols:
             gb.configure_column(c_, minWidth=150, flex=1.8, cellEditor="agSelectCellEditor",
                                 cellEditorParams={"values": [""] + list(select_cols[c_])}, **kw)
         else:
             if c_ in heads_:
-                kw["headerName"] = heads_[c_]
                 kw["valueFormatter"] = JsCode("function(p){return (p.value===null||p.value===undefined||p.value==='')"
                                               " ? '' : String(Number(Number(p.value).toPrecision(6)));}")
             gb.configure_column(c_, type=["numericColumn"],
@@ -7701,24 +7704,80 @@ def sys_plot_top(results, kind, max_curves=12, full=False):
     return fig
 
 
-def sens_plot(tab, var_names, labels, qcol):
-    fig, ax = plt.subplots(figsize=(8, 4.6))
-    x = var_names[0]
-    others = var_names[1:]
-    groups = tab.groupby(others) if others else [((), tab)]
+def bare_label(label):
+    """'Top node pressure (psia)' -> 'Top node pressure': the unit is the one chosen on the Units tab."""
+    return re.sub(r"\s*\([^()]*\)\s*$", "", str(label)) or str(label)
+
+
+def _unit_text(label):
+    sp_ = wu.split_label(label)
+    return f" {sp_[2]}" if sp_ is not None else ""
+
+
+def sens_plot(tab, x, y, param=None, fixed=None):
+    """PROSPER's sensitivity plot: y against the x variable, one curve per value of the parameter variable, the
+    other variable(s) held at the chosen value."""
+    t = tab
+    for c_, v_ in (fixed or {}).items():
+        t = t[np.isclose(t[c_].astype(float), float(v_))]
+    t = t[pd.to_numeric(t[y], errors="coerce").notna()]
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    groups = t.groupby(param) if param else [(None, t)]
     cmap = plt.get_cmap("tab10")
+    markers = "osD^v<>Pp*h"
     for i, (key, g) in enumerate(groups):
         if i >= 12:
             break
-        key = key if isinstance(key, tuple) else (key,)
-        lab = ", ".join(f"{labels[o].split(' (')[0]} = {v:g}" for o, v in zip(others, key)) or "solution"
+        key = key[0] if isinstance(key, tuple) else key
+        lab = (f"Curve {i + 1}: {bare_label(param)} = {key:g}{_unit_text(param)}" if param else "Solution")
         g = g.sort_values(x)
-        ax.plot(g[x], g[qcol], "-o", ms=4, color=cmap(i % cmap.N), label=lab)
-    ax.set_xlabel(labels[x]); ax.set_ylabel(qcol)
-    ax.set_title("Sensitivity: solution rate", fontsize=10)
-    ax.legend(fontsize=8)
+        ax.plot(g[x].astype(float), g[y].astype(float), "-", marker=markers[i % len(markers)], ms=5,
+                color=cmap(i % cmap.N), label=lab)
+    ax.set_xlabel(x); ax.set_ylabel(y)
+    if fixed:
+        ax.set_title("; ".join(f"{bare_label(c_)} = {v_:g}{_unit_text(c_)}" for c_, v_ in fixed.items()), fontsize=9)
+    ax.grid(True, ls="--", alpha=0.5)
+    if param:
+        ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=min(3, max(1, t[param].nunique())))
     fig.tight_layout()
     return fig
+
+
+def sens_plot_panel(tab, names, qcol):
+    """Axes variables as PROSPER's sensitivity plot: Y from the results, X and the parameter from the sensitivity
+    variables, any other variable fixed at one of its values."""
+    st.markdown("**Sensitivity plot**")
+    ys = [c_ for c_ in tab.columns if c_ not in names and pd.api.types.is_numeric_dtype(tab[c_])]
+    c = st.columns(3 if len(names) > 1 else 2)
+    y = c[0].selectbox("Y axis variable", ys, index=ys.index(qcol) if qcol in ys else 0, key="sens_plot_y",
+                       format_func=bare_label)
+    x = c[1].selectbox("X axis variable", names, key="sens_plot_x", format_func=bare_label)
+    param = None
+    rest = [n_ for n_ in names if n_ != x]
+    if rest:
+        param = c[2].selectbox("Parameter variable", rest + ["None"], key="sens_plot_par",
+                               format_func=lambda n_: n_ if n_ == "None" else bare_label(n_))
+        param = None if param == "None" else param
+    fixed = {}
+    others = [n_ for n_ in names if n_ not in (x, param)]
+    if others:
+        cf = st.columns(len(others))
+        for k_, n_ in enumerate(others):
+            vals_ = sorted(pd.unique(tab[n_].astype(float)))
+            sp_ = wu.split_label(n_)
+            show_ = (lambda v, sp_=sp_: f"{v:g}") if sp_ is None else (
+                lambda v, sp_=sp_: f"{float(wu.convert(v, sp_[1], sp_[2], wu.display_unit(sp_[1], sp_[2], ss['_units']))):g}")
+            fixed[n_] = cf[k_].selectbox(bare_label(n_), vals_, key=f"sens_plot_fix_{k_}_{n_}", format_func=show_)
+    if param and param in rest:
+        sel_ = st.multiselect("Curves shown", sorted(pd.unique(tab[param].astype(float))),
+                              default=sorted(pd.unique(tab[param].astype(float))), key=f"sens_plot_show_{param}",
+                              format_func=(lambda v: f"{v:g}") if wu.split_label(param) is None else (
+                                  lambda v: f"{float(wu.convert(v, wu.split_label(param)[1], wu.split_label(param)[2], wu.display_unit(wu.split_label(param)[1], wu.split_label(param)[2], ss['_units']))):g}"))
+        tab = tab[tab[param].astype(float).isin(sel_)]
+    if tab.empty:
+        st.caption("No cases to plot.")
+        return
+    st.pyplot(sens_plot(tab, x, y, param, fixed), clear_figure=True)
 
 
 def _fmt_result(v):
@@ -10441,7 +10500,8 @@ with tabs[5]:
                                         {k_: v_ for k_, v_ in DIL_VARS.items() if k_ != "glr_dil"})
                     sens = {}
                     if sens_on:
-                        chosen = st.multiselect("Variables (up to 3)", list(var_defs), format_func=var_defs.get,
+                        chosen = st.multiselect("Variables (up to 3)", list(var_defs),
+                                                format_func=lambda k_: bare_label(var_defs[k_]),
                                                 max_selections=3, key="sys_vars")
                         tub_id = float(eqd["downhole"][1].query("Type == 'Tubing'")["Flow ID (in)"].iloc[-1])
                         cur = {**base, "pr": ipr_arg("pr"), "j": ipr_arg("j"), "skin": ipr_arg("skin"),
@@ -10478,7 +10538,7 @@ with tabs[5]:
                         for v_ in chosen:
                             with st.container(border=True):
                                 u_lab_ = unit_of(var_defs[v_]).strip(" ()")
-                                st.markdown(f"**{var_defs[v_]}** - current "
+                                st.markdown(f"**{bare_label(var_defs[v_])}** - current "
                                             + (f"{cur.get(v_):.6g} {u_lab_}".strip() if cur.get(v_) is not None else "—"))
                                 how = st.radio("Values", ["Enter values", "Generate values"], horizontal=True,
                                                key=f"sys_how_{v_}")
@@ -10634,19 +10694,13 @@ with tabs[5]:
                             st.dataframe(tab_.style.format(precision=2, na_rep="—"), hide_index=True, width="stretch")
                             st.download_button("Download sensitivity results (CSV)", tab_.to_csv(index=False).encode(),
                                                "system_sensitivity.csv")
-                            cc = st.columns([1.2, 1])
-                            with cc[0]:
-                                full_s_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full_sens")
-                                st.pyplot(sys_plot(res, kind, full=full_s_), clear_figure=True)
-                                if len(res) > 12:
-                                    st.caption("IPR/VLP plot shows the first 12 cases.")
-                            with cc[1]:
-                                names_ = [out["labels"][k_] for k_ in out["vars"]]
-                                if qcol in tab_:
-                                    st.pyplot(sens_plot(tab_, names_, {n_: n_ for n_ in names_}, qcol), clear_figure=True)
-                                    if out.get("lift") is not None and "Oil rate (STB/d)" in tab_ and len(names_) == 1:
-                                        st.pyplot(sens_plot(tab_, names_, {n_: n_ for n_ in names_}, "Oil rate (STB/d)"),
-                                                  clear_figure=True)
+                            full_s_ = st.toggle("Show the full rate range (to the AOF)", key="sys_plot_full_sens")
+                            st.pyplot(sys_plot(res, kind, full=full_s_), clear_figure=True)
+                            if len(res) > 12:
+                                st.caption("IPR/VLP plot shows the first 12 cases.")
+                            names_ = [out["labels"][k_] for k_ in out["vars"]]
+                            if qcol in tab_:
+                                sens_plot_panel(tab_, names_, qcol)
                             pick = st.selectbox("Case details", range(len(res)), key=f"sys_case_{len(res)}",
                                                 format_func=lambda i: f"Case {i + 1}: " + ", ".join(
                                                     f"{out['labels'][k_].split(' (')[0]} = {v_:g}"
@@ -11892,7 +11946,9 @@ def _woe_tubing_default(eqd):
     if od_ is None or od_ <= id_ + 0.05:     # no (or inconsistent) OD: the catalog tubing with the nearest ID
         lab_ = min(wtub.TUBING, key=lambda k_: abs(wtub.TUBING[k_][0] - 2 * wtub.TUBING[k_][2] - id_))
         od_, _, wall_ = wtub.TUBING[lab_]
-    wall_ = max((od_ - id_) / 2, 0.05) if abs(od_ - 2 * wall_ - id_) > 0.01 else wall_
+        wall_ = max((od_ - id_) / 2, 0.05) if abs(od_ - 2 * wall_ - id_) > 0.01 else wall_
+    else:
+        wall_ = max((od_ - id_) / 2, 0.05)
     lab_ = next((k_ for k_, (o_, w_, t_) in wtub.TUBING.items() if abs(o_ - od_) < 1e-3 and abs(t_ - wall_) < 0.006),
                 WOE_TUBE_CUSTOM)
     packer_ = float(tub_["MD bottom (ft)"].max()) if len(tub_) else 5000.0
